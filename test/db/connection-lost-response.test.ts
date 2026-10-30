@@ -46,7 +46,8 @@ const viaProxy = new URL(TEST_API_URL); viaProxy.hostname = '127.0.0.1'; viaProx
 process.env.DATABASE_URL = viaProxy.toString();
 const { createApp } = await import('../../src/app.js');
 const { pool } = await import('../../src/db/pool.js');
-const { CONNECTION_LOST_MESSAGE } = await import('../../src/http/errors.js');
+// Literal, no importado del código: el contrato del mensaje (resultado desconocido, D-20).
+const CONNECTION_LOST_MESSAGE = 'la conexión con la base se cortó; el resultado es desconocido: reintentar con la misma Idempotency-Key';
 
 const server: Server = createApp({ internalToken: 'test-token' }).listen(0);
 const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;

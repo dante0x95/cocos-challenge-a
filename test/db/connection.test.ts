@@ -6,8 +6,10 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { Server } from 'node:http';
 import { createApp } from '../../src/app.js';
 import { pool } from '../../src/db/pool.js';
-import { CONNECTION_LOST_MESSAGE } from '../../src/http/errors.js';
 import { admin, apiClient, newUser } from '../support/db.js';
+
+// Literal, no importado del código: el contrato del mensaje (resultado desconocido, D-20).
+const CONNECTION_LOST_MESSAGE = 'la conexión con la base se cortó; el resultado es desconocido: reintentar con la misma Idempotency-Key';
 
 let server: Server;
 let base: string;

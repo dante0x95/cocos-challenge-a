@@ -2,7 +2,11 @@
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { CONNECTION_LOST_MESSAGE, connectionLostPhase, errorHandler, fromDbError } from '../../src/http/errors.js';
+import { connectionLostPhase, errorHandler, fromDbError } from '../../src/http/errors.js';
+
+// El contrato con el cliente, escrito acá y no importado del código: dice que el resultado es
+// desconocido y cómo resolverlo (D-20). Nunca que la orden no se grabó.
+const CONNECTION_LOST_MESSAGE = 'la conexión con la base se cortó; el resultado es desconocido: reintentar con la misma Idempotency-Key';
 
 describe('fromDbError: tiempos de conexión del pool (D-20)', () => {
   // pg-pool 3.x no les pone código: se reconocen por el mensaje.

@@ -44,6 +44,8 @@ const sha256 = (s: string) => createHash('sha256').update(s).digest('hex');
 export async function bootstrap(opts: BootstrapOptions): Promise<BootstrapResult> {
   const log = opts.log ?? ((m: string) => console.log(m));
   const dbDir = resolve(opts.dbDir ?? process.env.DB_DIR ?? 'db');
+  // Sin query_timeout, a propósito: verify_ledger es una sola sentencia sobre todos los usuarios y
+  // puede tardar minutos en una base grande. El plazo local del driver es de la API (D-20).
   const db = new pg.Pool({ connectionString: opts.adminUrl, max: 2, application_name: 'cocos-bootstrap' });
   db.on('error', () => undefined);   // una conexión ociosa que se corta no tumba el proceso
   try {

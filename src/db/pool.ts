@@ -1,9 +1,11 @@
 // Pool de node-postgres.
 //
 // Tiempos (D-20): cada escritura es una sola sentencia (`SELECT app.<función>(...)`) y la base
-// hace cumplir su presupuesto (statement_timeout del rol api, lock_timeout de la función). Lo
-// único que la base no ve es la espera por una conexión libre del pool: la acota
-// connectionTimeoutMillis.
+// hace cumplir su presupuesto (statement_timeout del rol api, lock_timeout de la función). Lo que
+// la base no ve: la espera por una conexión libre del pool (connectionTimeoutMillis) y una
+// respuesta que nunca llega porque la red descartó paquetes sin cerrar el socket (query_timeout,
+// issue #11). Al vencer el plazo local, pg-pool destruye la conexión en vez de devolverla al pool;
+// sin él, la consulta esperaba para siempre y el slot del pool no volvía.
 //
 // Dinero y cantidades: NINGÚN parser que devuelva Number para int8 (OID 20) ni numeric
 // (OID 1700). node-postgres los entrega como string por defecto y acá no se registra nada
@@ -20,6 +22,7 @@ export const pool = new pg.Pool({
   connectionString: config.DATABASE_URL,
   max: config.PG_POOL_MAX,
   connectionTimeoutMillis: config.PG_CONNECT_TIMEOUT_MS,
+  query_timeout: config.PG_QUERY_TIMEOUT_MS,
   application_name: 'cocos-api',
   // Sondas TCP sobre las conexiones ociosas: un peer que desapareció sin cerrar (failover, red)
   // termina detectado y descartado. Con los defaults de Linux tarda minutos, no segundos: a una

@@ -361,6 +361,14 @@ describe('bootstrap', () => {
         .toEqual({ outcome: 'ok', status: 'CANCELLED', cancel_reason: 'USER' });
     }, 120_000);
 
+    it('el pool del bootstrap no tiene plazo local: una función que tarda más que PG_QUERY_TIMEOUT_MS se aplica igual (issue #11)', async () => {
+      process.env.PG_QUERY_TIMEOUT_MS = '1000';
+      try {
+        const r = await deployFrom(withExtraFunction('015_test_lento.sql', 'SELECT pg_sleep(2);'));
+        expect(r.functions).toContain('015_test_lento.sql');
+      } finally { delete process.env.PG_QUERY_TIMEOUT_MS; }
+    }, 60_000);
+
     it('un bootstrap que falla después de la migración no deja nada aplicado: ni la columna ni las funciones nuevas, y las anteriores siguen cancelando', async () => {
       const lim = (await placeLimit('interrumpido')).order_id as string;
       await expect(deployFrom(withExtraFunction('015_test_interrupcion.sql',

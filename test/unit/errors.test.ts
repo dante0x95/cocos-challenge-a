@@ -19,6 +19,12 @@ describe('fromDbError: tiempos de conexión del pool (D-20)', () => {
     expect({ status: e.status, code: e.code, retryAfter: e.retryAfter }).toEqual({ status: 503, code: 'TIMEOUT', retryAfter: 1 });
   });
 
+  it('"Query read timeout" (plazo local del driver, issue #11) → 503 TIMEOUT con la guía de resultado desconocido', () => {
+    const e = fromDbError(new Error('Query read timeout'));
+    expect({ status: e.status, code: e.code, retryAfter: e.retryAfter }).toEqual({ status: 503, code: 'TIMEOUT', retryAfter: 1 });
+    expect(e.message).toMatch(/desconocido.*misma Idempotency-Key/);
+  });
+
   it('el mismo mensaje con un código de Postgres no se toma como timeout del pool', () => {
     expect(fromDbError(Object.assign(new Error('timeout exceeded when trying to connect'), { code: 'XX000' })).status).toBe(500);
   });

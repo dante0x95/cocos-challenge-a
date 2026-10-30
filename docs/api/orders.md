@@ -25,7 +25,7 @@ Toda la decisión (saldo, tenencia, precio, estado) la toma `app.place_order` en
 | `side` | `BUY` · `SELL` · `CASH_IN` · `CASH_OUT` |
 | `type` | `MARKET` (por defecto) · `LIMIT` |
 | `instrumentid` | obligatorio en `BUY`/`SELL`; prohibido en cash (se usa ARS) |
-| `size` **o** `amount` | exactamente uno. `size`: acciones, entero > 0. `amount`: pesos, string > 0 con hasta 2 decimales; para `BUY`/`SELL` se compra o vende el máximo entero de acciones que alcanza: `size = floor(amount / precio)`, con el `close` en MARKET y el límite en LIMIT ([D-11](../decisiones.md#d-11)). La orden se graba con ese `size` y su `amount` es `size × precio`, no el monto pedido; si no alcanza para una acción, `400`. Para cash, solo `amount` (máximo 21474836.47). |
+| `size` **o** `amount` | exactamente uno. `size`: acciones, entero > 0. `amount`: pesos, string > 0 con hasta 2 decimales; para `BUY`/`SELL` se compra o vende el máximo entero de acciones que alcanza: `size` = división entera de `amount` por el precio, en centavos, con el `close` en MARKET y el límite en LIMIT ([D-11](../decisiones.md#d-11)). La orden se graba con ese `size` y su `amount` es `size × precio`, no el monto pedido; si no alcanza para una acción, `400`. Para cash, solo `amount` (máximo 21474836.47). |
 | `price` | obligatorio en `LIMIT`, prohibido en `MARKET`. String > 0 con hasta 2 decimales: se rechaza, no se redondea. |
 
 No se aceptan campos de más.

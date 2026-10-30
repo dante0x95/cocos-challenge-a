@@ -148,7 +148,10 @@ BEGIN
   ELSIF is_cash THEN
     v_qty := p_amount * 100;
   ELSE
-    v_qty := floor(p_amount / price);
+    -- División entera exacta en centavos (D-11, D-13). `floor(p_amount / price)` no sirve: la
+    -- división numeric redondea el cociente a 16 dígitos significativos antes del floor, y con
+    -- amount = 2 × price − 0,01 daba 2 en vez de 1.
+    v_qty := div(p_amount * 100, price * 100);
     IF v_qty <= 0 THEN
       RAISE EXCEPTION 'amount % no alcanza para una acción a %', p_amount, price USING ERRCODE = 'APP02';
     END IF;

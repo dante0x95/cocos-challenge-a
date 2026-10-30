@@ -95,7 +95,8 @@ La migración impone una cotización por instrumento y día (`UNIQUE (instrument
 
 - Por instrumento, en orden de `balance_seq`. Una compra suma su importe al costo. Una venta deja `costo × (qty − s) / qty`, redondeado **half-even**. Al cerrar la posición, el costo vuelve a 0.
 - El costo se lleva en **micro-ARS** enteros (10⁻⁶ ARS) y el cash en centavos. Así nunca hay coma flotante, y el redondeo ocurre en un solo lugar, después de cada venta.
-- Lo que se afirma es **determinismo**: el mismo resultado siempre, para cualquier historia. No se afirma exactitud de la fracción infinita (100 / 3 no tiene representación finita).
+- Lo que se afirma es **determinismo**: el mismo resultado siempre, para cualquier historia.
+- **Toda división que decide una cantidad o un importe es entera** (`div`, `mod`, `app.div_half_even`): la cantidad por monto ([D-11](#d-11)) y el costo tras una venta ([D-09](#d-09)). Las divisiones de presentación (porcentajes de la respuesta) redondean a su escala, en `BigInt`, con half-even. No se afirma exactitud de la fracción infinita (100 / 3 no tiene representación finita).
 - Hay una sola implementación en el sistema (`app.c_state`) y un oráculo independiente en los tests ([D-22](#d-22)).
 
 <a id="d-10"></a>
@@ -111,7 +112,7 @@ La migración impone una cotización por instrumento y día (`UNIQUE (instrument
 <a id="d-11"></a>
 ### D-11 — Orden por monto en pesos
 
-`POST /orders` acepta `size` **o** `amount`, nunca los dos. Con `amount`, la cantidad es `floor(amount / precio)`: el máximo entero, sin fracciones, como pide el enunciado. El precio es el `close` vigente para MARKET y el límite para LIMIT. Se calcula dentro de la función que decide, **bajo el lock** y con el mismo precio con que se ejecuta. Si da 0, responde `400` y no se graba orden. La orden se guarda con el `size` calculado. Para cash solo se acepta `amount`.
+`POST /orders` acepta `size` **o** `amount`, nunca los dos. Con `amount`, la cantidad es la **división entera** de `amount` por el precio, los dos en centavos: el máximo entero, sin fracciones, como pide el enunciado. No es `floor(amount / precio)`: la división `numeric` de Postgres redondea el cociente a 16 dígitos significativos antes de que `floor` lo vea, y con `amount = 2 × precio − 0,01` daba 2 acciones, un centavo más que el presupuesto. `div(amount × 100, precio × 100)` es exacta. El tope de [D-14](#d-14) es sobre el importe que resulta (`size × precio`), no sobre el monto pedido. El precio es el `close` vigente para MARKET y el límite para LIMIT. Se calcula dentro de la función que decide, **bajo el lock** y con el mismo precio con que se ejecuta. Si da 0, responde `400` y no se graba orden. La orden se guarda con el `size` calculado. Para cash solo se acepta `amount`.
 
 <a id="d-12"></a>
 ### D-12 — Ejecución de MARKET y LIMIT

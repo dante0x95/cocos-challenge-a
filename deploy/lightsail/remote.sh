@@ -6,20 +6,26 @@
 #
 #   compose.yml, release.env              lo que atiende (release.env: IMAGE, RELEASE, ENVIRONMENT)
 #   compose.next.yml, release.next.env    lo que se va a desplegar (los escribe bootstrap)
+#   bootstrap.ok                          copia de release.next.env, escrita solo cuando el
+#                                         bootstrap de esa versión terminó bien: la exige switch
 #   compose.previous.yml, release.previous.env
 #                                         lo que atendía antes del último cambio (switch)
 #   db.env, migrate.env, api.env          secretos (setup.sh, 600)
 #
 #   remote.sh current <entorno>
-#       release=<sha> e image=<ref> de lo que atiende; vacíos si el entorno nunca se desplegó.
+#       first=false, release=<sha> e image=<ref> de lo que atiende; first=true (y los dos vacíos)
+#       solo si no hay release.env: el entorno nunca se desplegó. Un release.env sin un RELEASE y
+#       una IMAGE válidos (vacío, truncado, editado a mano) frena: no es un primer deploy.
 #   remote.sh pull <entorno> <ref> <usuario>        (stdin: el token de GHCR)
 #       Baja la imagen con una configuración de docker temporal, que se borra al salir: el token
 #       no queda en el servidor (ni en ~/.docker ni en los argumentos de ningún proceso).
 #   remote.sh bootstrap <entorno> <ref> <sha>      (stdin: el compose.yml del release)
 #       Con la imagen nueva y la API anterior todavía atendiendo: levanta la base (con el compose
-#       nuevo) y corre el bootstrap. Si falla, sale con 1 y no cambió de versión.
+#       nuevo) y corre el bootstrap. Si falla, sale con 1 y no cambió de versión. Borra la
+#       confirmación anterior al empezar y escribe bootstrap.ok solo si el bootstrap terminó bien.
 #   remote.sh switch <entorno> <ref> <sha>
-#       Exige el bootstrap de esa misma imagen y commit, guarda lo que atiende como previous y
+#       Exige el bootstrap terminado de esa misma imagen y commit (bootstrap.ok, que consume: otro
+#       cambio necesita otro bootstrap), guarda lo que atiende como previous y
 #       recrea la API con la imagen nueva; espera su healthcheck.
 #   remote.sh rollback <entorno> <ref anterior> <sha anterior>
 #       Vuelve a lo que atendía antes del deploy, sin correr el bootstrap anterior. Sin release
@@ -42,7 +48,8 @@ use_env() {
     [ -f "$DIR/$f" ] || fail "falta $DIR/$f: el servidor no está preparado (deploy/lightsail/setup.sh)"
   done
 }
-valid_ref() { [[ "$1" =~ ^[a-z0-9.:/_-]+@sha256:[0-9a-f]{64}$ ]] || fail "la imagen '$1' no es una referencia por digest"; }
+REF_RE='^[a-z0-9.:/_-]+@sha256:[0-9a-f]{64}$'
+valid_ref() { [[ "$1" =~ $REF_RE ]] || fail "la imagen '$1' no es una referencia por digest"; }
 valid_sha() { [[ "$1" =~ ^[0-9a-f]{40}$ ]] || fail "'$1' no es el SHA de un commit"; }
 
 # docker compose sobre el proyecto del entorno, con el compose y el release.env de un estado:
@@ -60,13 +67,16 @@ same_release() {   # archivo, ref, sha
 
 current() {
   use_env "$1"
-  if [ -f "$DIR/release.env" ]; then
-    echo "release=$(field RELEASE "$DIR/release.env")"
-    echo "image=$(field IMAGE "$DIR/release.env")"
-  else
-    echo "release="
-    echo "image="
+  local release image
+  if [ ! -e "$DIR/release.env" ]; then
+    printf 'first=true\nrelease=\nimage=\n'
+    return 0
   fi
+  release="$(field RELEASE "$DIR/release.env")"
+  image="$(field IMAGE "$DIR/release.env")"
+  [[ "$release" =~ ^[0-9a-f]{40}$ ]] && [[ "$image" =~ $REF_RE ]] \
+    || fail "$DIR/release.env no tiene un RELEASE y una IMAGE válidos: revisarlo a mano (no es un primer deploy)"
+  printf 'first=false\nrelease=%s\nimage=%s\n' "$release" "$image"
 }
 
 pull() {
@@ -90,7 +100,7 @@ bootstrap() {
   valid_ref "$ref"
   valid_sha "$sha"
   docker image inspect "$ref" >/dev/null 2>&1 || fail "no está la imagen $ref (falta el paso pull)"
-  rm -f "$DIR/compose.next.yml" "$DIR/release.next.env"
+  rm -f "$DIR/bootstrap.ok" "$DIR/compose.next.yml" "$DIR/release.next.env"
   cat > "$DIR/compose.next.yml"
   [ -s "$DIR/compose.next.yml" ] || fail "no llegó el compose.yml del release"
   printf 'IMAGE=%s\nRELEASE=%s\nENVIRONMENT=%s\n' "$ref" "$sha" "$ENV" > "$DIR/release.next.env"
@@ -98,6 +108,7 @@ bootstrap() {
   compose next up -d --wait --wait-timeout "$WAIT" db || fail "la base de $ENV no quedó sana"
   echo "== $ENV: bootstrap con $ref"
   compose next run --rm -T --no-deps migrate || fail "el bootstrap falló: no se cambió de versión"
+  cp "$DIR/release.next.env" "$DIR/bootstrap.ok"
 }
 
 switch() {
@@ -105,8 +116,8 @@ switch() {
   local ref="$2" sha="$3"
   valid_ref "$ref"
   valid_sha "$sha"
-  same_release "$DIR/release.next.env" "$ref" "$sha" \
-    || fail "el bootstrap de $ref ($sha) no corrió en $ENV: no se cambia de versión"
+  same_release "$DIR/release.next.env" "$ref" "$sha" && cmp -s "$DIR/release.next.env" "$DIR/bootstrap.ok" \
+    || fail "el bootstrap de $ref ($sha) no terminó bien en $ENV: no se cambia de versión"
   rm -f "$DIR/compose.previous.yml" "$DIR/release.previous.env"
   if [ -f "$DIR/release.env" ]; then
     cp -p "$DIR/compose.yml" "$DIR/compose.previous.yml"
@@ -114,6 +125,7 @@ switch() {
   fi
   mv "$DIR/compose.next.yml" "$DIR/compose.yml"
   mv "$DIR/release.next.env" "$DIR/release.env"
+  rm -f "$DIR/bootstrap.ok"
   echo "== $ENV: API con $ref ($sha)"
   compose "" up -d --wait --wait-timeout "$WAIT" --no-deps api || fail "la API de $sha no quedó sana"
 }

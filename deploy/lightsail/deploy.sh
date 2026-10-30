@@ -10,7 +10,8 @@
 #                        del environment): escribe la clave y la configuración de SSH, con la
 #                        clave del host fijada (StrictHostKeyChecking yes). Solo este paso los lee.
 #   deploy.sh current    release= e image= de lo que atiende el entorno, y first=true si nunca
-#                        se desplegó (first=false si no), en $GITHUB_OUTPUT.
+#                        se desplegó (first=false si no), en $GITHUB_OUTPUT. Lo decide el
+#                        servidor (no hay release.env); un release.env inválido frena acá.
 #   deploy.sh pull       Baja la imagen en el servidor, con GITHUB_TOKEN por stdin (nunca en un
 #                        argumento) y GITHUB_ACTOR.
 #   deploy.sh bootstrap  Manda deploy/lightsail/compose.yml del commit y corre el bootstrap con la
@@ -61,16 +62,15 @@ EOF
 current() {
   local out release image first
   out="$(remote current "${ENVIRONMENT:?}" </dev/null)" || fail "no se pudo leer qué atiende $ENVIRONMENT"
+  first="$(sed -n 's/^first=//p' <<<"$out")"
   release="$(sed -n 's/^release=//p' <<<"$out")"
   image="$(sed -n 's/^image=//p' <<<"$out")"
-  if [ -n "$release" ]; then
-    [ -n "$image" ] || fail "$ENVIRONMENT atiende $release sin imagen registrada"
-    echo "== $ENVIRONMENT atiende $release ($image)"
-    first=false
-  else
-    echo "== $ENVIRONMENT no tiene release: es su primer deploy"
-    first=true
-  fi
+  # El servidor dice si es el primer deploy; acá solo se exige que lo demás coincida.
+  case "$first:$([ -n "$release" ] && echo con || echo sin):$([ -n "$image" ] && echo con || echo sin)" in
+    true:sin:sin)  echo "== $ENVIRONMENT no tiene release: es su primer deploy" ;;
+    false:con:con) echo "== $ENVIRONMENT atiende $release ($image)" ;;
+    *) fail "respuesta inesperada del servidor sobre $ENVIRONMENT: $(tr '\n' ' ' <<<"$out")" ;;
+  esac
   if [ -n "${GITHUB_OUTPUT:-}" ]; then
     { echo "release=$release"; echo "image=$image"; echo "first=$first"; } >> "$GITHUB_OUTPUT"
   fi

@@ -888,7 +888,8 @@ describe('release-gate.sh', () => {
 // comando que recibe en esta máquina (con el stdin que recibe), así que remote.sh corre de verdad.
 // `docker` anota cada llamada (con IMAGE y RELEASE del --env-file, si hay) y lleva en
 // <entorno>/.running qué API atiende: `up ... api` la cambia, `rm ... api` la saca. `curl` responde
-// /health de esa API: ok con su RELEASE, salvo que esté en BROKEN (503, ok: false), y falla sin API.
+// /health de esa API: ok con su RELEASE (o con SERVED, si está: otro release atendiendo), salvo
+// que esté en BROKEN (503, ok: false), y falla sin API.
 // DOCKER_FAIL (una regex sobre la llamada, con IMAGE y RELEASE) hace fallar las que coinciden.
 const GIT = { GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_AUTHOR_NAME: 'prueba',
   GIT_AUTHOR_EMAIL: 'prueba@example.com', GIT_COMMITTER_NAME: 'prueba', GIT_COMMITTER_EMAIL: 'prueba@example.com' };
@@ -939,7 +940,7 @@ function server() {
       'case "$url" in *//staging.*) env=staging ;; *) env=production ;; esac',
       'f="$COCOS_ROOT/$env/.running"',
       '[ -f "$f" ] || { echo "curl: (7) sin API" >&2; exit 7; }',
-      'release="$(cut -d" " -f2 "$f")"',
+      'release="${SERVED:-$(cut -d" " -f2 "$f")}"',
       'if [[ " ${BROKEN:-} " == *" $release "* ]]; then printf \'{"ok":false,"db":"down","release":"%s"}\' "$release";',
       'else printf \'{"ok":true,"db":"up","release":"%s","users":"4"}\' "$release"; fi',
     ].join('\n'),
@@ -1121,6 +1122,38 @@ describe.each(['staging', 'production'])('el job %s contra el servidor simulado'
     expect(s.state(name)).toBe(releaseEnv(I2, s.shas[2], name));
   });
 
+  it('con un release.env inválido en el servidor, el job frena antes de bajar nada y la API sigue', () => {
+    const s = fresh();
+    execJob(s, name, s.shas[2], I2);
+    writeFileSync(join(s.root, name, 'release.env'), `IMAGE=${I2}\nENVIRONMENT=${name}\n`);
+    s.clearCalls();
+    const r = execJob(s, name, s.shas[0], I0);
+    expect(r).toEqual({ ran: [ACCESS, CURRENT], status: 'failure' });
+    expect(s.calls().filter((c) => c.startsWith('docker '))).toEqual([]);
+    expect(s.running(name)).toBe(`${I2} ${s.shas[2]}`);
+  });
+
+  // La vuelta atrás termina bien solo si /health, por la URL pública, atiende otra vez el release
+  // anterior: si sigue caída, o atiende otro release, el paso falla y no dice que volvió.
+  it.each([
+    ['/health sigue fallando', (prev: string) => ({ BROKEN: prev })],
+    ['/health atiende otro release', () => ({ SERVED: 'f'.repeat(40) })],
+  ])('si después de volver %s, la vuelta atrás falla', (_label, health) => {
+    const s = fresh();
+    execJob(s, name, s.shas[0], I0);
+    const step = (cmd: string, env: Record<string, string>, input?: string) =>
+      s.run(cmd, { ENVIRONMENT: name, URL: URLS[name], IMAGE_REF: I1, SHA: s.shas[1], ...env }, input);
+    expect(step('deploy/lightsail/deploy.sh bootstrap', {}, read('deploy/lightsail/compose.yml')).status).toBe(0);
+    expect(step('deploy/lightsail/deploy.sh switch', {}).status).toBe(0);
+    const r = step('deploy/lightsail/deploy.sh rollback',
+      { FIRST_DEPLOY: 'false', PREVIOUS_IMAGE: I0, PREVIOUS_RELEASE: s.shas[0], ...health(s.shas[0]) });
+    // El servidor sí volvió (la API anterior corre), pero desde afuera no se confirma.
+    expect(s.running(name)).toBe(`${I0} ${s.shas[0]}`);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain(`/health no atiende ${s.shas[0]}`);
+    expect(r.stdout).not.toContain('atiende otra vez');
+  });
+
   it('el mismo commit se puede volver a desplegar', () => {
     const s = fresh();
     execJob(s, name, s.shas[1], I1);
@@ -1211,13 +1244,67 @@ describe('deploy.sh y remote.sh', () => {
     expect(r.output).toBe('');
   });
 
+  // Un release.env que existe pero no dice qué atiende no es un primer deploy: si lo fuera, el gate
+  // dejaría pasar cualquier commit y la vuelta atrás sacaría la API.
+  it.each([
+    ['vacío', ''],
+    ['sin RELEASE', `IMAGE=${imageOf('a')}\nENVIRONMENT=staging\n`],
+    ['sin IMAGE', `RELEASE=${'a'.repeat(40)}\nENVIRONMENT=staging\n`],
+    ['con un RELEASE que no es un SHA', `IMAGE=${imageOf('a')}\nRELEASE=main\nENVIRONMENT=staging\n`],
+    ['con dos RELEASE', `IMAGE=${imageOf('a')}\nRELEASE=${'a'.repeat(40)}\nRELEASE=${'b'.repeat(40)}\n`],
+  ])('current frena con un release.env %s, sin escribir salidas', (_name, content) => {
+    const s = fresh();
+    access(s);
+    writeFileSync(join(s.root, 'staging', 'release.env'), content);
+    const out = join(s.dir, 'out');
+    writeFileSync(out, '');
+    const r = s.run('deploy/lightsail/deploy.sh current', { ENVIRONMENT: 'staging', GITHUB_OUTPUT: out });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('no tiene un RELEASE y una IMAGE válidos');
+    expect(readFileSync(out, 'utf8')).toBe('');
+  });
+
   it('switch sin el bootstrap de esa imagen y ese commit no toca la API', () => {
     const s = fresh();
     access(s);
     const r = s.run('deploy/lightsail/deploy.sh switch', { ENVIRONMENT: 'staging', IMAGE_REF: I0, SHA: s.shas[0] });
     expect(r.status).toBe(1);
-    expect(r.stderr).toContain('no corrió en staging');
+    expect(r.stderr).toContain('no terminó bien en staging');
     expect(s.calls().filter((c) => c.startsWith('docker '))).toEqual([]);
+  });
+
+  // Un bootstrap que falla deja escritos el compose y el release.env nuevos (los necesita para
+  // correr), pero no la confirmación: un switch posterior de esa misma versión se rechaza.
+  it.each([
+    ['la base no queda sana', 'up -d --wait --wait-timeout [0-9]+ db'],
+    ['migrate falla', 'run --rm'],
+  ])('si el bootstrap falla porque %s, un switch posterior de esa versión no toca la API ni el estado', (_name, failing) => {
+    const s = fresh();
+    access(s);
+    const deploy = (cmd: string, sha: string, image: string, env: Record<string, string> = {}) =>
+      s.run(`deploy/lightsail/deploy.sh ${cmd}`, { ENVIRONMENT: 'staging', IMAGE_REF: image, SHA: sha, ...env }, cmd === 'bootstrap' ? read('deploy/lightsail/compose.yml') : undefined);
+    expect(deploy('bootstrap', s.shas[0], I0).status).toBe(0);
+    expect(deploy('switch', s.shas[0], I0).status).toBe(0);
+    const I1 = imageOf('b');
+    expect(deploy('bootstrap', s.shas[1], I1, { DOCKER_FAIL: failing }).status).toBe(1);
+    expect(existsSync(join(s.root, 'staging', 'release.next.env'))).toBe(true);
+    s.clearCalls();
+    const r = deploy('switch', s.shas[1], I1);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('no terminó bien en staging');
+    expect(s.calls().filter((c) => c.startsWith('docker '))).toEqual([]);
+    expect(s.running('staging')).toBe(`${I0} ${s.shas[0]}`);
+    expect(s.state('staging')).toBe(releaseEnv(I0, s.shas[0], 'staging'));
+  });
+
+  it('la confirmación del bootstrap sirve para un solo switch: otro cambio necesita otro bootstrap', () => {
+    const s = fresh();
+    access(s);
+    const env = { ENVIRONMENT: 'staging', IMAGE_REF: I0, SHA: s.shas[0] };
+    expect(s.run('deploy/lightsail/deploy.sh bootstrap', env, read('deploy/lightsail/compose.yml')).status).toBe(0);
+    expect(s.run('deploy/lightsail/deploy.sh switch', env).status).toBe(0);
+    expect(existsSync(join(s.root, 'staging', 'bootstrap.ok'))).toBe(false);
+    expect(s.run('deploy/lightsail/deploy.sh switch', env).status).toBe(1);
   });
 
   it('bootstrap frena sin la imagen bajada, sin tocar la base', () => {

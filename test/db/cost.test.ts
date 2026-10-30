@@ -5,7 +5,8 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { Server } from 'node:http';
 import { createApp } from '../../src/app.js';
 import { pool } from '../../src/db/pool.js';
-import { admin, arsId, fmt, legacyShort, newUser, placeOrder } from '../support/db.js';
+import { admin, apiClient, arsId, fmt, legacyShort, newUser, placeOrder } from '../support/db.js';
+import * as O from '../oracle/fold.js';
 
 let ars: number;
 let inst: number;    // close 1.000.000.000.000.000,00 (10¹⁵): una acción cuesta el cash máximo
@@ -81,6 +82,30 @@ describe('el costo sale como numeric entero', () => {
     }
   });
 
+  // La frontera exacta en micro-ARS: 10.000 acciones con costo total M centavos y una venta de
+  // 9.999 dejan una con costo M micro-ARS (D-09: costo × 1 / 10.000). M = 2⁶³ − 1 entraba en bigint;
+  // M + 1 desbordaba. El precio máximo de una orden es < 10¹⁸ centavos: el costo se arma con 10 compras.
+  it.each([
+    ['2⁶³ − 1', 9_223_372_036_854_775_807n, '9223372036854.775807', '9223372036854.7758'],
+    ['2⁶³', 9_223_372_036_854_775_808n, '9223372036854.775808', '9223372036854.7758'],
+  ])('frontera en micro-ARS: costo %s micro tras una venta parcial, exacto contra el oráculo', async (_n, micro, total, unit) => {
+    const h = new History(await newUser('cost-micro'));
+    const s = O.newState();
+    const fill = async (side: 'BUY' | 'SELL', size: bigint, cents: bigint) => {
+      await h.fill(side, cheap, size, fmt(cents));
+      O.fill(s, side, cheap, size, cents);
+    };
+    await fill('BUY', 9_990n, 1n);
+    const rest = micro - 9_990n;          // centavos de las 10 compras de una acción
+    for (let i = 0; i < 10; i++) await fill('BUY', 1n, i < 9 ? rest / 10n : rest - 9n * (rest / 10n));
+    await fill('SELL', 9_999n, 1n);
+    expect(O.position(s, cheap).cost).toBe(micro);
+    expect(await position(h.u, cheap)).toEqual({ qty: '1', cost: micro.toString() });
+    const { status, body } = await portfolio(h.u);
+    expect(status).toBe(200);
+    expect(body.positions.find((x) => x.instrumentid === cheap)).toMatchObject({ costo_total: total, costo_unitario: unit, rendimiento_pct: '-100.00' });
+  });
+
   it('posición de 10¹³ ARS: el costo exacto; una venta parcial lo reduce en proporción y sigue entero (D-09)', async () => {
     const h = new History(await newUser('cost-13'));
     await h.cash(ars, cheap, '10000000000000.00');
@@ -141,6 +166,44 @@ describe('tope del costo por posición: 10¹⁷ ARS', () => {
     expect(await ordersOf(u)).toBe(before);
   }, 60_000);
 
+  it('LIMIT: la ejecución que deja el costo exactamente en 10¹⁷ → FILLED, con balance_seq', async () => {
+    const u = await nearCap(99);
+    const lim = await placeOrder(pool, { userid: u, key: 'lim', side: 'BUY', type: 'LIMIT', instrumentid: inst, size: 1, limit: '1000000000000000.00' });
+    expect(lim.body.status).toBe('NEW');
+    expect((await pool.query<{ r: string }>('SELECT app.execute_limit_outcome($1) AS r', [Number(lim.order_id)])).rows[0].r).toBe('FILLED');
+    expect((await position(u, inst)).cost).toBe('100000000000000000000000');
+    const row = (await admin.query<{ status: string; balance_seq: string | null }>('SELECT status, balance_seq FROM app.orders WHERE id = $1', [lim.order_id])).rows[0];
+    expect(row.status).toBe('FILLED');
+    expect(row.balance_seq).not.toBeNull();
+  }, 60_000);
+
+  // R-2: dos compras con fondos que juntas superan el techo. La segunda espera el lock y lee el
+  // costo que dejó la primera.
+  it('dos BUY concurrentes que juntas superarían el techo: la primera FILLED, la segunda espera el lock y responde 422 LIMIT', async () => {
+    const u = await nearCap(99);
+    const h = new History(u); await h.sync();
+    await h.cash(ars, cheap, '1000000000000000.00');   // cash para las dos compras
+    const a = await apiClient();
+    const b = await apiClient();
+    try {
+      const pidB = (await b.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows[0].pid;
+      await a.query('BEGIN');
+      const first = await placeOrder(a, { userid: u, key: 'a', side: 'BUY', type: 'MARKET', instrumentid: inst, size: 1 });
+      expect(first.body.status).toBe('FILLED');
+      let failed: unknown = null;
+      const second = placeOrder(b, { userid: u, key: 'b', side: 'BUY', type: 'MARKET', instrumentid: inst, size: 1 })
+        .catch((e) => { failed = e; throw e; });
+      for (;;) {   // la segunda ya espera el lock del usuario
+        if (failed) throw failed;
+        if ((await admin.query("SELECT 1 FROM pg_stat_activity WHERE pid = $1 AND wait_event_type = 'Lock' AND wait_event = 'advisory'", [pidB])).rowCount) break;
+        await new Promise((r) => setTimeout(r, 5));
+      }
+      await a.query('COMMIT');
+      await expect(second).rejects.toMatchObject({ code: 'APP05', message: expect.stringMatching(/costo de la posición/) });
+    } finally { await a.end(); await b.end(); }
+    expect((await position(u, inst)).cost).toBe('100000000000000000000000');
+  }, 60_000);
+
   it('LIMIT: la ejecución que superaría el tope la cancela con motivo LIMIT', async () => {
     const u = await nearCap(100);
     const lim = await placeOrder(pool, { userid: u, key: 'lim', side: 'BUY', type: 'LIMIT', instrumentid: inst, size: 1, limit: '1000000000000000.00' });
@@ -177,6 +240,31 @@ describe('un usuario con una posición grande ya no queda congelado', () => {
     const rows = (await admin.query<{ userid: number; problem: string }>('SELECT userid, problem FROM app.verify_ledger()')).rows;
     expect(rows).toContainEqual({ userid: h.u, problem: 'overflow' });
     expect(rows.filter((r) => r.userid === h.u)).toHaveLength(1);
+    expect(rows).toContainEqual({ userid: other, problem: 'short' });
+  }, 60_000);
+
+  // Cada orden entra en sus tipos; lo que desborda es lo acumulado: el cash (bigint en centavos) o
+  // el costo (numeric(24,0) en micro-ARS). Un usuario posterior se sigue verificando.
+  it.each([
+    ['el cash acumulado supera bigint', async (h: History) => {
+      await h.fill('BUY', cheap, 100, '0.01');
+      for (let i = 0; i < 10; i++) await h.fill('SELL', cheap, 10, '1000000000000000.00');   // 10 × 10¹⁸ centavos
+    }],
+    ['el costo acumulado supera numeric(24,0) con el cash dentro', async (h: History) => {
+      const P = '9999999999999999.99';   // 100 acciones: importe < 10²⁰ centavos, entra en numeric(20,0)
+      await h.fill('BUY', inst, 200, '0.01');
+      for (let i = 0; i < 2; i++) {
+        await h.fill('SELL', inst, 100, P);
+        await h.fill('BUY', cheap, 100, P);   // costo 2 × 10²⁴ micro al final
+      }
+    }],
+  ] as const)('verify_ledger informa overflow cuando %s, y sigue con los demás', async (_case, seed) => {
+    const h = new History(await newUser('cost-acc'));
+    await seed(h);
+    const other = await newUser('cost-acc-after');
+    await legacyShort(other, cheap, 500_000n, 100_000_000n, 10n);
+    const rows = (await admin.query<{ userid: number; problem: string }>('SELECT userid, problem FROM app.verify_ledger()')).rows;
+    expect(rows.filter((r) => r.userid === h.u)).toEqual([{ userid: h.u, problem: 'overflow' }]);
     expect(rows).toContainEqual({ userid: other, problem: 'short' });
   }, 60_000);
 });

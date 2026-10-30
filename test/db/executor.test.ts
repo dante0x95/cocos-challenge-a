@@ -398,6 +398,13 @@ describe('POST /internal/execute-limits: parámetros', () => {
       expect((await post('?max=2')).body).toMatchObject({ candidates: 2, executed: ids.slice(0, 2), after_id: ids[1] });
       expect((await post(`?max=2&after_id=${ids[1]}`)).body).toMatchObject({ candidates: 1, executed: [ids[2]], after_id: null });
 
+      // after_id con las anteriores todavía NEW y cruzando: solo se ejecuta la que está después del cursor.
+      const cur: string[] = [];
+      for (let k = 0; k < 3; k++) cur.push(...(await sellLimits(await holder(inst, 1, 'ex9-http'), inst, 1, '90.00')));
+      expect((await post(`?after_id=${cur[1]}`)).body).toMatchObject({ candidates: 1, executed: [cur[2]], after_id: null });
+      expect([...(await statuses(cur.slice(0, 2))).values()]).toEqual(['NEW', 'NEW']);
+      await post('');   // las dos anteriores
+
       // Un usuario con tres: per_user=1 toma una sola.
       const own = await sellLimits(await holder(inst, 3, 'ex9-http'), inst, 3, '90.00');
       expect((await post('?per_user=1')).body).toMatchObject({ candidates: 1, executed: [own[0]], after_id: null });

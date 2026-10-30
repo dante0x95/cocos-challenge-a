@@ -15,7 +15,7 @@ Toda la decisión (saldo, tenencia, precio, estado) la toma `app.place_order` en
 | | |
 |---|---|
 | `Content-Type` | `application/json` |
-| `Idempotency-Key` | **obligatoria**, hasta 200 caracteres. Una por intención de orden; para reintentar, reusar la misma con el mismo body ([D-19](../decisiones.md#d-19)). El mismo monto o precio en otra escala (`100`, `"100"`, `"100.00"`) cuenta como el mismo body. |
+| `Idempotency-Key` | **obligatoria**, hasta 200 caracteres, sin caracteres de control ([D-30](../decisiones.md#d-30)). Node lee la cabecera byte a byte (latin1): conviene ASCII visible (un UUID, por ejemplo); un byte de 0x80 a 0x9F, que aparece en el UTF-8 de `…` o de un emoji, cuenta como control C1. Una por intención de orden; para reintentar, reusar la misma con el mismo body ([D-19](../decisiones.md#d-19)). El mismo monto o precio en otra escala (`100`, `"100"`, `"100.00"`) cuenta como el mismo body. |
 
 ### Body
 
@@ -75,7 +75,7 @@ Un reintento con la misma clave y el mismo body tiene el replay **garantizado du
 
 | Código | `error` | Cuándo | ¿Se grabó? |
 |---|---|---|---|
-| `400` | `BAD_REQUEST` | falta la clave, JSON inválido, campos o combinaciones inválidas, usuario o instrumento inexistente, moneda como activo, monto que no alcanza para una acción o que da más de 2³¹ − 1 acciones | no |
+| `400` | `BAD_REQUEST` | falta la clave o tiene un carácter de control, JSON inválido, campos o combinaciones inválidas, un valor que la base no admite, usuario o instrumento inexistente, moneda como activo, monto que no alcanza para una acción o que da más de 2³¹ − 1 acciones | no |
 | `422` | `NO_PRICE` | MARKET sin cotización válida | no; la clave queda libre |
 | `422` | `IDEMPOTENCY_MISMATCH` | misma clave con otro body | no |
 | `422` | `LIMIT` | el resultado saldría de ±10¹⁵ ARS o 2⁶² acciones, o el importe de la orden (`size × price`) supera 10¹⁵ ARS, o el costo de la posición superaría 10¹⁷ ARS ([D-14](../decisiones.md#d-14)) | no |
@@ -84,6 +84,10 @@ Un reintento con la misma clave y el mismo body tiene el replay **garantizado du
 | `500` | `INTERNAL` | un error no previsto | resultado desconocido: **reintentar con la misma clave** |
 
 Todos los errores responden `{ "error": "...", "message": "..." }`.
+
+Un charset distinto de UTF-8 en `Content-Type` o un `Content-Encoding` desconocido responden `415` con `error: "BAD_REQUEST"`; un parámetro de ruta mal codificado (`/orders/%FF`), `400` ([D-30](../decisiones.md#d-30)).
+
+En `GET /orders/:id` y `POST /orders/:id/cancel`, un `500 INTERNAL` dice `error interno; reintentar`: no llevan `Idempotency-Key`. Consultar se puede repetir; una cancelación repetida responde `409` con la orden si la anterior se aplicó.
 
 ---
 

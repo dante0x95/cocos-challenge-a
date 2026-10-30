@@ -134,12 +134,126 @@ describe('fromDbError: cortes de conexión (issue #7)', () => {
       expect(JSON.parse(logs.warn[1])).toMatchObject({ level: 'warn', code: 'CONNECTION_LOST', phase: 'connect' });
       expect(logs.error).toEqual([]);
       const r2 = res();
-      errorHandler(new Error('boom'), { path: '/orders' } as never, r2 as never, () => undefined);
+      errorHandler(new Error('boom'), { method: 'POST', path: '/orders', route: { path: '/orders' } } as never, r2 as never, () => undefined);
       expect(r2.statusCode).toBe(500);
       expect(r2.body).toEqual({ error: 'INTERNAL', message: INTERNAL_MESSAGE });
       expect(JSON.parse(logs.error[0])).toMatchObject({ level: 'error', requestId: 'rid' });
       expect(logs.error[0]).toContain('    at ');
     } finally { console.warn = origWarn; console.error = origErr; }
+  });
+});
+
+// Issue #40: lo que el cliente manda no produce un 500. Fixtures del middleware de errores.
+function fakeRes() {
+  return { locals: { requestId: 'rid' }, headers: {} as Record<string, string>, statusCode: 0, body: undefined as unknown,
+    set(k: string, v: string) { this.headers[k] = v; }, status(s: number) { this.statusCode = s; return this; }, json(b: unknown) { this.body = b; } };
+}
+function handle(err: unknown, req: Record<string, unknown>) {
+  const logs: { warn: string[]; error: string[] } = { warn: [], error: [] };
+  const origWarn = console.warn; const origErr = console.error;
+  console.warn = (m: string) => { logs.warn.push(String(m)); };
+  console.error = (m: string) => { logs.error.push(String(m)); };
+  try {
+    const r = fakeRes();
+    errorHandler(err, { path: '/x', ...req } as never, r as never, () => undefined);
+    return { status: r.statusCode, body: r.body as Record<string, unknown>, logs };
+  } finally { console.warn = origWarn; console.error = origErr; }
+}
+
+describe('fromDbError: la clase 22 al convertir un parámetro → 400 (issue #40, D-30)', () => {
+  const PARAM_DATA_MESSAGE = 'el request tiene un valor que la base no admite';
+  // Postgres pone ese contexto cuando falla la conversión de un parámetro, antes de ejecutar nada
+  // (test/property/inputs lo verifica contra Postgres 18). Con log_parameter_max_length_on_error
+  // el valor va al final ("= '...'").
+  const PARAM_WHERES = ['unnamed portal parameter $1', "unnamed portal parameter $8 = '...'", 'portal "p1" parameter $2'];
+  // Los que puede dar la conversión de un valor de texto: U+0000 o bytes inválidos (22021), un
+  // carácter sin equivalente (22P05), sintaxis del tipo (22P02), rango (22003), largo (22001),
+  // fechas (22007, 22008), y la clase genérica.
+  const CODES = ['22021', '22P05', '22P02', '22003', '22001', '22007', '22008', '22000'];
+
+  it.each(CODES.flatMap((code) => PARAM_WHERES.map((where) => [code, where])))('%s en "%s" → 400 BAD_REQUEST', (code, where) => {
+    const e = fromDbError(Object.assign(new Error('x'), { code, where }));
+    expect({ status: e.status, code: e.code, message: e.message, retryAfter: e.retryAfter })
+      .toEqual({ status: 400, code: 'BAD_REQUEST', message: PARAM_DATA_MESSAGE, retryAfter: undefined });
+  });
+
+  // Dentro de la sentencia, el mismo código es un bug: un overflow en una cuenta, una división por
+  // cero o un cast de un dato guardado. Sigue siendo 500.
+  it.each([
+    ['22003', undefined],
+    ['22012', undefined],
+    ['22P02', 'PL/pgSQL function app.place_order(integer,text) line 12 at assignment'],
+    ['22003', "SQL statement \"SELECT 1\"\nPL/pgSQL function app.c_state(integer) line 4 at SQL statement"],
+    ['22021', 'JSON data, line 1: {"a":"\\u0000...'],
+    // El contexto de un parámetro, pero en otra línea: no es el error de la conversión.
+    ['22003', 'PL/pgSQL function app.x() line 1\nunnamed portal parameter $1'],
+  ])('%s con contexto %j → 500 INTERNAL', (code, where) => {
+    const e = fromDbError(Object.assign(new Error('x'), { code, where }));
+    expect({ status: e.status, code: e.code }).toEqual({ status: 500, code: 'INTERNAL' });
+  });
+
+  it('otra clase con el contexto de un parámetro sigue siendo 500', () => {
+    for (const code of ['42804', '23505', 'XX000']) {
+      expect(fromDbError(Object.assign(new Error('x'), { code, where: 'unnamed portal parameter $1' })).status, code).toBe(500);
+    }
+  });
+
+  it('el middleware responde 400 y lo deja en el log como warn con el SQLSTATE, sin stack: es una regla que falta en la frontera', () => {
+    const r = handle(Object.assign(new Error('invalid byte sequence for encoding "UTF8": 0x00'), { code: '22021', where: 'unnamed portal parameter $1' }),
+      { method: 'GET', path: '/instruments' });
+    expect(r.status).toBe(400);
+    expect(r.body).toEqual({ error: 'BAD_REQUEST', message: PARAM_DATA_MESSAGE });
+    expect(r.logs.error).toEqual([]);
+    expect(JSON.parse(r.logs.warn[0])).toMatchObject({ level: 'warn', requestId: 'rid', path: '/instruments', code: 'BAD_REQUEST', sqlstate: '22021' });
+    expect(r.logs.warn[0]).not.toContain('    at ');
+  });
+});
+
+describe('el 500 menciona Idempotency-Key solo en POST /orders (issue #40)', () => {
+  const INTERNAL_MESSAGE_OTHER = 'error interno; reintentar';
+
+  it('POST /orders: resultado desconocido, reintentar con la misma clave', () => {
+    const r = handle(new Error('boom'), { method: 'POST', path: '/orders', route: { path: '/orders' } });
+    expect(r.status).toBe(500);
+    expect(r.body).toEqual({ error: 'INTERNAL', message: INTERNAL_MESSAGE });
+  });
+
+  it.each([
+    ['GET', '/instruments', '/instruments'],
+    ['GET', '/orders/1', '/orders/:id'],
+    ['GET', '/portfolio/1', '/portfolio/:userid'],
+    ['POST', '/orders/1/cancel', '/orders/:id/cancel'],
+    ['POST', '/internal/execute-limits', '/internal/execute-limits'],
+  ])('%s %s: un 500 no menciona Idempotency-Key', (method, path, route) => {
+    const r = handle(new Error('boom'), { method, path, route: { path: route } });
+    expect(r.status).toBe(500);
+    expect(r.body).toEqual({ error: 'INTERNAL', message: INTERNAL_MESSAGE_OTHER });
+    expect(JSON.stringify(r.body)).not.toContain('Idempotency-Key');
+    expect(JSON.parse(r.logs.error[0])).toMatchObject({ level: 'error', path });
+  });
+
+  it('un 500 sin ruta (antes del router) tampoco la menciona', () => {
+    expect(handle(new Error('boom'), { method: 'POST', path: '/orders' }).body).toEqual({ error: 'INTERNAL', message: INTERNAL_MESSAGE_OTHER });
+  });
+});
+
+describe('errores 4xx de Express y body-parser → 4xx, no 500 (issue #40)', () => {
+  it.each([
+    // Express, al decodificar un parámetro de ruta: /portfolio/%FF.
+    ['parámetro de ruta mal codificado', Object.assign(new URIError("Failed to decode param '%FF'"), { status: 400, statusCode: 400 }), 400, 'la ruta tiene un parámetro mal codificado'],
+    ['JSON inválido', Object.assign(new Error('x'), { status: 400, type: 'entity.parse.failed' }), 400, 'JSON inválido'],
+    ['body demasiado grande', Object.assign(new Error('x'), { status: 413, type: 'entity.too.large' }), 413, 'body demasiado grande'],
+    ['charset no soportado', Object.assign(new Error('x'), { status: 415, type: 'charset.unsupported' }), 415, 'charset no soportado: enviar el body en utf-8'],
+    ['Content-Encoding no soportado', Object.assign(new Error('x'), { status: 415, type: 'encoding.unsupported' }), 415, 'Content-Encoding no soportado'],
+    ['otro 4xx de body-parser', Object.assign(new Error('x'), { status: 400, type: 'request.size.invalid' }), 400, 'request inválido'],
+  ])('%s → %s', (_name, err, status, message) => {
+    const r = handle(err, { method: 'POST', path: '/orders' });
+    expect({ status: r.status, body: r.body }).toEqual({ status, body: { error: 'BAD_REQUEST', message } });
+    expect(r.logs.error).toEqual([]);
+  });
+
+  it('un status 5xx de body-parser sigue siendo un 500', () => {
+    expect(handle(Object.assign(new Error('x'), { status: 500, type: 'stream.encoding.set' }), { method: 'GET' }).status).toBe(500);
   });
 });
 

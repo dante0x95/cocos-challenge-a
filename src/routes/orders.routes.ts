@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { HttpError, badRequest, notFound, route } from '../http/errors.js';
 import { Int4Id, OrderBody, legacyRequestHash, orderView, requestHash, validateOrder } from '../domain/orders.js';
 import { cancelOrder, findOrder, placeOrder } from '../repositories/orders.repo.js';
+import { controlCharsMessage, hasControlChars } from '../domain/text.js';
 import { parseId } from './portfolio.routes.js';
 import { z } from 'zod';
 
@@ -13,6 +14,9 @@ const formatIssues = (e: z.ZodError) => e.issues.map((i) => `${i.path.join('.') 
 ordersRouter.post('/orders', route(async (req, res) => {
   const key = req.header('Idempotency-Key');
   if (!key || key.length > 200) throw badRequest('la cabecera Idempotency-Key es obligatoria (máximo 200 caracteres)');
+  // Node rechaza casi todos los controles en una cabecera, pero deja pasar el tab y los bytes
+  // 0x80–0x9F (que lee como C1): la clave se guarda en la base (issue #40).
+  if (hasControlChars(key)) throw badRequest(controlCharsMessage('Idempotency-Key'));
   const parsed = OrderBody.safeParse(req.body);
   if (!parsed.success) throw badRequest(formatIssues(parsed.error));
   const body = parsed.data;

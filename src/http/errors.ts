@@ -45,7 +45,33 @@ export function connectionLostPhase(err: unknown): 'connect' | 'query' | null {
 
 export const CONNECTION_LOST_MESSAGE = 'la conexión con la base se cortó; el resultado es desconocido: reintentar con la misma Idempotency-Key';
 
-export function fromDbError(err: unknown): HttpError {
+// SQLSTATE clase 22 (data_exception) al convertir un parámetro de la sentencia (issue #40, D-30):
+// el valor que mandó la API no se puede representar en el tipo del parámetro (U+0000 en text →
+// 22021, 'abc' en integer → 22P02, 3000000000 en integer → 22003). Postgres lo distingue en el
+// contexto del error: "unnamed portal parameter $N" (o "portal "x" parameter $N"), y en ese momento
+// todavía no ejecutó nada. El mismo código dentro de la sentencia (un overflow en una cuenta, una
+// división por cero) no trae ese contexto y sigue siendo un 500: es un bug, no una entrada.
+const PARAM_CONTEXT = /^(?:unnamed portal|portal "[^"]*") parameter \$\d+/;
+
+/** true si el error es un dato inválido en un parámetro de la sentencia, antes de ejecutarla. */
+export function isParamDataException(err: unknown): boolean {
+  const e = err as { code?: unknown; where?: unknown };
+  return typeof e.code === 'string' && e.code.startsWith('22') && typeof e.where === 'string' && PARAM_CONTEXT.test(e.where);
+}
+
+export const PARAM_DATA_MESSAGE = 'el request tiene un valor que la base no admite';
+
+// El 500 es un bug. Solo POST /orders tiene Idempotency-Key: ahí el resultado es desconocido y se
+// reintenta con la misma clave (D-20). En las demás rutas mencionar la clave confunde (issue #40):
+// una lectura no tiene efecto, y cancelar o correr el executor se pueden repetir sin clave.
+export const INTERNAL_MESSAGE_ORDERS = 'error interno; el resultado es desconocido: reintentar con la misma Idempotency-Key';
+export const INTERNAL_MESSAGE = 'error interno; reintentar';
+
+/**
+ * Traduce un error de la base (o del driver) a HTTP. `usesIdempotencyKey`: la ruta es POST /orders,
+ * la única con Idempotency-Key; solo cambia el mensaje del 500.
+ */
+export function fromDbError(err: unknown, usesIdempotencyKey = true): HttpError {
   if (err instanceof HttpError) return err;
   const e = err as { code?: string; message?: string };
   const msg = e.message ?? 'error';
@@ -60,6 +86,7 @@ export function fromDbError(err: unknown): HttpError {
     return new HttpError(503, 'TIMEOUT', 'la base no respondió a tiempo; el resultado es desconocido: reintentar con la misma Idempotency-Key', 1);
   }
   if (connectionLostPhase(err)) return new HttpError(503, 'CONNECTION_LOST', CONNECTION_LOST_MESSAGE, 1);
+  if (isParamDataException(err)) return badRequest(PARAM_DATA_MESSAGE);
   switch (e.code) {
     case 'APP01': return new HttpError(422, 'NO_PRICE', msg);
     case 'APP02': return new HttpError(400, 'BAD_REQUEST', msg);
@@ -70,8 +97,9 @@ export function fromDbError(err: unknown): HttpError {
     case '55P03': return new HttpError(503, 'LOCK_TIMEOUT', 'el usuario tiene otra operación en curso; reintentar con la misma Idempotency-Key', 1);
     case '57014': return new HttpError(503, 'TIMEOUT', 'la operación superó el tiempo máximo; reintentar con la misma Idempotency-Key', 1);
     case '40P01': return new HttpError(503, 'DEADLOCK', 'deadlock (no debería ocurrir: reportar)', 1);
-    // Un bug. Para el cliente, el resultado también es desconocido: la misma guía que un 503.
-    default:      return new HttpError(500, 'INTERNAL', 'error interno; el resultado es desconocido: reintentar con la misma Idempotency-Key');
+    // Un bug. En POST /orders el resultado también es desconocido: la misma guía que un 503. En las
+    // demás rutas, reintentar sin nombrar una clave que no usan (D-30).
+    default:      return new HttpError(500, 'INTERNAL', usesIdempotencyKey ? INTERNAL_MESSAGE_ORDERS : INTERNAL_MESSAGE);
   }
 }
 
@@ -82,19 +110,42 @@ export const route =
     fn(req, res).catch(next);
   };
 
+// Errores 4xx de Express y de body-parser (traen `status`): la entrada del cliente es inválida, no
+// es un bug. Un parámetro de ruta mal codificado (`/portfolio/%FF`) o un charset no soportado
+// respondían 500 (issue #40).
+const REQUEST_ERROR_MESSAGES: Record<string, string> = {
+  'entity.parse.failed': 'JSON inválido',
+  'entity.too.large': 'body demasiado grande',
+  'charset.unsupported': 'charset no soportado: enviar el body en utf-8',
+  'encoding.unsupported': 'Content-Encoding no soportado',
+};
+
+function requestError(err: unknown): HttpError | null {
+  if (err instanceof HttpError) return null;
+  const e = err as { status?: unknown; type?: unknown };
+  if (typeof e.status !== 'number' || e.status < 400 || e.status > 499) return null;
+  const message = err instanceof URIError
+    ? 'la ruta tiene un parámetro mal codificado'
+    : REQUEST_ERROR_MESSAGES[String(e.type)] ?? 'request inválido';
+  return new HttpError(e.status, 'BAD_REQUEST', message);
+}
+
 /** Middleware final: un solo lugar decide status, body y Retry-After. */
 export function errorHandler(err: unknown, req: Request, res: Response, _next: NextFunction): void {
-  // JSON inválido (body-parser) o body demasiado grande.
-  const parse = err as { type?: string; status?: number };
-  const e = parse.type === 'entity.parse.failed' || parse.type === 'entity.too.large'
-    ? new HttpError(parse.status ?? 400, 'BAD_REQUEST', parse.type === 'entity.too.large' ? 'body demasiado grande' : 'JSON inválido')
-    : fromDbError(err);
+  // req.route es la ruta que atendió el request (no la URL, que admite mayúsculas y barra final).
+  const usesIdempotencyKey = req.method === 'POST' && req.route?.path === '/orders';
+  const e = requestError(err) ?? fromDbError(err, usesIdempotencyKey);
   const phase = connectionLostPhase(err);
   if (phase) {
     // Un reinicio de la base corta una conexión por request en vuelo: una línea de aviso cada una,
     // sin stack (no es un bug), con la fase para distinguir "no se pudo conectar" de "se cortó a
     // mitad de una escritura".
     console.warn(JSON.stringify({ level: 'warn', requestId: res.locals.requestId, path: req.path, code: e.code, phase, err: String((err as Error)?.message ?? err) }));
+  } else if (isParamDataException(err)) {
+    // Una entrada que la validación de la API dejó pasar: 400 para el cliente, pero a la vista en
+    // el log con el SQLSTATE, para agregar la regla en la frontera (D-30).
+    const sqlstate = (err as { code: string }).code;
+    console.warn(JSON.stringify({ level: 'warn', requestId: res.locals.requestId, path: req.path, code: e.code, sqlstate, err: String((err as Error)?.message ?? err) }));
   } else if (e.status >= 500) {
     console.error(JSON.stringify({ level: 'error', requestId: res.locals.requestId, path: req.path, err: String((err as Error)?.stack ?? err) }));
   }

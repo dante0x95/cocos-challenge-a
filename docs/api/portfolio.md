@@ -91,9 +91,10 @@ Los redondeos son half-even sobre la fracción exacta, siempre al final.
 
 | Código | Cuándo |
 |---|---|
-| `400 BAD_REQUEST` | `userid` no es un entero > 0 |
+| `400 BAD_REQUEST` | `userid` no es un entero > 0, o viene mal codificado (`%FF`) |
 | `404 NOT_FOUND` | el usuario no existe |
 | `503 TIMEOUT` | la lectura superó 5 s; incluye `Retry-After` |
+| `500 INTERNAL` | un error no previsto: `error interno; reintentar` (es una lectura, sin `Idempotency-Key`) |
 
 ```json
 { "error": "NOT_FOUND", "message": "usuario 7 inexistente" }

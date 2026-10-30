@@ -430,15 +430,16 @@ describe('POST /orders — enteros JSON fuera de ±2⁵³ y topes de los ids (is
 
   // Como string llega exacto a place_order, que decide el tope por orden de D-14 (importe ≤ 10¹⁵ ARS):
   // 9007199254740993 lo supera (422 LIMIT, no 400 de rango). La exactitud se ve debajo del tope, con
-  // 17 dígitos que Number redondearía (999999999999999.99 → 999999999999999.9).
-  it('price "9007199254740993" como string → llega exacto a place_order (422 LIMIT, no 400); "999999999999999.99" → 201 exacto', async () => {
+  // 17 dígitos que Number redondea hacia abajo (999999999999999.93 → 999999999999999.875, "999999999999999.9"):
+  // convertido, el monto ya no alcanza para una acción a ese precio y el precio grabado sería otro.
+  it('price "9007199254740993" como string → llega exacto a place_order (422 LIMIT, no 400); "999999999999999.93" → 201 exacto', async () => {
     const u = await holder('big-string', 1);
     const over = await sellLimit(u, '9007199254740993');
     expect(over.status).toBe(422);
     expect(over.body.error).toBe('LIMIT');
-    const r = await sellLimit(u, '999999999999999.99');
+    const r = await sellLimit(u, '999999999999999.93');
     expect(r.status).toBe(201);
-    expect(r.body).toMatchObject({ status: 'NEW', size: '1', price: '999999999999999.99', amount: '999999999999999.99' });
+    expect(r.body).toMatchObject({ status: 'NEW', size: '1', price: '999999999999999.93', amount: '999999999999999.93' });
     expect((await get(r.headers.get('location')!)).body).toEqual(r.body);
   });
 
@@ -495,11 +496,12 @@ describe('POST /orders — enteros JSON fuera de ±2⁵³ y topes de los ids (is
   const ordersOf = async (u: number) =>
     (await admin.query("SELECT count(*)::int AS n FROM app.orders WHERE userid = $1 AND side <> 'CASH_IN'", [u])).rows[0].n;
 
-  it('amount "999999999999999.99" como string → 201 exacto por HTTP (size = floor(amount / price), sin pasar por Number)', async () => {
+  // Con Number en el camino, amount llegaría como 999999999999999.9 < price: size 0 → 400 "no alcanza".
+  it('amount "999999999999999.93" como string → 201 exacto por HTTP (size = floor(amount / price), sin pasar por Number)', async () => {
     const u = await newUser('big-amount');
-    const r = await order({ userid: u, side: 'BUY', type: 'LIMIT', instrumentid: q.instrumentid, amount: '999999999999999.99', price: '999999999999999.99' });
+    const r = await order({ userid: u, side: 'BUY', type: 'LIMIT', instrumentid: q.instrumentid, amount: '999999999999999.93', price: '999999999999999.93' });
     expect(r.status).toBe(201);
-    expect(r.body).toMatchObject({ status: 'REJECTED', size: '1', price: '999999999999999.99', amount: '999999999999999.99' });
+    expect(r.body).toMatchObject({ status: 'REJECTED', size: '1', price: '999999999999999.93', amount: '999999999999999.93' });
     expect((await get(r.headers.get('location')!)).body).toEqual(r.body);
   });
 

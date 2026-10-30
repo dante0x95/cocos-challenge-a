@@ -42,17 +42,21 @@ En Fly lo corre el `release_command` de cada deploy, antes de cambiar de versió
 
 ## Desplegar en Fly.io
 
-Cada commit de `main` con el check `ci` en verde se despliega solo (`.github/workflows/deploy.yml`, [D-29](../decisiones.md#d-29)). No hay nada que correr a mano, salvo la primera vez:
+Cada commit de `main` con el check `ci` en verde se despliega solo (`.github/workflows/deploy.yml`, [D-29](../decisiones.md#d-29)), en tres etapas: la imagen se construye una vez y se publica en GHCR con el SHA como etiqueta; `staging` la despliega; `production` despliega la misma imagen después de la aprobación manual del environment `production`. No hay nada que correr a mano, salvo la primera vez:
 
 ```bash
 git switch main && git pull
 fly auth login
-deploy/fly/setup.sh                                              # apps, volumen, secretos y primer deploy
-fly tokens create deploy -a cocos-challenge-a-api | gh secret set FLY_API_TOKEN
+deploy/fly/setup.sh                                              # producción: apps, volumen, secretos y primer deploy
+CONFIG=deploy/fly/staging.toml DB_CONFIG=deploy/fly/staging-db.toml deploy/fly/setup.sh   # staging, igual
+fly tokens create deploy -a cocos-challenge-a-api -a cocos-challenge-a-staging | gh secret set FLY_API_TOKEN
 ```
 
+Y dos cosas en GitHub, una sola vez: el paquete `cocos-challenge-a` de GHCR tiene que ser **público** (Packages → el paquete → Package settings → Change visibility) para que Fly pueda bajar la imagen con `--image`; y el environment `production` (Settings → Environments) con **required reviewers**, que es lo que convierte el job `production` en una aprobación manual. Sin eso, producción se despliega sola detrás de staging.
+
 - **Un deploy en rojo.** `gh run list --workflow deploy` y `gh run view <id> --log`. Si frenó antes de `flyctl deploy`, el commit no desciende del release que atiende (un re-run del `ci` de un commit viejo, por ejemplo): no cambió nada. Si falló el `release_command`, el bootstrap no dejó nada aplicado y la versión anterior sigue; `fly logs -a cocos-challenge-a-api` tiene el error. Si falló el check de `/health`, las máquinas nuevas no recibieron tráfico.
-- **Re-desplegar** es volver a correr el workflow de ese commit (`gh run rerun <id>`).
+- **Re-desplegar** es volver a correr el workflow de ese commit (`gh run rerun <id>`). Re-corre la construcción de la imagen (misma etiqueta) y las dos etapas; la aprobación de producción se vuelve a pedir.
+- **Staging en rojo, producción no**: el job `production` no corre (`needs: staging`); lo que atiende producción no cambia. Un deploy de staging con una migración nueva corre su `release_command` contra la base de staging antes de que esa migración llegue a producción.
 - **Ensayos** (`deploy/fly/drills.sh`, a mano, con `flyctl` y `gh` autenticados; no corren en el CI): el último merge pasó por `ci` y deploy y `/health` lo atiende (`merge`, conviene después del primer merge), un deploy roto (bootstrap que falla, `/health` en `503`, re-run del `ci` de un commit viejo) y los datos de Postgres después de redesplegar la base (`persistence`, corta la API mientras la base reinicia).
 - **Token interno** para `/internal/*`: `fly ssh console -a cocos-challenge-a-api -C 'printenv INTERNAL_TOKEN'`.
 

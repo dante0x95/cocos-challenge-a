@@ -1,9 +1,15 @@
 # Deploy continuo a Fly.io (D-29): cada commit de main con el check "ci" en verde se despliega.
-# fly.toml corre el bootstrap como release_command antes de cambiar de versión, y la estrategia
-# bluegreen pasa el tráfico solo si /health responde 2xx. Antes de desplegar, el commit tiene
-# que descender del release que atiende (un re-run del CI de un commit viejo dispara este
-# workflow igual que un merge); después, /health tiene que atenderlo. Las dos verificaciones:
-# deploy/fly/release-check.sh. La primera vez: deploy/fly/setup.sh.
+# Tres etapas, en orden (issue #13):
+#   image       construye la imagen una sola vez y la publica en GHCR etiquetada con el SHA.
+#   staging     despliega esa imagen en la app de staging, con el gate y el check de /health.
+#   production  la misma imagen en la app de producción, detrás del environment `production`
+#               de GitHub, que exige aprobación manual (Settings → Environments → required
+#               reviewers; no se puede fijar en este archivo).
+# fly.toml y deploy/fly/staging.toml corren el bootstrap como release_command antes de cambiar
+# de versión, y la estrategia bluegreen pasa el tráfico solo si /health responde 2xx. Antes de
+# cada deploy, el commit tiene que descender del release que atiende (un re-run del CI de un
+# commit viejo dispara este workflow igual que un merge); después, /health tiene que atenderlo.
+# Las dos verificaciones: deploy/fly/release-check.sh. La primera vez: deploy/fly/setup.sh.
 # No hay deploy manual desde acá: un commit que no pasó por el CI no se despliega.
 name: deploy
 
@@ -27,22 +33,45 @@ concurrency:
   cancel-in-progress: false
   queue: max
 
+env:
+  SHA: ${{ github.event.workflow_run.head_sha }}
+  IMAGE: ghcr.io/${{ github.repository }}
+
 jobs:
-  deploy:
+  image:
     # Solo commits que llegaron a main con el CI en verde (un PR desde una rama llamada main no
     # cuenta: su evento es pull_request).
     if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      # El commit que pasó el CI, no el último de main.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.SHA }}
+      - name: Login en GHCR
+        run: echo "$GITHUB_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Construir la imagen
+        run: docker build -t "$IMAGE:$SHA" .
+      - name: Publicar la imagen
+        run: docker push "$IMAGE:$SHA"
+
+  staging:
+    needs: image
+    runs-on: ubuntu-latest
     timeout-minutes: 20
     environment:
-      name: production
-      url: https://cocos-challenge-a-api.fly.dev
+      name: staging
+      url: https://cocos-challenge-a-staging.fly.dev
     env:
-      SHA: ${{ github.event.workflow_run.head_sha }}
-      URL: https://cocos-challenge-a-api.fly.dev
+      URL: https://cocos-challenge-a-staging.fly.dev
     steps:
-      # El commit que pasó el CI, no el último de main. Con la historia completa: el gate
-      # compara ese commit con el release que atiende.
+      # Con la historia completa: el gate compara el commit con el release que atiende.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.SHA }}
@@ -51,10 +80,32 @@ jobs:
         run: deploy/fly/release-check.sh before
       - uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1 # 1.6
       - name: Deploy
-        run: flyctl deploy --remote-only --image-label "$SHA" --env "RELEASE=$SHA"
+        run: flyctl deploy --config deploy/fly/staging.toml --image "$IMAGE:$SHA" --env "RELEASE=$SHA"
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-      # Desde afuera, por el dominio público: atiende este commit con ok: true. Si el deploy no
-      # hubiera cambiado nada, release sería el commit anterior; reintenta mientras lo sea.
+      - name: /health atiende el commit
+        run: deploy/fly/release-check.sh after
+
+  production:
+    needs: staging
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment:
+      name: production
+      url: https://cocos-challenge-a-api.fly.dev
+    env:
+      URL: https://cocos-challenge-a-api.fly.dev
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.SHA }}
+          fetch-depth: 0
+      - name: El commit desciende del release actual
+        run: deploy/fly/release-check.sh before
+      - uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1 # 1.6
+      - name: Deploy
+        run: flyctl deploy --config fly.toml --image "$IMAGE:$SHA" --env "RELEASE=$SHA"
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
       - name: /health atiende el commit
         run: deploy/fly/release-check.sh after

@@ -119,26 +119,78 @@ describe('workflow de deploy', () => {
       expect(deploys('success', event)).toBe(false);
     });
 
-  it('despliega exactamente el commit que pasó el CI, con RELEASE igual a ese SHA', () => {
+  it('despliega exactamente el commit que pasó el CI, con RELEASE igual a ese SHA, y la imagen lleva ese SHA', () => {
     expect(evaluate(inner(valueOf('SHA')), run('success', 'push'))).toBe(SHA);
     expect(valueOf('ref')).toBe('${{ env.SHA }}');
-    expect(yml).toMatch(/^\s*run: flyctl deploy --remote-only --image-label "\$SHA" --env "RELEASE=\$SHA"$/m);
+    expect(valueOf('IMAGE')).toBe('ghcr.io/${{ github.repository }}');
+    expect(yml).toMatch(/^\s*run: docker build -t "\$IMAGE:\$SHA" \.$/m);
   });
 
-  it('antes de desplegar verifica que el commit desciende del release actual, con la historia completa; después, que /health lo atiende', () => {
-    const runs = [...yml.matchAll(/^\s*run: (.+)$/gm)].map((m) => m[1]);
-    expect(runs).toEqual([
+  /** Bloque YAML de un job (indentación de 2 espacios bajo `jobs:`). */
+  const jobs = yml.slice(yml.indexOf('\njobs:\n') + 1);
+  const job = (name: string) => {
+    const m = jobs.match(new RegExp(`^  ${name}:\\n([\\s\\S]*?)(?=^  \\w+:\\n|$(?![\\s\\S]))`, 'm'));
+    if (!m) throw new Error(`deploy.yml no tiene el job ${name}`);
+    return m[1];
+  };
+  const runsOf = (block: string) => [...block.matchAll(/^\s*run: (.+)$/gm)].map((m) => m[1]);
+  const keyIn = (block: string, key: string) => block.match(new RegExp(`^\\s*${key}:\\s*(.+)$`, 'm'))?.[1].trim();
+
+  it('tres etapas en orden: la imagen una vez, staging con ella, producción con la misma y detrás de su environment', () => {
+    expect([...jobs.matchAll(/^  (\w+):\n/gm)].map((m) => m[1])).toEqual(['image', 'staging', 'production']);
+    expect(keyIn(job('staging'), 'needs')).toBe('image');
+    expect(keyIn(job('production'), 'needs')).toBe('staging');
+    expect(keyIn(job('staging'), 'name')).toBe('staging');
+    expect(keyIn(job('production'), 'name')).toBe('production');
+    // La condición del CI va en el primer job; los otros dependen de él.
+    expect(keyIn(job('image'), 'if')).toBeDefined();
+    expect(keyIn(job('staging'), 'if')).toBeUndefined();
+    expect(keyIn(job('production'), 'if')).toBeUndefined();
+  });
+
+  it('la imagen se construye y publica una sola vez en GHCR; staging y producción solo despliegan esa imagen por SHA', () => {
+    expect(runsOf(job('image'))).toEqual([
+      'echo "$GITHUB_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin',
+      'docker build -t "$IMAGE:$SHA" .',
+      'docker push "$IMAGE:$SHA"',
+    ]);
+    expect(keyIn(job('image'), 'packages')).toBe('write');
+    for (const name of ['staging', 'production']) {
+      expect(job(name)).not.toMatch(/docker build|packages: write/);
+    }
+    expect(runsOf(job('staging'))).toEqual([
       'deploy/fly/release-check.sh before',
-      'flyctl deploy --remote-only --image-label "$SHA" --env "RELEASE=$SHA"',
+      'flyctl deploy --config deploy/fly/staging.toml --image "$IMAGE:$SHA" --env "RELEASE=$SHA"',
       'deploy/fly/release-check.sh after',
     ]);
-    // El gate compara commits: hace falta la historia, no solo el commit.
-    expect(valueOf('fetch-depth')).toBe('0');
-    // El script lee SHA y URL del entorno del job, y la URL es la del entorno de GitHub.
-    const url = valueOf('URL');
-    expect(url).toMatch(/^https:\/\/[a-z0-9-]+\.fly\.dev$/);
-    expect(valueOf('url')).toBe(url);
+    expect(runsOf(job('production'))).toEqual([
+      'deploy/fly/release-check.sh before',
+      'flyctl deploy --config fly.toml --image "$IMAGE:$SHA" --env "RELEASE=$SHA"',
+      'deploy/fly/release-check.sh after',
+    ]);
+  });
+
+  it('cada entorno verifica contra su propia URL, con la historia completa para el gate', () => {
+    for (const name of ['staging', 'production']) {
+      const block = job(name);
+      const url = keyIn(block, 'URL');
+      expect(url).toMatch(/^https:\/\/[a-z0-9-]+\.fly\.dev$/);
+      expect(keyIn(block, 'url')).toBe(url);
+      expect(keyIn(block, 'fetch-depth')).toBe('0');
+    }
+    expect(keyIn(job('staging'), 'URL')).not.toBe(keyIn(job('production'), 'URL'));
     expect(statSync(SCRIPT).mode & 0o111).not.toBe(0);
+  });
+
+  it('staging y producción son apps distintas con bases distintas, y la misma configuración', () => {
+    const app = (f: string) => readFileSync(join(ROOT, f), 'utf8').match(/^app = "(.+)"$/m)?.[1];
+    expect(app('fly.toml')).toBe('cocos-challenge-a-api');
+    expect(app('deploy/fly/staging.toml')).toBe('cocos-challenge-a-staging');
+    expect(app('deploy/fly/db.toml')).toBe('cocos-challenge-a-db');
+    expect(app('deploy/fly/staging-db.toml')).toBe('cocos-challenge-a-staging-db');
+    const strip = (f: string) => readFileSync(join(ROOT, f), 'utf8').split('\n').filter((l) => !l.startsWith('#') && !l.startsWith('app = ')).join('\n');
+    expect(strip('deploy/fly/staging.toml')).toBe(strip('fly.toml'));
+    expect(strip('deploy/fly/staging-db.toml')).toBe(strip('deploy/fly/db.toml'));
   });
 });
 

@@ -6,7 +6,9 @@
 #
 #   git switch main && git pull
 #   fly auth login
-#   deploy/fly/setup.sh            # FLY_ORG elige la organización (por defecto, personal)
+#   deploy/fly/setup.sh            # producción (fly.toml + deploy/fly/db.toml)
+#   CONFIG=deploy/fly/staging.toml DB_CONFIG=deploy/fly/staging-db.toml deploy/fly/setup.sh   # staging
+#   FLY_ORG elige la organización (por defecto, personal).
 #
 # Las contraseñas y el token interno se generan acá y van por stdin a `fly secrets import`:
 # no se imprimen, no pasan por la línea de comandos y no quedan en el repo. Para leer el token
@@ -18,9 +20,11 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 
 toml() { sed -n "s/^$1 = \"\(.*\)\"$/\1/p" "$2"; }
-API_APP="$(toml app fly.toml)"
-DB_APP="$(toml app deploy/fly/db.toml)"
-REGION="$(toml primary_region fly.toml)"
+CONFIG="${CONFIG:-fly.toml}"
+DB_CONFIG="${DB_CONFIG:-deploy/fly/db.toml}"
+API_APP="$(toml app "$CONFIG")"
+DB_APP="$(toml app "$DB_CONFIG")"
+REGION="$(toml primary_region "$CONFIG")"
 ORG="${FLY_ORG:-personal}"
 secret() { openssl rand -hex 24; }
 
@@ -34,7 +38,7 @@ echo "== base: $DB_APP ($REGION)"
 fly apps create "$DB_APP" --org "$ORG"
 fly volumes create pgdata --app "$DB_APP" --region "$REGION" --size 1 --yes
 printf 'POSTGRES_PASSWORD=%s\n' "$PG_PASSWORD" | fly secrets import --app "$DB_APP" --stage
-fly deploy --config deploy/fly/db.toml --ha=false
+fly deploy --config "$DB_CONFIG" --ha=false
 
 echo "== API: $API_APP"
 fly apps create "$API_APP" --org "$ORG"
@@ -47,6 +51,6 @@ fly apps create "$API_APP" --org "$ORG"
   printf 'INTERNAL_TOKEN=%s\n' "$(secret)"
 } | fly secrets import --app "$API_APP" --stage
 SHA="$(git rev-parse HEAD)"
-fly deploy --config fly.toml --ha=false --remote-only --image-label "$SHA" --env "RELEASE=$SHA"
+fly deploy --config "$CONFIG" --ha=false --remote-only --image-label "$SHA" --env "RELEASE=$SHA"
 
 SHA="$SHA" URL="https://$API_APP.fly.dev" deploy/fly/release-check.sh after

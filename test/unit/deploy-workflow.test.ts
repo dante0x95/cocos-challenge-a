@@ -1364,6 +1364,69 @@ describe('deploy.sh y remote.sh', () => {
   });
 });
 
+// deploy/lightsail/drill-docker.sh usa el proyecto fijo cocos-staging de remote.sh y al terminar
+// hace `down -v`: si en el Docker local ya hay algo de ese proyecto (un volumen sin contenedores,
+// como deja un `down` sin -v, también), no empieza ni crea nada, así que tampoco lo borra. Con un
+// `docker` simulado que anota cada llamada y responde los listados con EXISTING.
+describe('drill-docker.sh', () => {
+  const dirs: string[] = [];
+  afterEach(() => {
+    for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  });
+  const drill = (existing: Record<string, string>, fail = '') => {
+    const f = fakeBin({
+      docker: [
+        'echo "docker $*" >> "$CALLS"',
+        '[ -n "$FAIL" ] && [[ "$*" == *"$FAIL"* ]] && exit 1',
+        'case "$*" in',
+        '  *"ps -aq --filter label=com.docker.compose.project=cocos-staging") printf "%s" "${PS_PROJECT:-}" ;;',
+        '  *"volume ls -q --filter label=com.docker.compose.project=cocos-staging") printf "%s" "${VOL_PROJECT:-}" ;;',
+        '  *"volume ls -q --filter name=cocos-staging_") printf "%s" "${VOL_NAME:-}" ;;',
+        '  *"ps -aq --filter name=cocos-drill-registry") printf "%s" "${PS_REGISTRY:-}" ;;',
+        'esac',
+      ].join('\n'),
+    });
+    dirs.push(f.dir);
+    const r = runScript('deploy/lightsail/drill-docker.sh', [], f.bin, { CALLS: f.log, FAIL: fail, TMPDIR: f.dir, ...existing });
+    return { ...r, calls: f.calls(), leftovers: readdirSync(f.dir).filter((e) => !['bin', 'calls'].includes(e)) };
+  };
+  const LISTS = [
+    'docker ps -aq --filter label=com.docker.compose.project=cocos-staging',
+    'docker volume ls -q --filter label=com.docker.compose.project=cocos-staging',
+    'docker volume ls -q --filter name=cocos-staging_',
+    'docker ps -aq --filter name=cocos-drill-registry',
+  ];
+
+  it.each([
+    ['un volumen cocos-staging_pgdata sin contenedores', { VOL_NAME: 'cocos-staging_pgdata' }, 'volúmenes cocos-staging_*'],
+    ['un volumen con la etiqueta del proyecto', { VOL_PROJECT: 'otro_nombre' }, 'volúmenes del proyecto cocos-staging'],
+    ['contenedores del proyecto', { PS_PROJECT: 'abc123' }, 'contenedores del proyecto cocos-staging'],
+    ['el contenedor del registro', { PS_REGISTRY: 'def456' }, 'un contenedor cocos-drill-registry'],
+  ])('con %s no empieza: solo lista, no crea ni borra nada', (_name, existing, what) => {
+    const r = drill(existing);
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain(`NO SE ENSAYA: ya hay ${what}`);
+    expect(r.calls.every((c) => LISTS.includes(c))).toBe(true);
+    expect(r.leftovers).toEqual([]);
+  });
+
+  it('si no puede consultar Docker, no empieza', () => {
+    const r = drill({}, 'volume ls');
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain('NO SE ENSAYA: no se pudo consultar Docker');
+    expect(r.calls.every((c) => LISTS.includes(c))).toBe(true);
+  });
+
+  it('sin nada del proyecto, pasa las comprobaciones y empieza por el registro', () => {
+    const r = drill({}, 'run -d --name cocos-drill-registry');
+    expect(r.calls.slice(0, 4)).toEqual(LISTS);
+    expect(r.calls[4]).toMatch(/^docker run -d --name cocos-drill-registry /);
+    // Falla al crear el registro: la limpieza no toca volúmenes (no hubo compose).
+    expect(r.status).not.toBe(0);
+    expect(r.calls.some((c) => / down -v|volume rm/.test(c))).toBe(false);
+  });
+});
+
 // deploy/lightsail/setup.sh, en el servidor con sudo. Corre con `id`, `getent`, `useradd`,
 // `usermod`, `chown` y `docker` simulados (anotan sus argumentos) sobre directorios temporales
 // en lugar de /opt/cocos y /home/deploy.

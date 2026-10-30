@@ -17,17 +17,16 @@
 #   2. bad-boot: el bootstrap falla, y un switch de esa versión se rechaza; sigue good.
 #   3. bad-health: el bootstrap pasa, el switch falla (el healthcheck), rollback vuelve a good y
 #      /health atiende otra vez su release.
-# Al final borra todo lo que creó (contenedores, volumen, red, registro e imágenes). Si ya hay un
-# proyecto cocos-staging o un contenedor del registro, no empieza.
+# Al final borra todo lo que creó (contenedores, volumen, red, registro e imágenes). remote.sh usa
+# el proyecto fijo cocos-staging, y `down -v` borraría su volumen aunque no fuera de este ensayo:
+# si en este Docker ya hay algo de ese proyecto (contenedores o volúmenes, también sin
+# contenedores, como deja un `down` sin -v) o el contenedor del registro, no empieza ni crea nada.
+# Si no puede consultar Docker, tampoco.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
 PORT="${DRILL_REGISTRY_PORT:-5055}"
 REG="localhost:$PORT/cocos-drill"
-ROOT_DIR="$(mktemp -d)"
-NETWORK_CREATED=""
-export COCOS_ROOT="$ROOT_DIR" COMPOSE_WAIT_TIMEOUT="${COMPOSE_WAIT_TIMEOUT:-90}"
-DIR="$ROOT_DIR/staging"
 SHA_GOOD="$(printf 'a%.0s' {1..40})"
 SHA_BOOT="$(printf 'b%.0s' {1..40})"
 SHA_HEALTH="$(printf 'c%.0s' {1..40})"
@@ -35,10 +34,22 @@ SHA_HEALTH="$(printf 'c%.0s' {1..40})"
 fail() { echo "ENSAYO FALLIDO: $*" >&2; exit 1; }
 remote() { bash deploy/lightsail/remote.sh "$@"; }
 
-[ -z "$(docker ps -aq --filter label=com.docker.compose.project=cocos-staging)" ] \
-  || { echo "ya hay un proyecto cocos-staging en este Docker: no se ensaya encima" >&2; exit 2; }
-[ -z "$(docker ps -aq --filter name='^cocos-drill-registry$')" ] \
-  || { echo "ya hay un contenedor cocos-drill-registry" >&2; exit 2; }
+# Antes de crear nada: lo que este ensayo borraría al terminar no puede existir antes.
+refuse() { echo "NO SE ENSAYA: $*" >&2; exit 2; }
+absent() {   # descripción, comando de docker que lista; vacío = no hay
+  local what="$1" out; shift
+  out="$("$@")" || refuse "no se pudo consultar Docker ($*)"
+  [ -z "$out" ] || refuse "ya hay $what en este Docker ($(tr '\n' ' ' <<<"$out")): no se ensaya encima"
+}
+absent "contenedores del proyecto cocos-staging" docker ps -aq --filter label=com.docker.compose.project=cocos-staging
+absent "volúmenes del proyecto cocos-staging" docker volume ls -q --filter label=com.docker.compose.project=cocos-staging
+absent "volúmenes cocos-staging_*" docker volume ls -q --filter name=cocos-staging_
+absent "un contenedor cocos-drill-registry" docker ps -aq --filter name=cocos-drill-registry
+
+ROOT_DIR="$(mktemp -d)"
+NETWORK_CREATED=""
+export COCOS_ROOT="$ROOT_DIR" COMPOSE_WAIT_TIMEOUT="${COMPOSE_WAIT_TIMEOUT:-90}"
+DIR="$ROOT_DIR/staging"
 
 cleanup() {
   if [ -f "$DIR/compose.yml" ] || [ -f "$DIR/compose.next.yml" ]; then

@@ -115,7 +115,7 @@ describe('execute_limit revalida el respaldo al ejecutar', () => {
     const sell = await legacyNew(await legacyUser('unb-exec-s', 100n), 'SELL', 10, '900.00');
     const buy = await legacyNew(await legacyUser('unb-exec-b', 100n), 'BUY', 1, '925.85');
     expect(await candidates()).toEqual(expect.arrayContaining([sell, buy]));
-    const r = await executeLimits(1_000_000);
+    const r = await executeLimits({ max: 1_000_000 });
     expect(r.cancelled).toEqual(expect.arrayContaining([{ order_id: sell, reason: 'UNBACKED' }, { order_id: buy, reason: 'UNBACKED' }]));
     for (const id of [sell, buy]) {
       expect(r.executed).not.toContain(id);
@@ -125,7 +125,7 @@ describe('execute_limit revalida el respaldo al ejecutar', () => {
     }
     expect(await candidates()).not.toEqual(expect.arrayContaining([sell]));
     expect(await candidates()).not.toEqual(expect.arrayContaining([buy]));
-    const next = await executeLimits(1_000_000);
+    const next = await executeLimits({ max: 1_000_000 });
     expect(listed(next)).not.toContain(sell);
     expect(listed(next)).not.toContain(buy);
   });
@@ -138,7 +138,7 @@ describe('3. tenencia 10 y dos SELL LIMIT NEW de 10 heredadas: el respaldo se ev
     const second = await legacyNew(u, 'SELL', 10, '900.00');
     expect(BigInt(second)).toBeGreaterThan(BigInt(first));
     expect(await reserved(u)).toEqual({ cash: '0', shares: '20' });
-    const r = await executeLimits(1_000_000);
+    const r = await executeLimits({ max: 1_000_000 });
     expect(r.executed).toContain(first);
     expect(r.cancelled).toContainEqual({ order_id: second, reason: 'UNBACKED' });
     expect(await orderRow(first)).toEqual({ status: 'FILLED', cancel_reason: null, balance_seq: '3' });
@@ -153,7 +153,7 @@ describe('3. tenencia 10 y dos SELL LIMIT NEW de 10 heredadas: el respaldo se ev
     const u = await legacyUser('unb-two-b', 0n, 10n, late);
     const first = await legacyNew(u, 'SELL', 10, '1000.00', late);   // no cruza todavía
     const second = await legacyNew(u, 'SELL', 10, '900.00', late);
-    const r = await executeLimits(1_000_000);
+    const r = await executeLimits({ max: 1_000_000 });
     expect(r.executed).toContain(second);
     expect(r.not_crossed).not.toContain(first);   // ni siquiera es candidata
     expect(listed(r)).not.toContain(first);
@@ -163,7 +163,7 @@ describe('3. tenencia 10 y dos SELL LIMIT NEW de 10 heredadas: el respaldo se ev
     // El close sube y la primera cruza: ya no hay acciones que la respalden.
     await admin.query('UPDATE app.marketdata SET close = 1000.00 WHERE instrumentid = $1', [late]);
     expect(await candidates()).toContain(first);
-    const r2 = await executeLimits(1_000_000);
+    const r2 = await executeLimits({ max: 1_000_000 });
     expect(r2.cancelled).toContainEqual({ order_id: first, reason: 'UNBACKED' });
     expect(await orderRow(first)).toEqual(UNBACKED);
     expect(await position(u, late)).toBeNull();
@@ -280,7 +280,7 @@ describe('5 y 6. lo que hace el bootstrap: verify_ledger señala y cancel_unback
   it('6. BUY LIMIT NEW heredada sobre ARS → la verificación la cancela; el executor no la lista en errors en ninguna corrida', async () => {
     const u = await legacyUser('unb-ars', 100_000n);
     const id = await legacyNew(u, 'BUY', 1, '10.00', ars);   // con cash de sobra: el problema es el instrumento
-    const before = await executeLimits(1_000_000);
+    const before = await executeLimits({ max: 1_000_000 });
     expect(before.errors.map((e) => e.order_id)).not.toContain(id);
     expect(before.executed).not.toContain(id);
     const r = await verify();
@@ -288,7 +288,7 @@ describe('5 y 6. lo que hace el bootstrap: verify_ledger señala y cancel_unback
     expect(r.unbacked).toContain(id);
     expect(await orderRow(id)).toEqual(UNBACKED);
     expect(await cash(u)).toBe(100_000n);
-    const after = await executeLimits(1_000_000);
+    const after = await executeLimits({ max: 1_000_000 });
     expect(listed(after)).not.toContain(id);
     expect((await verify()).ledger.filter((p) => p.userid === u)).toEqual([]);
   });

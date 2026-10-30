@@ -17,8 +17,15 @@ Requieren la cabecera `X-Internal-Token` con el valor de `INTERNAL_TOKEN` (`401`
 
 | Ruta | Qué hace |
 |---|---|
-| `/internal/execute-limits` | Ejecuta las LIMIT `NEW` que la cotización vigente cruza, a su precio límite. Cada una en su transacción; la decisión final la toma `app.execute_limit_outcome`, bajo el lock ([D-28](../decisiones.md#d-28)). Responde `{ candidates, executed, not_crossed, cancelled, errors }`. `cancelled` lista `{ order_id, reason }` de las que el executor canceló en vez de ejecutar: `reason: "LIMIT"`, porque ejecutarlas violaría los límites de [D-14](../decisiones.md#d-14); `reason: "UNBACKED"`, porque no tenían respaldo (venta sin las acciones, compra sin el cash: solo una orden heredada de una base preexistente, [D-12](../decisiones.md#d-12)). Esas órdenes quedan con ese mismo `cancel_reason`. |
+| `/internal/execute-limits` | Ejecuta las LIMIT `NEW` que la cotización vigente cruza, a su precio límite. Cada una en su transacción; la decisión final la toma `app.execute_limit_outcome`, bajo el lock ([D-28](../decisiones.md#d-28)). Parámetros en la query string, todos opcionales: `max` (tamaño del lote, 1–10000, por defecto 500), `per_user` (a lo sumo N órdenes por usuario por corrida, 1–10000, por defecto 50), `after_id` (cursor: solo órdenes con id mayor; por defecto 0) y `max_ms` (presupuesto de la corrida, 1–600000, por defecto 10000). Un valor que no es un entero sin signo, repetido o un parámetro desconocido → `400`. Responde `{ candidates, executed, not_crossed, cancelled, errors, skipped_users, skipped_instruments, after_id, remaining }`: `cancelled` lista `{ order_id, reason }` de las que el executor canceló en vez de ejecutar: `reason: "LIMIT"`, porque ejecutarlas violaría los límites de [D-14](../decisiones.md#d-14); `reason: "UNBACKED"`, porque no tenían respaldo (venta sin las acciones, compra sin el cash: solo una orden heredada de una base preexistente, [D-12](../decisiones.md#d-12)). Esas órdenes quedan con ese mismo `cancel_reason`; `skipped_users`, los usuarios cuyo lock no se consiguió (`55P03`), y `skipped_instruments`, los instrumentos que se quedaron sin cotización válida entre la selección y la ejecución (`APP01`): sus demás órdenes del lote no se intentaron y no están en `errors`; `after_id` es el cursor para la corrida siguiente (`null` solo cuando el lote se agotó: la próxima empieza de cero; si el presupuesto venció antes de procesar ninguna, es el mismo cursor recibido, también `"0"`); `remaining`, cuántas candidatas del lote no se intentaron porque venció `max_ms`. |
 | `/internal/cleanup-idempotency` | Borra las claves de idempotencia vencidas hace más de un minuto (más viejas que `settings.idempotency_ttl`, 24 h, más un minuto de margen para los requests en curso). Solo recupera espacio: el vencimiento lo decide `app.place_order` al reclamar la clave, con el mismo plazo, así que una clave vencida que el job todavía no borró ya no da replay ni `422` ([D-19](../decisiones.md#d-19)). |
+
+Recorrer todas las pendientes:
+
+```bash
+curl -s -X POST -H "X-Internal-Token: $INTERNAL_TOKEN" 'http://localhost:3000/internal/execute-limits?max=500&max_ms=10000'
+# → { ..., "after_id": "1234", "remaining": 0 }: repetir con ?after_id=1234 hasta que after_id sea null
+```
 
 ## Cuando la base se reinicia
 

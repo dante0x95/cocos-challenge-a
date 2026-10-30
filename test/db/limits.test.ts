@@ -170,13 +170,15 @@ describe('executor con LIMITs que violarían D-14 en el lote', () => {
     let sqls: string[];
     let connects: number;
     try {
-      r = await executeLimits(1_000_000);
+      r = await executeLimits({ max: 1_000_000 });
       sqls = query.mock.calls.map((c) => String(c[0]));
       connects = connect.mock.calls.length;
     } finally { query.mockRestore(); connect.mockRestore(); }
     // Issue #1 (D-20): la selección y después exactamente una sentencia por candidata, sin
     // consultas auxiliares ni transacciones explícitas (cada pool.query toma su conexión una vez).
     expect(sqls[0]).toMatch(/app\.limit_candidates/);
+    // Issue #9: nada salteado ni pendiente, así que cada candidata del lote tuvo su sentencia.
+    expect(r).toMatchObject({ skipped_users: [], skipped_instruments: [], remaining: 0, after_id: null });
     expect(sqls.slice(1)).toEqual(Array(r.candidates).fill('SELECT app.execute_limit_outcome($1) AS r'));
     expect(connects).toBe(sqls.length);
     expect(r.executed).toContain(good);
@@ -194,7 +196,7 @@ describe('executor con LIMITs que violarían D-14 en el lote', () => {
     const next = await candidates();
     expect(next).not.toContain(bad);
     expect(next).not.toContain(huge);
-    const r = await executeLimits(1_000_000);
+    const r = await executeLimits({ max: 1_000_000 });
     const listed = [...r.executed, ...r.not_crossed, ...r.cancelled.map((c) => c.order_id), ...r.errors.map((e) => e.order_id)];
     expect(listed).not.toContain(bad);
     expect(listed).not.toContain(huge);
@@ -294,7 +296,7 @@ describe('concurrencia: la decisión de D-14 se toma con el estado leído bajo e
     expect(await cash(u)).toBe(start);
   });
 
-  it('la cotización deja de ser válida entre la selección y la ejecución → error APP01, la orden sigue NEW y no figura como LIMIT', async () => {
+  it('la cotización deja de ser válida entre la selección y la ejecución → el instrumento queda en skipped_instruments, la orden sigue NEW y no figura como LIMIT ni en errors', async () => {
     const gone = await instrument('D14GONE', '5000.00');
     const w = await newUser('d14-gone');
     await placeOrder(pool, { userid: w, key: 'c', side: 'CASH_IN', type: 'MARKET', instrumentid: ars, amount: '5000.00' });
@@ -306,14 +308,17 @@ describe('concurrencia: la decisión de D-14 se toma con el estado leído bajo e
       await a.query(userLock, [w]);
       let failed: unknown = null;
       // Cuando queda esperando el lock de este usuario, el executor ya eligió sus candidatas.
-      const report = executeLimits(1_000_000).catch((e) => { failed = e; throw e; });
+      const report = executeLimits({ max: 1_000_000 }).catch((e) => { failed = e; throw e; });
       await waitingOnLock("query LIKE $1", 'SELECT app.execute_limit_outcome%', () => failed);
       await admin.query('DELETE FROM app.marketdata WHERE instrumentid = $1', [gone]);
       await a.query('COMMIT');
       const r = await report;
-      expect(r.errors).toContainEqual({ order_id: lim.order_id, error: 'APP01' });
+      // Issue #9: el APP01 no es un error del lote sino una cabeza de línea: se saltea el instrumento.
+      expect(r.skipped_instruments).toContain(String(gone));
+      expect(r.errors.map((x) => x.order_id)).not.toContain(lim.order_id);
       expect(r.cancelled.map((x) => x.order_id)).not.toContain(lim.order_id);
       expect(r.executed).not.toContain(lim.order_id);
+      expect(r.not_crossed).not.toContain(lim.order_id);
     } finally { await a.end(); }
     expect(await orderRow(lim.order_id)).toEqual({ status: 'NEW', balance_seq: null });
   });
@@ -329,7 +334,7 @@ describe('concurrencia: la decisión de D-14 se toma con el estado leído bajo e
       await a.query(userLock, [w]);
       let failed: unknown = null;
       // Cuando queda esperando el lock de este usuario, el executor ya eligió sus candidatas.
-      const report = executeLimits(1_000_000).catch((e) => { failed = e; throw e; });
+      const report = executeLimits({ max: 1_000_000 }).catch((e) => { failed = e; throw e; });
       await waitingOnLock("query LIKE $1", 'SELECT app.execute_limit_outcome%', () => failed);
       expect((await a.query<{ r: boolean }>('SELECT app.cancel_order($1, $2) AS r', [w, Number(lim.order_id)])).rows[0].r).toBe(true);
       await a.query('COMMIT');

@@ -233,6 +233,19 @@ describe('5 y 6. lo que hace el bootstrap: verify_ledger señala y cancel_unback
     expect(await orderRow(legacy)).toEqual(UNBACKED);
   });
 
+  it('cash heredado negativo sin compras NEW: no hay reserva de cash que señalar (una SELL NEW con respaldo sigue NEW)', async () => {
+    const u = await legacyUser('unb-neg', 10_000n, 10n);
+    await admin.query(
+      `INSERT INTO app.orders (instrumentid, userid, size, price, type, side, status, datetime, balance_seq)
+       VALUES ($1, $2, 1, 1000.00, 'MARKET', 'BUY', 'FILLED', timezone('UTC', now()), 3)`, [inst, u]);
+    expect(await cash(u)).toBe(-90_000n);
+    const sell = await legacyNew(u, 'SELL', 11, '2000.00');
+    const r = await verify();
+    expect(r.ledger.filter((p) => p.userid === u)).toEqual([]);
+    expect(r.unbacked).not.toContain(sell);
+    expect(await orderRow(sell)).toEqual({ status: 'NEW', cancel_reason: null, balance_seq: null });
+  });
+
   it('6. BUY LIMIT NEW heredada sobre ARS → la verificación la cancela; el executor no la lista en errors en ninguna corrida', async () => {
     const u = await legacyUser('unb-ars', 100_000n);
     const id = await legacyNew(u, 'BUY', 1, '10.00', ars);   // con cash de sobra: el problema es el instrumento

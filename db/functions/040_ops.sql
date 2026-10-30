@@ -84,7 +84,8 @@ BEGIN
     -- Reservas de las NEW (issue #6), contra el cash y las posiciones de la misma pasada del fold.
     SELECT COALESCE(sum(o.size::numeric * o.price * 100), 0) INTO res_cash
       FROM app.orders o WHERE o.userid = u AND o.status = 'NEW' AND o.side = 'BUY';
-    IF res_cash > fold_cash THEN
+    -- Sin compras NEW no hay nada que respaldar, aunque el cash heredado sea negativo.
+    IF res_cash > 0 AND res_cash > fold_cash THEN
       userid := u; problem := 'reserva';
       detail := format('cash reservado %s > cash %s (centavos): compra LIMIT pendiente sin respaldo', res_cash::numeric(20,0), fold_cash);
       RETURN NEXT;

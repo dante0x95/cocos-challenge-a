@@ -57,5 +57,5 @@ GRANT EXECUTE ON FUNCTION
   app.unaccent_immutable(text)
 TO api;
 -- unaccent_immutable la llama la búsqueda de instrumentos directo desde la API (D-25).
--- Sin EXECUTE para api: c_state, idempotency_ttl e idempotency_purge_age (se usan solo desde las funciones de arriba),
+-- Sin EXECUTE para api: c_state, idempotency_ttl, idempotency_reclaim_age e idempotency_purge_age (se usan solo desde las funciones de arriba),
 -- verify_ledger y cancel_unbacked (bootstrap), y las auxiliares internas.

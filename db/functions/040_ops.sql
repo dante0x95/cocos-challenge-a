@@ -1,19 +1,22 @@
 -- 040 — Operación: limpieza de idempotencia, verificación de la historia, salud. Repetible.
 
--- Limpieza de claves de idempotencia vencidas (D-19). Solo recupera espacio: una clave vencida
--- que el job todavía no borró ya no da replay ni 422, porque place_order la reusa. El job pide
--- los usuarios con claves para borrar y limpia cada uno en su propia transacción, con try-lock:
--- nunca borra una clave en medio de un replay en curso (el replay corre bajo el mismo lock) y
--- nunca hace esperar a un escritor.
+-- Limpieza de claves de idempotencia vencidas (D-19). Solo recupera espacio: una clave que
+-- place_order ya puede reclamar (app.idempotency_reclaim_age(), el plazo más un minuto) y que el
+-- job todavía no borró ya no da replay ni 422, porque place_order la reusa. El job pide los
+-- usuarios con claves para borrar y limpia cada uno en su propia transacción, con try-lock: nunca
+-- borra una clave en medio de un replay en curso (el replay corre bajo el mismo lock) y nunca hace
+-- esperar a un escritor.
 --
--- Borra una clave 1 minuto después de que vence, no apenas vence. place_order decide con el
--- now() del inicio de su transacción, y antes del lock de usuario puede esperar la barrera de
--- despliegue: un request que empezó con la clave viva la tiene que encontrar al llegar al lock,
--- aunque la limpieza corra mientras espera. Una escritura dura a lo sumo el statement_timeout
--- del rol api (5 s, D-20); el minuto lo cubre con margen.
+-- Borra una clave un minuto después de que place_order la puede reclamar (el plazo más dos
+-- minutos, issue #38), no antes: si la borrara mientras place_order todavía la trata como viva, el
+-- vencimiento volvería a depender del job. place_order decide con el now() del inicio de su
+-- transacción, y antes del lock de usuario puede esperar la barrera de despliegue: un request que
+-- no puede reclamar la clave la tiene que encontrar al llegar al lock, aunque la limpieza corra
+-- mientras espera. Una escritura dura a lo sumo el statement_timeout del rol api (5 s, D-20); el
+-- minuto lo cubre con margen.
 CREATE OR REPLACE FUNCTION app.idempotency_purge_age() RETURNS interval
 LANGUAGE sql STABLE SET search_path = pg_catalog, app, pg_temp AS $$
-  SELECT app.idempotency_ttl() + interval '1 minute'
+  SELECT app.idempotency_reclaim_age() + interval '1 minute'
 $$;
 
 CREATE OR REPLACE FUNCTION app.cleanup_candidates()

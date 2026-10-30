@@ -20,8 +20,9 @@
 --   p_instrumentid: NULL en CASH_IN/CASH_OUT; se resuelve ARS acá (la API no necesita su id).
 --   p_legacy_hash: transición del issue #4 (D-19). Hash que calculaba la versión anterior para este
 --   mismo request; solo sirve para reconocer una clave que ya existe. Una clave nueva guarda siempre
---   p_hash. Se quita cuando vencen las claves grabadas antes del despliegue: app.idempotency_ttl()
---   (24 h) después, sin esperar a la limpieza, porque place_order reusa una clave vencida.
+--   p_hash. Se quita cuando ya no queda ninguna clave grabada antes del despliegue que place_order
+--   no pueda reclamar: app.idempotency_reclaim_age() (24 h + 1 min) después, sin esperar a la
+--   limpieza, porque place_order reusa una clave reclamable.
 -- La firma anterior (sin p_legacy_hash) se borra para que no quede una sobrecarga ambigua.
 DROP FUNCTION IF EXISTS app.place_order(int, text, text, text, text, int, int, numeric, numeric);
 CREATE OR REPLACE FUNCTION app.place_order(
@@ -115,18 +116,21 @@ BEGIN
 
   PERFORM app.lock_user(p_userid);
 
-  -- Idempotencia (D-19). La clave se reclama si no existe o si venció: created_at anterior a
-  -- now() - app.idempotency_ttl(), con el now() del inicio de la transacción (el mismo criterio
-  -- que la limpieza, que solo recupera espacio: el vencimiento no depende de que corra). Una
-  -- clave vencida se reusa en el lugar, con hash y created_at nuevos y sin la respuesta anterior;
-  -- si este request falla, la transacción se revierte y la fila queda como estaba. Si la clave
-  -- está viva, el replay devuelve la respuesta original y sale: no lee estado, no decide de nuevo.
+  -- Idempotencia (D-19). La clave se reclama si no existe o si created_at es anterior a
+  -- now() - app.idempotency_reclaim_age() (el plazo más un minuto, issue #38), con el now() del
+  -- inicio de la transacción: el margen impide que un request posterior que toma el lock primero
+  -- reclame la clave antes de que la use un reintento que empezó dentro del plazo. La limpieza
+  -- borra después (app.idempotency_purge_age()) y solo recupera espacio: el vencimiento no
+  -- depende de que corra. Una clave reclamada se reusa en el lugar, con hash y created_at nuevos y
+  -- sin la respuesta anterior; si este request falla, la transacción se revierte y la fila queda
+  -- como estaba. Si no se reclama, el replay devuelve la respuesta original y sale: no lee
+  -- estado, no decide de nuevo.
   INSERT INTO app.idempotency_keys (userid, key, request_hash)
   VALUES (p_userid, p_key, p_hash)
   ON CONFLICT (userid, key) DO UPDATE
     SET request_hash = EXCLUDED.request_hash, created_at = now(),
         http_status = NULL, response_body = NULL, order_id = NULL
-    WHERE idempotency_keys.created_at < now() - app.idempotency_ttl()
+    WHERE idempotency_keys.created_at < now() - app.idempotency_reclaim_age()
   RETURNING key INTO claimed;
   IF claimed IS NULL THEN
     SELECT request_hash, http_status, response_body, order_id INTO prev

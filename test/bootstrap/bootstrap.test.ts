@@ -533,11 +533,11 @@ describe('bootstrap', () => {
         const dir = mkdtempSync(join(tmpdir(), 'cocos-db-7-'));
         try {
           cpSync(resolve('db'), dir, { recursive: true });
-          writeFileSync(join(dir, 'functions', '095_test_falla.sql'), `
-            CREATE FUNCTION app.test_falla() RETURNS trigger LANGUAGE plpgsql AS $$
+          writeFileSync(join(dir, 'functions', '095_test_fail.sql'), `
+            CREATE FUNCTION app.test_fail() RETURNS trigger LANGUAGE plpgsql AS $$
             BEGIN RAISE EXCEPTION 'falla de prueba después de cancelar'; END $$;
-            CREATE TRIGGER test_falla BEFORE UPDATE ON app.orders FOR EACH ROW
-              WHEN (NEW.cancel_reason = 'UNBACKED' AND NEW.userid = ${other}) EXECUTE FUNCTION app.test_falla();`);
+            CREATE TRIGGER test_fail BEFORE UPDATE ON app.orders FOR EACH ROW
+              WHEN (NEW.cancel_reason = 'UNBACKED' AND NEW.userid = ${other}) EXECUTE FUNCTION app.test_fail();`);
           const log: string[] = [];
           await expect(bootstrap({ adminUrl: url, apiPassword: 'api', dbDir: dir, log: (m) => log.push(m) }))
             .rejects.toThrow(/falla de prueba después de cancelar/);
@@ -551,7 +551,7 @@ describe('bootstrap', () => {
         expect(await state(second)).toEqual({ status: 'NEW', cancel_reason: null });
         expect((await adminDb.query<{ name: string }>('SELECT name FROM public.schema_migrations ORDER BY name')).rows.map((r) => r.name))
           .not.toContain('007_cancel_reason_unbacked.sql');
-        expect((await adminDb.query("SELECT 1 FROM pg_trigger WHERE tgname = 'test_falla'")).rowCount).toBe(0);
+        expect((await adminDb.query("SELECT 1 FROM pg_trigger WHERE tgname = 'test_fail'")).rowCount).toBe(0);
         // Sin 007, el CHECK sigue sin admitir el motivo.
         await expect(adminDb.query("UPDATE app.orders SET status = 'CANCELLED', cancel_reason = 'UNBACKED' WHERE id = $1", [first]))
           .rejects.toMatchObject({ code: '23514', constraint: 'orders_cancel_reason_valid' });

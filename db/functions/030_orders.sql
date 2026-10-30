@@ -276,9 +276,10 @@ $$;
 --              una MONEDA): la canceló con cancel_reason = 'UNBACKED'. Solo pasa con una NEW
 --              heredada, insertada en orders sin pasar por place_order; en régimen lo reservado
 --              al crearla es exactamente lo que se ejecuta (issue #6).
---   'LIMIT'    ejecutarla violaría D-14 (SELL: cash + importe > 10^15 ARS; BUY: posición +
---              size > 2^62 acciones o costo + importe > 10^17 ARS): la canceló con
---              cancel_reason = 'LIMIT'.
+--   'LIMIT'    viola D-14: su importe (size × price) supera 10^15 ARS (solo una NEW heredada,
+--              issue #41), o ejecutarla dejaría el estado fuera de los límites (SELL: cash +
+--              importe > 10^15 ARS; BUY: posición + size > 2^62 acciones o costo + importe >
+--              10^17 ARS): la canceló con cancel_reason = 'LIMIT'.
 -- En los dos casos la orden sale del executor, libera su reserva y el motivo queda en ella.
 -- El respaldo y D-14 se revalidan bajo el lock, con una sola lectura del estado. Una BUY con
 -- respaldo no puede dejar el cash negativo ni una SELL la posición: de D-14 solo quedan por
@@ -304,6 +305,19 @@ BEGIN
   END IF;
   IF NOT ((o.side = 'BUY' AND vc.close <= o.price) OR (o.side = 'SELL' AND vc.close >= o.price)) THEN
     RETURN 'SKIPPED';
+  END IF;
+
+  -- Tope por orden (D-14, issue #41): una orden con importe (size × price) por encima de 10^15
+  -- ARS no se ejecuta, aunque el resultado quede dentro de los límites (cash −0,03 y una SELL de
+  -- 2 a 500.000.000.000.000,01 dejaría el cash en 999.999.999.999.999,99). Es la validación de
+  -- place_order, que no la graba: solo la puede tener una NEW heredada. Va antes del respaldo y
+  -- del fold: es una propiedad de la orden, no del estado, así que el motivo no depende del cash
+  -- ni de la tenencia del momento (por encima del tope y sin respaldo es LIMIT, igual que la
+  -- cancela el bootstrap con cancel_over_cap) y no hace falta leer el fold para decidirla.
+  IF o.size::numeric * o.price > 1e15 THEN
+    UPDATE app.orders SET status = 'CANCELLED', cancel_reason = 'LIMIT'
+     WHERE id = p_order_id AND userid = o.userid AND status = 'NEW';
+    RETURN 'LIMIT';
   END IF;
 
   -- Estado bajo el lock: una pasada del fold para el respaldo y para D-14.

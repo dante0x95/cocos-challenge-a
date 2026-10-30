@@ -16,7 +16,9 @@
 //    cash del fold no coincide con la suma directa de importes. Un corto heredado (D-01) o una
 //    historia fuera de lo representable (D-14) se informan y no abortan. Una LIMIT NEW sin
 //    respaldo (heredada: place_order no las crea) se cancela con cancel_reason = 'UNBACKED'
-//    (app.cancel_unbacked, bajo el lock del usuario) y se informa.
+//    (app.cancel_unbacked, bajo el lock del usuario) y se informa. Antes, una NEW con importe
+//    por encima de 10^15 ARS (D-14, también heredada) se cancela con cancel_reason = 'LIMIT'
+//    (app.cancel_over_cap) y se informa.
 // 5. Contrato de la API (issue #39): con las funciones nuevas aplicadas, cada llamada del release
 //    que atiende (SERVING_RELEASE; el contrato que registró su bootstrap en public.api_contract)
 //    y cada una de esta versión (src/db/contract.ts) tiene que resolver a una sola función que
@@ -56,6 +58,8 @@ export interface BootstrapResult {
   ledger: LedgerProblem[];
   // LIMIT NEW heredadas sin respaldo, canceladas con cancel_reason = 'UNBACKED' (issue #6).
   unbacked: string[];
+  // NEW heredadas con importe por encima de 10^15 ARS, canceladas con cancel_reason = 'LIMIT' (issue #41).
+  overCap: string[];
   // El contrato del release que atiende que se verificó (vacío si no había ninguno registrado).
   previousContract: string[];
 }
@@ -80,22 +84,30 @@ export async function bootstrap(opts: BootstrapOptions): Promise<BootstrapResult
 /**
  * Paso 4 del bootstrap: verifica la historia, dentro de su transacción. Aborta (excepción) si el
  * cash del fold no coincide con la suma directa de importes. Un corto heredado (D-01) o una
- * historia fuera de lo representable (D-14) solo se informan. Las LIMIT NEW sin respaldo se
- * cancelan usuario por usuario, bajo su lock (app.cancel_unbacked vuelve a decidir con el estado
- * del momento), y se informan con su id.
+ * historia fuera de lo representable (D-14) solo se informan. Las NEW por encima del tope de
+ * D-14 y después las LIMIT NEW sin respaldo se cancelan usuario por usuario, bajo su lock
+ * (app.cancel_over_cap y app.cancel_unbacked vuelven a decidir con el estado del momento), y se
+ * informan con su id. Primero el tope: lo que esas reservaban no cuenta para el respaldo de las demás.
  */
-export async function verifyLedger(db: pg.Pool | pg.PoolClient, log: (m: string) => void): Promise<{ ledger: LedgerProblem[]; unbacked: string[] }> {
+export async function verifyLedger(db: pg.Pool | pg.PoolClient, log: (m: string) => void): Promise<{ ledger: LedgerProblem[]; unbacked: string[]; overCap: string[] }> {
   const ledger = (await db.query<LedgerProblem>('SELECT userid, problem, detail FROM app.verify_ledger()')).rows;
   for (const p of ledger) log(`  historia: usuario ${p.userid} — ${p.problem}: ${p.detail}`);
-  const broken = ledger.filter((p) => p.problem !== 'short' && p.problem !== 'overflow' && p.problem !== 'reserva');
+  const tolerated = new Set(['short', 'overflow', 'reserva', 'tope']);
+  const broken = ledger.filter((p) => !tolerated.has(p.problem));
   if (broken.length) throw new Error(`verificación de la historia falló para ${broken.length} usuario(s)`);
+  const overCap: string[] = [];
+  for (const userid of new Set(ledger.filter((p) => p.problem === 'tope').map((p) => p.userid))) {
+    const ids = (await db.query<{ order_id: string }>('SELECT order_id::text FROM app.cancel_over_cap($1)', [userid])).rows.map((r) => r.order_id);
+    for (const id of ids) log(`  historia: usuario ${userid} — orden ${id} cancelada: importe por encima de 10^15 ARS (cancel_reason LIMIT)`);
+    overCap.push(...ids);
+  }
   const unbacked: string[] = [];
   for (const userid of new Set(ledger.filter((p) => p.problem === 'reserva').map((p) => p.userid))) {
     const ids = (await db.query<{ order_id: string }>('SELECT order_id::text FROM app.cancel_unbacked($1)', [userid])).rows.map((r) => r.order_id);
     for (const id of ids) log(`  historia: usuario ${userid} — orden ${id} cancelada: LIMIT pendiente sin respaldo (cancel_reason UNBACKED)`);
     unbacked.push(...ids);
   }
-  return { ledger, unbacked };
+  return { ledger, unbacked, overCap };
 }
 
 /** Por qué una llamada del contrato no resuelve, o null si resuelve a una sola función que api puede ejecutar. */
@@ -165,7 +177,7 @@ export async function verifyContract(db: pg.PoolClient, contract: readonly strin
 }
 
 async function run(db: pg.Pool, dbDir: string, opts: BootstrapOptions, log: (m: string) => void): Promise<BootstrapResult> {
-  const result: BootstrapResult = { applied: [], baselined: [], functions: [], ledger: [], unbacked: [], previousContract: [] };
+  const result: BootstrapResult = { applied: [], baselined: [], functions: [], ledger: [], unbacked: [], overCap: [], previousContract: [] };
   const client = await db.connect();
   client.on('notice', (n) => log(`  ${n.severity ?? 'NOTICE'}: ${n.message}`));
 
@@ -226,7 +238,7 @@ async function run(db: pg.Pool, dbDir: string, opts: BootstrapOptions, log: (m: 
 
       // 4. Verificación de la historia
       if (result.applied.length > 0) {
-        ({ ledger: result.ledger, unbacked: result.unbacked } = await verifyLedger(client, log));
+        ({ ledger: result.ledger, unbacked: result.unbacked, overCap: result.overCap } = await verifyLedger(client, log));
       }
 
       // 5. Contrato de la API

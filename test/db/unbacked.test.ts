@@ -246,17 +246,39 @@ describe('5 y 6. lo que hace el bootstrap: verify_ledger señala y cancel_unback
     expect(await orderRow(sell)).toEqual({ status: 'NEW', cancel_reason: null, balance_seq: null });
   });
 
-  it('BUY LIMIT NEW heredada que reserva 10²⁰ centavos (más que numeric(20,0)): la verificación la señala con el número exacto y la cancela; el otro usuario sigue igual', async () => {
+  it('1.000 BUY LIMIT NEW heredadas de 1 @ 10¹⁵ que reservan 10²⁰ centavos (más que numeric(20,0)): la verificación lo señala con el número exacto y las cancela; el otro usuario sigue igual', async () => {
     const u = await legacyUser('unb-huge', 10_000n);
-    const id = await legacyNew(u, 'BUY', 1000, '1000000000000000.00');
+    // Cada una en el tope de D-14 (issue #41): la reserva grande sale de la suma, no de una orden.
+    const ids = (await admin.query<{ id: string }>(
+      `INSERT INTO app.orders (instrumentid, userid, size, price, type, side, status, datetime)
+       SELECT $1, $2, 1, 1000000000000000.00, 'LIMIT', 'BUY', 'NEW', timezone('UTC', now()) FROM generate_series(1, 1000)
+       RETURNING id::text`, [inst, u])).rows.map((x) => x.id);
     const other = await legacyUser('unb-huge-ok', 10_000n);
     const ok = await legacyNew(other, 'BUY', 1, '50.00');
     const r = await verify();   // no lanza: el bootstrap sigue
-    expect(r.ledger).toContainEqual({ userid: u, problem: 'reserva', detail: 'cash reservado 100000000000000000000 > cash 10000 (centavos): compra LIMIT pendiente sin respaldo' });
-    expect(r.unbacked).toContain(id);
-    expect(await orderRow(id)).toEqual(UNBACKED);
+    expect(r.ledger.filter((p) => p.userid === u)).toEqual([
+      { userid: u, problem: 'reserva', detail: 'cash reservado 100000000000000000000 > cash 10000 (centavos): compra LIMIT pendiente sin respaldo' }]);
+    expect(r.unbacked).toEqual(expect.arrayContaining(ids));
+    for (const id of [ids[0], ids[999]]) expect(await orderRow(id)).toEqual(UNBACKED);
     expect(r.ledger.filter((p) => p.userid === other)).toEqual([]);
     expect(await orderRow(ok)).toEqual({ status: 'NEW', cancel_reason: null, balance_seq: null });
+  });
+
+  // Issue #41: una NEW por encima del tope de D-14 se señala con 'tope' y se cancela con LIMIT,
+  // antes que las sin respaldo: no cuenta en 'reserva', aunque tampoco tenga respaldo.
+  it('BUY LIMIT NEW heredada de 1.000 @ 10¹⁵ (importe 10¹⁸, sin respaldo): la verificación la señala con tope, no con reserva, y la cancela con LIMIT', async () => {
+    const u = await legacyUser('unb-tope', 10_000n);
+    const id = await legacyNew(u, 'BUY', 1000, '1000000000000000.00');
+    const ok = await legacyNew(u, 'BUY', 1, '50.00');
+    const r = await verify();
+    expect(r.ledger.filter((p) => p.userid === u)).toEqual([
+      { userid: u, problem: 'tope', detail: `orden ${id} pendiente con importe 1000000000000000000.00 ARS > 10^15 ARS: no se ejecuta (D-14)` }]);
+    expect(r.overCap).toEqual([id]);
+    expect(r.unbacked).not.toContain(id);
+    expect(r.log).toContain(`  historia: usuario ${u} — orden ${id} cancelada: importe por encima de 10^15 ARS (cancel_reason LIMIT)`);
+    expect(await orderRow(id)).toEqual({ status: 'CANCELLED', cancel_reason: 'LIMIT', balance_seq: null });
+    expect(await orderRow(ok)).toEqual({ status: 'NEW', cancel_reason: null, balance_seq: null });
+    expect((await verify()).ledger.filter((p) => p.userid === u)).toEqual([]);
   });
 
   // Una base heredada puede tener usuarios cuya única orden es una NEW: la verificación los recorre

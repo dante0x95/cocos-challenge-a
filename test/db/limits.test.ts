@@ -581,3 +581,85 @@ describe('tope por orden: el importe no supera 10¹⁵ ARS en ningún estado', (
     });
   });
 });
+
+// Issue #41: el tope por orden también al ejecutar. Una NEW heredada (place_order no la graba)
+// con importe por encima de 10¹⁵ ARS no se ejecuta aunque el resultado quede dentro de los
+// límites: execute_limit_outcome la cancela con LIMIT antes de mirar el resultado y el respaldo.
+describe('NEW heredada con importe por encima de 10¹⁵ ARS: no se ejecuta aunque el resultado entre en los límites', () => {
+  let cap: number;   // close 1.000.000.000.000.000,01: una SELL a 10¹⁵ o a 10¹⁵ + 0,01 cruza
+  beforeAll(async () => { cap = await instrument('D14CAP41', '1000000000000000.01'); });
+
+  /** Usuario heredado con cash −0,03 ARS y 2 acciones de `cap`: CASH_IN 0,01 y BUY 2 @ 0,02. */
+  async function lowCash(): Promise<number> {
+    const u = await newUser('d14-41');
+    await admin.query(
+      `INSERT INTO app.orders (instrumentid, userid, size, price, type, side, status, datetime, balance_seq) VALUES
+         ($1, $2, 1, 0.01, 'MARKET', 'CASH_IN', 'FILLED', timezone('UTC', now()), 1),
+         ($3, $2, 2, 0.02, 'MARKET', 'BUY',     'FILLED', timezone('UTC', now()), 2)`, [ars, u, cap]);
+    expect(await cash(u)).toBe(-3n);
+    return u;
+  }
+  const reason = async (id: string) =>
+    (await admin.query('SELECT status, cancel_reason, balance_seq FROM app.orders WHERE id = $1', [id])).rows[0];
+  const LIMIT = { status: 'CANCELLED', cancel_reason: 'LIMIT', balance_seq: null };
+
+  it('el caso del issue: cash −0,03, 2 acciones, SELL LIMIT NEW 2 @ 500.000.000.000.000,01 (importe 10¹⁵ + 0,02) → LIMIT, CANCELLED, cash sin cambios', async () => {
+    const u = await lowCash();
+    const id = await legacyNew(u, cap, 'SELL', 2, '500000000000000.01');
+    expect(await reservedShares(u, cap)).toBe('2');
+    // Sin el tope al ejecutar: FILLED, con el cash en 999.999.999.999.999,99 (dentro del tope de cash).
+    expect(await run('execute_limit_outcome', id)).toBe('LIMIT');
+    expect(await reason(id)).toEqual(LIMIT);
+    expect(await cash(u)).toBe(-3n);
+    expect(await reservedShares(u, cap)).toBe('0');
+    expect(await candidates()).not.toContain(id);
+    expect(await run('execute_limit_outcome', id)).toBe('SKIPPED');
+  });
+
+  it.each([
+    ['1.000.000.000.000.000,00 (exacto)', 'FILLED', '1000000000000000.00'],
+    ['1.000.000.000.000.000,01', 'LIMIT', '1000000000000000.01'],
+  ] as const)('venta con cash bajo (−0,03): SELL LIMIT 1 @ %s → %s', async (_n, outcome, price) => {
+    const u = await lowCash();
+    const id = await legacyNew(u, cap, 'SELL', 1, price);
+    expect(await run('execute_limit_outcome', id)).toBe(outcome);
+    if (outcome === 'FILLED') {
+      expect(await reason(id)).toEqual({ status: 'FILLED', cancel_reason: null, balance_seq: '3' });
+      expect(await cash(u)).toBe(CAP_CENTS - 3n);
+    } else {
+      expect(await reason(id)).toEqual(LIMIT);
+      expect(await cash(u)).toBe(-3n);
+    }
+  });
+
+  it.each([
+    ['1.000.000.000.000.000,00 (exacto)', 'FILLED', '1000000000000000.00'],
+    ['1.000.000.000.000.000,01', 'LIMIT', '1000000000000000.01'],
+  ] as const)('compra con respaldo (cash 10¹⁵ + 0,01): BUY LIMIT 1 @ %s → %s', async (_n, outcome, price) => {
+    const u = await richUser(CAP_CENTS + 1n);
+    const id = await legacyNew(u, inst, 'BUY', 1, price);   // cruza: close 5.000
+    expect(await run('execute_limit_outcome', id)).toBe(outcome);
+    if (outcome === 'FILLED') {
+      expect(await reason(id)).toEqual({ status: 'FILLED', cancel_reason: null, balance_seq: '4' });
+      expect(await cash(u)).toBe(1n);
+    } else {
+      expect(await reason(id)).toEqual(LIMIT);
+      expect(await cash(u)).toBe(CAP_CENTS + 1n);
+    }
+  });
+
+  it('por encima del tope y sin respaldo → LIMIT, no UNBACKED: el tope es de la orden y se decide antes que el respaldo', async () => {
+    const u = await newUser('d14-41-nada');
+    const id = await legacyNew(u, cap, 'SELL', 1, '1000000000000000.01');   // sin acciones
+    expect(await run('execute_limit', id)).toBe(false);
+    expect(await reason(id)).toEqual(LIMIT);
+  });
+
+  it('el executor la lista en cancelled con motivo LIMIT, no en executed', async () => {
+    const id = await legacyNew(await lowCash(), cap, 'SELL', 2, '500000000000000.01');
+    const r = await executeLimits({ max: 1_000_000, perUser: 1_000_000 });
+    expect(r.cancelled).toContainEqual({ order_id: id, reason: 'LIMIT' });
+    expect(r.executed).not.toContain(id);
+    expect(await reason(id)).toEqual(LIMIT);
+  });
+});

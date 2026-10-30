@@ -19,7 +19,7 @@ Requieren la cabecera `X-Internal-Token` con el valor de `INTERNAL_TOKEN` (`401`
 
 ## Cuando la base se reinicia
 
-Un reinicio de Postgres (mantenimiento, failover, `pg_terminate_backend`) corta todas las conexiones del pool. Las ociosas se descartan solas (el pool recibe el evento `error`, lo registra con `scope: "pg-pool-idle"` y sigue); la siguiente request abre una conexión nueva. Las consultas en vuelo fallan y responden con un error reintentable; para `POST /orders`, con la misma `Idempotency-Key` ([D-20](../decisiones.md#d-20)). El proceso no se reinicia. `GET /health` responde `503` con `db: "down"` mientras la base no contesta y vuelve a `200` sola.
+Un reinicio de Postgres (mantenimiento, failover, `pg_terminate_backend`) corta todas las conexiones del pool. Las ociosas se descartan solas (el pool recibe el evento `error`, lo registra con `scope: "pg-pool-idle"` y sigue); la siguiente request abre una conexión nueva. Este listener protege solo a las conexiones ociosas. Una request cuya consulta estaba en vuelo recibe el error de la conexión cortada y hoy responde `500 INTERNAL`: su resultado es desconocido (la escritura pudo confirmarse) y `POST /orders` se reintenta con la misma `Idempotency-Key`, que devuelve la orden si existe ([D-20](../decisiones.md#d-20)). El proceso no se reinicia. `GET /health` responde `503` con `db: "down"` mientras la base no contesta y vuelve a `200` sola.
 
 ## Jobs periódicos
 

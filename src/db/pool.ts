@@ -22,8 +22,8 @@ export const pool = new pg.Pool({
   connectionTimeoutMillis: config.PG_CONNECT_TIMEOUT_MS,
   application_name: 'cocos-api',
   // Sondas TCP sobre las conexiones ociosas: un peer que desapareció sin cerrar (failover, red)
-  // termina detectado y descartado. Con los defaults de Linux tarda minutos, no segundos: lo que
-  // acota una request es el 503 reintentable de un error de conexión, no esto.
+  // termina detectado y descartado. Con los defaults de Linux tarda minutos, no segundos: a una
+  // request que toma esa conexión antes la acota el error de su consulta (ECONNRESET), no esto.
   keepAlive: true,
   keepAliveInitialDelayMillis: 10_000,
 });

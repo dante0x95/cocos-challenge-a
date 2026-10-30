@@ -104,7 +104,7 @@ health_failed() {
 # ancestría (release-check.sh before) lo frena y /health sigue igual. Sin el gate, ese release
 # viejo se desplegaría encima del actual.
 drill_rerun() {
-  local before old id attempt i conclusion
+  local before old id attempt next now i conclusion log
   need_gh
   before="$(serving rerun)"
   echo "== rerun: atiende $before"
@@ -123,18 +123,24 @@ drill_rerun() {
   [ -n "$old" ] || fail "rerun: no hay un deploy terminado de un release anterior a $before para reejecutar"
   echo "== rerun: reejecuta el deploy $id del commit $old"
 
-  # Un re-run es otro intento de la misma corrida: espera a que empiece antes de mirarla.
+  # Un re-run es otro intento de la misma corrida: el resultado y el log que valen son los de
+  # ese intento, no los del anterior (que pudo haber fallado igual). Si no empieza, falla.
   attempt="$(gh run view "$id" --json attempt --jq .attempt)"
   gh run rerun "$id"
+  next=""
   for ((i = 1; i <= 60; i++)); do
-    [ "$(gh run view "$id" --json attempt --jq .attempt)" -gt "$attempt" ] && break
+    now="$(gh run view "$id" --json attempt --jq .attempt)"
+    if [ "$now" -gt "$attempt" ] 2>/dev/null; then next="$now"; break; fi
     sleep 5
   done
+  [ -n "$next" ] || fail "rerun: el intento nuevo del deploy $id no empezó en 5 minutos (sigue en el $attempt)"
+  echo "== rerun: espera el intento $next del deploy $id"
   gh run watch "$id" --exit-status >/dev/null && fail "rerun: el deploy del release viejo terminó bien"
-  conclusion="$(gh run view "$id" --json conclusion --jq .conclusion)"
-  [ "$conclusion" = "failure" ] || fail "rerun: el deploy terminó en $conclusion, no en failure"
-  gh run view "$id" --log 2>/dev/null | grep -q 'no desciende del release actual' \
-    || fail "rerun: el deploy $id falló por otro motivo (gh run view $id --log)"
+  conclusion="$(gh run view "$id" --attempt "$next" --json conclusion --jq .conclusion)"
+  [ "$conclusion" = "failure" ] || fail "rerun: el intento $next terminó en $conclusion, no en failure"
+  log="$(gh run view "$id" --attempt "$next" --log 2>/dev/null)" || true
+  grep -q 'no desciende del release actual' <<<"$log" \
+    || fail "rerun: el intento $next del deploy $id falló por otro motivo (gh run view $id --attempt $next --log)"
 
   still_serving rerun "$before"
   echo "== rerun: OK, el deploy del release viejo se frenó en el gate y sigue atendiendo $before"
@@ -145,23 +151,29 @@ drill_rerun() {
 # y el check de /health sobre su commit), y /health de producción atendiéndolo desde afuera. Se
 # corre después de publicar el release (espera la corrida, también la aprobación de producción).
 drill_release() {
-  local tag sha deploy i
+  local tag sha deploy i log
   need_gh
   tag="${1:-$(gh release view --json tagName --jq .tagName)}"
   git fetch -q --tags origin
   sha="$(git rev-parse -q --verify "refs/tags/$tag^{commit}")" || fail "release: no está el tag $tag"
   echo "== release: $tag ($sha)"
 
+  # La corrida de este tag, no solo de este commit: otro tag sobre el mismo commit tiene la suya.
+  # En un evento release, headBranch es el tag y headSha su commit; además, el gate del release
+  # nombra el tag en el log.
   deploy=""
   for ((i = 1; i <= 30; i++)); do
-    deploy="$(gh run list --workflow deploy --event release --commit "$sha" --json databaseId --limit 1 --jq '.[0].databaseId // empty')"
+    deploy="$(gh run list --workflow deploy --event release --branch "$tag" --commit "$sha" --json databaseId --limit 1 --jq '.[0].databaseId // empty')"
     [ -n "$deploy" ] && break
     sleep 10
   done
   [ -n "$deploy" ] || fail "release: $tag no disparó el workflow de deploy en 5 minutos"
   echo "== release: deploy $deploy"
   gh run watch "$deploy" --exit-status >/dev/null || fail "release: el deploy $deploy no terminó en verde (gh run view $deploy --log)"
-  gh run view "$deploy" --log 2>/dev/null | grep -q "atiende $sha con ok: true" \
+  log="$(gh run view "$deploy" --log 2>/dev/null)" || true
+  grep -qF "== $tag ($sha): vX.Y.Z, en main y con ci en verde" <<<"$log" \
+    || fail "release: el deploy $deploy no es el de $tag: su gate no lo nombra (gh run view $deploy --log)"
+  grep -qF "atiende $sha con ok: true" <<<"$log" \
     || fail "release: el deploy $deploy no verificó /health sobre $sha (gh run view $deploy --log)"
 
   still_serving release "$sha"

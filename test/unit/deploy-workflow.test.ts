@@ -1112,3 +1112,196 @@ describe('setup.sh', () => {
     expect(staging.DATABASE_ADMIN_URL).not.toContain('@cocos-challenge-a-db.internal:');
   });
 });
+
+// deploy/fly/drills.sh release y rerun (issue #30), sin Fly ni GitHub: un repositorio temporal
+// con origin en un repositorio bare local (main con dos commits y tags), `curl` que responde
+// /health con HEALTH, y un `gh` simulado que lee y escribe el estado de las corridas en STATE:
+// cada corrida con su tag (headBranch), su commit y sus intentos (conclusión y log).
+describe('drills.sh', () => {
+  const GIT = { GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_AUTHOR_NAME: 'prueba',
+    GIT_AUTHOR_EMAIL: 'prueba@example.com', GIT_COMMITTER_NAME: 'prueba', GIT_COMMITTER_EMAIL: 'prueba@example.com' };
+  const dirs: string[] = [];
+  afterEach(() => {
+    for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  });
+
+  type Attempt = { conclusion: string; log: string };
+  type Run = { databaseId: number; headBranch: string; headSha: string; attempts: Attempt[] };
+  type State = { latest: string; runs: Run[]; rerun?: Attempt };
+
+  const GH = `#!/usr/bin/env node
+const fs = require('fs');
+const { execFileSync } = require('child_process');
+const args = process.argv.slice(2);
+fs.appendFileSync(process.env.CALLS, 'gh ' + args.join(' ') + '\\n');
+const state = JSON.parse(fs.readFileSync(process.env.STATE, 'utf8'));
+const opt = (n) => { const i = args.indexOf(n); return i >= 0 ? args[i + 1] : undefined; };
+const out = (v) => {
+  const q = opt('--jq');
+  process.stdout.write(q ? execFileSync('jq', ['-r', q], { input: JSON.stringify(v), encoding: 'utf8' }) : JSON.stringify(v) + '\\n');
+};
+const run = () => state.runs.find((r) => String(r.databaseId) === args[2]);
+const cmd = args[0] + ' ' + args[1];
+if (cmd === 'auth status') process.exit(0);
+if (cmd === 'release view') { out({ tagName: state.latest }); process.exit(0); }
+if (cmd === 'run list') {
+  const runs = state.runs.filter((r) => (!opt('--branch') || r.headBranch === opt('--branch')) && (!opt('--commit') || r.headSha === opt('--commit')));
+  out(runs.slice(0, Number(opt('--limit') || 20)).map((r) => ({ databaseId: r.databaseId, headSha: r.headSha })));
+  process.exit(0);
+}
+if (cmd === 'run view') {
+  const r = run();
+  const a = r.attempts[(opt('--attempt') ? Number(opt('--attempt')) : r.attempts.length) - 1];
+  if (args.includes('--log')) { process.stdout.write(a.log + '\\n'); process.exit(0); }
+  out({ attempt: r.attempts.length, conclusion: a.conclusion });
+  process.exit(0);
+}
+if (cmd === 'run rerun') {
+  if (state.rerun) run().attempts.push(state.rerun);
+  fs.writeFileSync(process.env.STATE, JSON.stringify(state));
+  process.exit(0);
+}
+if (cmd === 'run watch') process.exit(run().attempts.at(-1).conclusion === 'success' ? 0 : 1);
+console.error('gh simulado: no soportado: ' + args.join(' '));
+process.exit(9);
+`;
+
+  /** main: dos commits; v1.0.0 → main[0]; v1.1.0 y v1.1.1 → main[1] (dos tags, el mismo commit). */
+  const setup = () => {
+    const f = fakeBin({ curl: 'printf "%s" "$HEALTH"', sleep: 'echo "sleep $1" >> "$CALLS"' });
+    dirs.push(f.dir);
+    writeFileSync(join(f.bin, 'gh'), GH);
+    chmodSync(join(f.bin, 'gh'), 0o755);
+    const repo = join(f.dir, 'repo');
+    const remote = join(f.dir, 'remote.git');
+    const git = (cwd: string, ...args: string[]) => {
+      const r = spawnSync('git', args, { cwd, encoding: 'utf8', env: { ...process.env, ...GIT } });
+      if (r.status !== 0) throw new Error(`git ${args.join(' ')}: ${r.stderr}`);
+      return r.stdout.trim();
+    };
+    mkdirSync(join(repo, 'deploy/fly'), { recursive: true });
+    for (const file of ['deploy/fly/drills.sh', 'fly.toml']) {
+      writeFileSync(join(repo, file), readFileSync(join(ROOT, file)));
+      chmodSync(join(repo, file), statSync(join(ROOT, file)).mode);
+    }
+    git(f.dir, 'init', '-q', '--bare', remote);
+    git(repo, 'init', '-q', '-b', 'main');
+    git(repo, 'add', '.');
+    git(repo, 'commit', '-q', '--no-verify', '-m', 'uno');
+    const main = [git(repo, 'rev-parse', 'HEAD')];
+    writeFileSync(join(repo, 'f'), 'dos');
+    git(repo, 'add', 'f');
+    git(repo, 'commit', '-q', '--no-verify', '-m', 'dos');
+    main.push(git(repo, 'rev-parse', 'HEAD'));
+    git(repo, 'tag', 'v1.0.0', main[0]);
+    git(repo, 'tag', 'v1.1.0', main[1]);
+    git(repo, 'tag', 'v1.1.1', main[1]);
+    git(repo, 'remote', 'add', 'origin', remote);
+    git(repo, 'push', '-q', 'origin', 'main', '--tags');
+    const stateFile = join(f.dir, 'state.json');
+    const drill = (args: string[], state: State, serving: string) => {
+      writeFileSync(stateFile, JSON.stringify(state));
+      writeFileSync(f.log, '');
+      const r = spawnSync('bash', [join(repo, 'deploy/fly/drills.sh'), ...args], {
+        cwd: repo, encoding: 'utf8',
+        env: { PATH: `${f.bin}:${process.env.PATH}`, HOME: process.env.HOME ?? '/', ...GIT, CALLS: f.log, STATE: stateFile,
+          HEALTH: JSON.stringify({ ok: true, db: 'up', release: serving }) },
+      });
+      return { ...r, calls: f.calls() };
+    };
+    return { main, drill };
+  };
+
+  const deployed = (tag: string, sha: string) =>
+    `gate\tVersión de main con ci en verde\t== ${tag} (${sha}): vX.Y.Z, en main y con ci en verde: se despliega\n` +
+    `production\t/health atiende el commit\t== atiende ${sha} con ok: true (intento 1 de 30)`;
+  const stopped = (sha: string, current: string) =>
+    `staging\tEl commit desciende del release actual\tDEPLOY FRENADO: ${sha} no desciende del release actual (${current})`;
+
+  describe('release', () => {
+    it('aprueba el release cuya corrida lo nombra, pasó y /health atiende su commit', () => {
+      const { main, drill } = setup();
+      const r = drill(['release', 'v1.1.1'], {
+        latest: 'v1.1.1',
+        runs: [{ databaseId: 12, headBranch: 'v1.1.1', headSha: main[1], attempts: [{ conclusion: 'success', log: deployed('v1.1.1', main[1]) }] }],
+      }, main[1]);
+      expect(r.stderr).toBe('');
+      expect(r.status).toBe(0);
+      expect(r.stdout).toContain(`v1.1.1 pasó por el deploy 12 y /health atiende ${main[1]}`);
+      expect(r.calls).toContain(`gh run list --workflow deploy --event release --branch v1.1.1 --commit ${main[1]} --json databaseId --limit 1 --jq .[0].databaseId // empty`);
+    });
+
+    it('sin tag, ensaya el último release publicado', () => {
+      const { main, drill } = setup();
+      const r = drill(['release'], {
+        latest: 'v1.1.1',
+        runs: [{ databaseId: 12, headBranch: 'v1.1.1', headSha: main[1], attempts: [{ conclusion: 'success', log: deployed('v1.1.1', main[1]) }] }],
+      }, main[1]);
+      expect(r.status).toBe(0);
+      expect(r.stdout).toContain('== release: v1.1.1');
+    });
+
+    // Dos tags sobre el mismo commit: la corrida del primero no prueba nada del segundo.
+    it('con dos tags sobre el mismo commit y solo la corrida del primero, el del segundo espera y falla', () => {
+      const { main, drill } = setup();
+      const r = drill(['release', 'v1.1.1'], {
+        latest: 'v1.1.1',
+        runs: [{ databaseId: 11, headBranch: 'v1.1.0', headSha: main[1], attempts: [{ conclusion: 'success', log: deployed('v1.1.0', main[1]) }] }],
+      }, main[1]);
+      expect(r.status).toBe(1);
+      expect(r.stderr).toContain('ENSAYO FALLIDO: release: v1.1.1 no disparó el workflow de deploy en 5 minutos');
+      expect(r.calls.filter((c) => c.startsWith('sleep '))).toHaveLength(30);
+      expect(r.calls.some((c) => c.startsWith('gh run watch'))).toBe(false);
+    });
+
+    it('falla si la corrida que encuentra no es la de ese tag (su gate nombra otro)', () => {
+      const { main, drill } = setup();
+      const r = drill(['release', 'v1.1.1'], {
+        latest: 'v1.1.1',
+        runs: [{ databaseId: 11, headBranch: 'v1.1.1', headSha: main[1], attempts: [{ conclusion: 'success', log: deployed('v1.1.0', main[1]) }] }],
+      }, main[1]);
+      expect(r.status).toBe(1);
+      expect(r.stderr).toContain('el deploy 11 no es el de v1.1.1');
+    });
+  });
+
+  describe('rerun', () => {
+    // El deploy de v1.0.0 ya se había frenado una vez: su intento 1 tiene el log del gate.
+    const old = (main: string[]): Run =>
+      ({ databaseId: 21, headBranch: 'v1.0.0', headSha: main[0], attempts: [{ conclusion: 'failure', log: stopped(main[0], main[1]) }] });
+
+    it('aprueba cuando el intento nuevo se frena en el gate de ancestría, mirando ese intento', () => {
+      const { main, drill } = setup();
+      const r = drill(['rerun'], { latest: 'v1.1.1', runs: [old(main)], rerun: { conclusion: 'failure', log: stopped(main[0], main[1]) } }, main[1]);
+      expect(r.stderr).toBe('');
+      expect(r.status).toBe(0);
+      expect(r.stdout).toContain('espera el intento 2 del deploy 21');
+      expect(r.calls).toContain('gh run rerun 21');
+      expect(r.calls).toContain('gh run view 21 --attempt 2 --json conclusion --jq .conclusion');
+      expect(r.calls).toContain('gh run view 21 --attempt 2 --log');
+    });
+
+    it('si el intento nuevo no empieza, falla al agotar el plazo sin usar el resultado del anterior', () => {
+      const { main, drill } = setup();
+      const r = drill(['rerun'], { latest: 'v1.1.1', runs: [old(main)] }, main[1]);
+      expect(r.status).toBe(1);
+      expect(r.stderr).toContain('ENSAYO FALLIDO: rerun: el intento nuevo del deploy 21 no empezó en 5 minutos (sigue en el 1)');
+      expect(r.calls.filter((c) => c.startsWith('sleep '))).toHaveLength(60);
+      expect(r.calls.some((c) => c.startsWith('gh run watch') || c.includes('--log'))).toBe(false);
+    });
+
+    it('falla si el intento nuevo falló por otro motivo, aunque el anterior se haya frenado en el gate', () => {
+      const { main, drill } = setup();
+      const r = drill(['rerun'], { latest: 'v1.1.1', runs: [old(main)], rerun: { conclusion: 'failure', log: 'image\tConstruir la imagen\terror' } }, main[1]);
+      expect(r.status).toBe(1);
+      expect(r.stderr).toContain('el intento 2 del deploy 21 falló por otro motivo');
+    });
+
+    it('falla si el intento nuevo terminó bien', () => {
+      const { main, drill } = setup();
+      const r = drill(['rerun'], { latest: 'v1.1.1', runs: [old(main)], rerun: { conclusion: 'success', log: deployed('v1.0.0', main[0]) } }, main[1]);
+      expect(r.status).toBe(1);
+      expect(r.stderr).toContain('el deploy del release viejo terminó bien');
+    });
+  });
+});

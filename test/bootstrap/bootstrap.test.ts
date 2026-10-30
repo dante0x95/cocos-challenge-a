@@ -431,3 +431,109 @@ describe('bootstrap', () => {
     }, 120_000);
   });
 });
+
+// Issue #3: cost_total pasa de bigint a numeric en c_state y read_portfolio.
+describe('actualización a cost_total numeric', () => {
+  const revert = (s: string, from: string, to: string) => {
+    const out = s.split(from).join(to);
+    if (out === s) throw new Error(`no se pudo reconstruir la versión anterior: ${from}`);
+    return out;
+  };
+  /** Bootstrap desde una copia de db/ modificada por `edit`. */
+  const deployFrom = async (edit: (dir: string) => void) => {
+    const dir = mkdtempSync(join(tmpdir(), 'cocos-db-3-'));
+    try {
+      cpSync(resolve('db'), dir, { recursive: true });
+      edit(dir);
+      return await bootstrap({ adminUrl: url, apiPassword: 'api', dbDir: dir, ...quiet });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+  const results = async (db: pg.Pool) => (await db.query<{ f: string; r: string }>(
+    `SELECT p.proname AS f, pg_get_function_result(p.oid) AS r FROM pg_proc p
+      WHERE p.pronamespace = 'app'::regnamespace AND p.proname IN ('c_state', 'read_portfolio') ORDER BY 1`)).rows;
+
+  it('una base con las firmas anteriores (bigint): dos bootstraps las reemplazan, con los permisos de antes', async () => {
+    // La versión anterior de 020_balance.sql: cost_total bigint y sin el borrado previo.
+    await recreateDatabase(DB);
+    await deployFrom((dir) => {
+      let f020 = readFileSync(resolve('db/functions/020_balance.sql'), 'utf8');
+      f020 = revert(f020, f020.slice(f020.indexOf('DO $$'), f020.indexOf('CREATE OR REPLACE FUNCTION app.c_state')), '');
+      f020 = revert(f020, 'cost_total numeric', 'cost_total bigint');
+      f020 = revert(f020, 'cost_total := c::numeric(24,0)', 'cost_total := c');
+      f020 = revert(f020, 'f.cash_cents, 0::numeric, f.inconsistent', 'f.cash_cents, 0::bigint, f.inconsistent');
+      writeFileSync(join(dir, 'functions', '020_balance.sql'), f020);
+    });
+    const adminDb = new pg.Pool({ connectionString: url });
+    const api = new pg.Pool({ connectionString: dbUrl(DB, { name: 'api', password: 'api' }) });
+    try {
+      expect((await results(adminDb)).map((x) => x.r.includes('cost_total bigint'))).toEqual([true, true]);
+
+      await bootstrap({ adminUrl: url, apiPassword: 'api', ...quiet });
+      await bootstrap({ adminUrl: url, apiPassword: 'api', ...quiet });
+      expect((await results(adminDb)).map((x) => x.r.includes('cost_total numeric'))).toEqual([true, true]);
+      const can = async (sig: string) =>
+        (await adminDb.query<{ ok: boolean }>("SELECT has_function_privilege('api', $1::regprocedure, 'EXECUTE') AS ok", [sig])).rows[0].ok;
+      expect(await can('app.read_portfolio(int)')).toBe(true);
+      expect(await can('app.c_state(int)')).toBe(false);
+      // api lee el portfolio del challenge con el costo como numeric entero.
+      expect((await api.query('SELECT instrumentid, cost_total::text FROM app.read_portfolio(1) WHERE kind = 1 ORDER BY instrumentid')).rows)
+        .toEqual([
+          { instrumentid: 31, cost_total: '0' },
+          { instrumentid: 47, cost_total: '37200000000' },
+          { instrumentid: 54, cost_total: '125000000000' },
+        ]);
+    } finally {
+      await api.end();
+      await adminDb.end();
+    }
+  }, 120_000);
+
+  it('historia con un costo de 10¹³ y otra fuera de numeric(20,0): el bootstrap termina, informa solo el overflow y los demás operan', async () => {
+    await recreateDatabase(DB);
+    // Una migración más con la historia heredada: así el bootstrap la verifica, como al desplegar sobre datos reales.
+    const r = await deployFrom((dir) => writeFileSync(join(dir, 'migrations', '999_test_historia.sql'), `
+      DO $$
+      DECLARE ars int; inst int; u int; i int := 0;
+      BEGIN
+        SELECT id INTO ars FROM app.instruments WHERE ticker = 'ARS';
+        SELECT id INTO inst FROM app.instruments WHERE type = 'ACCIONES' ORDER BY id LIMIT 1;
+        FOREACH u IN ARRAY ARRAY[0, 1, 2, 3] LOOP
+          INSERT INTO app.users (email, accountnumber) VALUES (format('historia-%s@test.local', u), format('99000000%s', u));
+        END LOOP;
+        FOR u IN SELECT id FROM app.users WHERE email LIKE 'historia-%' ORDER BY id LOOP
+          INSERT INTO app.orders (instrumentid, userid, size, price, type, side, status, datetime, balance_seq)
+          VALUES (ars, u, 100000, 0.01, 'MARKET', 'CASH_IN', 'FILLED', timezone('UTC', now()), 1);
+          -- historia-0: 10⁷ acciones a 10⁶ → costo 10¹³ ARS (10¹⁹ micro, fuera de bigint).
+          -- historia-1: importe (2³¹ − 1) × (10¹⁶ − 0,01), fuera de numeric(20,0).
+          IF i < 2 THEN
+            INSERT INTO app.orders (instrumentid, userid, size, price, type, side, status, datetime, balance_seq)
+            VALUES (inst, u, CASE i WHEN 0 THEN 10000000 ELSE 2147483647 END,
+                    CASE i WHEN 0 THEN 1000000.00 ELSE 9999999999999999.99 END, 'MARKET', 'BUY', 'FILLED', timezone('UTC', now()), 2);
+          END IF;
+          i := i + 1;
+        END LOOP;
+      END $$;`));
+    const adminDb = new pg.Pool({ connectionString: url });
+    const api = new pg.Pool({ connectionString: dbUrl(DB, { name: 'api', password: 'api' }) });
+    try {
+      const ids = (await adminDb.query<{ id: number }>("SELECT id FROM app.users WHERE email LIKE 'historia-%' ORDER BY id")).rows.map((x) => x.id);
+      expect(r.applied).toContain('999_test_historia.sql');
+      expect(r.ledger.filter((p) => ids.includes(p.userid)).map((p) => ({ userid: p.userid, problem: p.problem })))
+        .toEqual([{ userid: ids[1], problem: 'overflow' }]);
+      // El de costo 10¹³ se lee y opera; los normales también.
+      expect((await api.query('SELECT cost_total::text AS c FROM app.read_portfolio($1) WHERE kind = 1', [ids[0]])).rows)
+        .toEqual([{ c: '10000000000000000000' }]);
+      const ars = (await adminDb.query<{ id: number }>("SELECT id FROM app.instruments WHERE ticker = 'ARS'")).rows[0].id;
+      for (const u of [ids[0], ids[2], ids[3]]) {
+        const res = (await api.query<{ r: { status: number } }>(
+          "SELECT app.place_order($1, 'dep', 'h', 'CASH_IN', 'MARKET', $2, NULL, 1.00, NULL, NULL) AS r", [u, ars])).rows[0].r;
+        expect(res.status, `usuario ${u}`).toBe(201);
+      }
+    } finally {
+      await api.end();
+      await adminDb.end();
+    }
+  }, 120_000);
+});

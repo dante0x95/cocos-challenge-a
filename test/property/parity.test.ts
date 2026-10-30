@@ -246,11 +246,10 @@ describe(`tope por orden cerca de 10¹⁵ ARS (${Number(process.env.PARITY_CAP_C
 
       // Estado del usuario: sin nada (REJECTED) o con lo necesario para operar (FILLED o NEW). Una
       // SELL arranca con cash al azar: ejecutarla puede pasar el tope del estado. Una BUY ejecutada
-      // cerca del tope deja un costo que hoy no entra en bigint en micro-ARS (issue #3): hasta ese
-      // arreglo, una BUY con fondos es LIMIT y se cancela.
+      // deja un costo de hasta 10²¹ micro-ARS, por encima de bigint (D-14: el costo viaja como numeric).
       const u = await newUser('parity-cap');
       const s = O.newState();
-      const funded = rnd() < 0.75 && (side === 'SELL' || type === 'LIMIT');
+      const funded = rnd() < 0.75;
       if (funded && side === 'BUY') await seed(u, s, iid, CAP, 0n);
       if (funded && side === 'SELL') await seed(u, s, iid, big(100_000n, CAP), size);
       if (funded) await compare(u, s, 'sembrado');
@@ -278,7 +277,7 @@ describe(`tope por orden cerca de 10¹⁵ ARS (${Number(process.env.PARITY_CAP_C
         seen.add(decision);
         if (decision === 'NEW') {
           // Se ejecuta (cruza: el close es el límite) o se cancela. Ejecutar una SELL puede pasar el tope del estado.
-          if (side === 'SELL' && rnd() < 0.5) {
+          if (rnd() < 0.5) {
             const after = clone(s);
             O.executeLimit(after, id, priceCents);
             const outcome = (await pool.query<{ r: string }>('SELECT app.execute_limit_outcome($1) AS r', [Number(id)])).rows[0].r;

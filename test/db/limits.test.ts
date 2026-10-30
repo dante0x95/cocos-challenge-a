@@ -438,6 +438,7 @@ describe('tope por orden: el importe no supera 10¹⁵ ARS en ningún estado', (
         await a.query("DELETE FROM app.idempotency_keys WHERE userid = $1 AND key = 'old'", [u]);
         let failed: unknown = null;
         const p = placeOrder(b.c, req).catch((e) => { failed = e; throw e; });
+        p.catch(() => undefined);   // rechaza a propósito, a veces antes de que el COMMIT vuelva: que no quede sin manejar
         await waitingOnLock('pid = $1', b.pid, () => failed);
         await a.query('COMMIT');
         await expect(p).rejects.toMatchObject({ code: 'APP05' });
@@ -456,6 +457,7 @@ describe('tope por orden: el importe no supera 10¹⁵ ARS en ningún estado', (
         expect(ok.body.status).toBe('REJECTED');
         let failed: unknown = null;
         const p = placeOrder(b.c, { userid: u, key: 'k', hash: 'otro body', side: 'BUY', type: 'LIMIT', instrumentid: inst, size: 2, limit: ONE_E15 }).catch((e) => { failed = e; throw e; });
+        p.catch(() => undefined);   // rechaza a propósito, a veces antes de que el COMMIT vuelva: que no quede sin manejar
         await waitingOnLock('pid = $1', b.pid, () => failed);
         await a.c.query('COMMIT');
         await expect(p).rejects.toMatchObject({ code: 'APP03' });

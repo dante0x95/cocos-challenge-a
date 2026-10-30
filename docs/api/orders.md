@@ -74,7 +74,7 @@ Un replay devuelve la respuesta del request original, no el estado actual de la 
 | `400` | `BAD_REQUEST` | falta la clave, JSON inválido, campos o combinaciones inválidas, usuario o instrumento inexistente, moneda como activo, monto que no alcanza para una acción o que da más de 2³¹ − 1 acciones | no |
 | `422` | `NO_PRICE` | MARKET sin cotización válida | no; la clave queda libre |
 | `422` | `IDEMPOTENCY_MISMATCH` | misma clave con otro body | no |
-| `422` | `LIMIT` | el resultado saldría de ±10¹⁵ ARS o 2⁶² acciones, o el importe de la orden (`size × price`) supera 10¹⁵ ARS ([D-14](../decisiones.md#d-14)) | no |
+| `422` | `LIMIT` | el resultado saldría de ±10¹⁵ ARS o 2⁶² acciones, o el importe de la orden (`size × price`) supera 10¹⁵ ARS, o el costo de la posición superaría 10¹⁷ ARS ([D-14](../decisiones.md#d-14)) | no |
 | `503` | `LOCK_TIMEOUT` · `TIMEOUT` · `VERSION_MISMATCH` | el usuario tenía otra operación en curso, se venció el tiempo (de la escritura o de la espera por una conexión con la base), o hay un despliegue en curso | no, o resultado desconocido: **reintentar con la misma clave** ([D-20](../decisiones.md#d-20)) |
 | `503` | `CONNECTION_LOST` | la conexión con la base se cortó (reinicio de Postgres, failover, red), antes o después de enviar la escritura | resultado desconocido: **reintentar con la misma clave** |
 | `500` | `INTERNAL` | un error no previsto | resultado desconocido: **reintentar con la misma clave** |

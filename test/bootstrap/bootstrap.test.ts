@@ -27,7 +27,7 @@ async function stateOf(u: string) {
       seqs: await q("SELECT id, balance_seq::int FROM app.orders WHERE status = 'FILLED' ORDER BY id"),
       cashOrders: await q("SELECT id, size, price::text FROM app.orders WHERE side LIKE 'CASH%' ORDER BY id"),
       cancelled: await q("SELECT id, cancel_reason FROM app.orders WHERE status = 'CANCELLED' ORDER BY id"),
-      settings: (await q('SELECT price_max_age_days FROM app.settings'))[0],
+      settings: (await q('SELECT price_max_age_days, idempotency_ttl::text FROM app.settings'))[0],
       apiCanWrite: (await q("SELECT has_table_privilege('api', 'app.orders', 'INSERT') AS ins, has_table_privilege('api', 'app.orders', 'UPDATE') AS upd"))[0],
     };
   } finally {
@@ -48,7 +48,8 @@ describe('bootstrap', () => {
   it('base vacía → seed + migraciones + funciones, con los números de aceptación', async () => {
     await recreateDatabase(DB);
     const r = await bootstrap({ adminUrl: url, apiPassword: 'api', ...quiet });
-    expect(r.applied).toEqual(['000_seed.sql', '001_app_schema.sql', '002_audit.sql', '003_orders_ledger.sql', '005_cancel_reason.sql']);
+    expect(r.applied).toEqual(['000_seed.sql', '001_app_schema.sql', '002_audit.sql', '003_orders_ledger.sql', '005_cancel_reason.sql',
+      '006_idempotency_ttl.sql']);
     expect(r.ledger).toEqual([{ userid: 1, problem: 'short', detail: expect.stringContaining('instrumento 31 en -10') }]);
 
     first = await stateOf(url);
@@ -64,7 +65,7 @@ describe('bootstrap', () => {
     expect(first.cashOrders.map((o) => o.size)).toEqual([100_000_000, 10_000_000]);
     // La única cancelada del challenge (orden 3, una LIMIT del instrumento 47) la canceló el usuario: el executor no existía.
     expect(first.cancelled).toEqual([{ id: 3, cancel_reason: 'USER' }]);
-    expect(first.settings).toEqual({ price_max_age_days: null });
+    expect(first.settings).toEqual({ price_max_age_days: null, idempotency_ttl: '24:00:00' });
     expect(first.apiCanWrite).toEqual({ ins: false, upd: false });
   }, 60_000);
 

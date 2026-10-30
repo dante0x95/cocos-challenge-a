@@ -20,7 +20,8 @@
 --   p_instrumentid: NULL en CASH_IN/CASH_OUT; se resuelve ARS acá (la API no necesita su id).
 --   p_legacy_hash: transición del issue #4 (D-19). Hash que calculaba la versión anterior para este
 --   mismo request; solo sirve para reconocer una clave que ya existe. Una clave nueva guarda siempre
---   p_hash. Se quita 24 h después del despliegue, cuando vencen las claves grabadas antes.
+--   p_hash. Se quita cuando vencen las claves grabadas antes del despliegue: app.idempotency_ttl()
+--   (24 h) después, sin esperar a la limpieza, porque place_order reusa una clave vencida.
 -- La firma anterior (sin p_legacy_hash) se borra para que no quede una sobrecarga ambigua.
 DROP FUNCTION IF EXISTS app.place_order(int, text, text, text, text, int, int, numeric, numeric);
 CREATE OR REPLACE FUNCTION app.place_order(
@@ -114,11 +115,18 @@ BEGIN
 
   PERFORM app.lock_user(p_userid);
 
-  -- Idempotencia (D-19). El replay devuelve la respuesta original y sale: no lee estado,
-  -- no decide de nuevo.
+  -- Idempotencia (D-19). La clave se reclama si no existe o si venció: created_at anterior a
+  -- now() - app.idempotency_ttl(), con el now() del inicio de la transacción (el mismo criterio
+  -- que la limpieza, que solo recupera espacio: el vencimiento no depende de que corra). Una
+  -- clave vencida se reusa en el lugar, con hash y created_at nuevos y sin la respuesta anterior;
+  -- si este request falla, la transacción se revierte y la fila queda como estaba. Si la clave
+  -- está viva, el replay devuelve la respuesta original y sale: no lee estado, no decide de nuevo.
   INSERT INTO app.idempotency_keys (userid, key, request_hash)
   VALUES (p_userid, p_key, p_hash)
-  ON CONFLICT (userid, key) DO NOTHING
+  ON CONFLICT (userid, key) DO UPDATE
+    SET request_hash = EXCLUDED.request_hash, created_at = now(),
+        http_status = NULL, response_body = NULL, order_id = NULL
+    WHERE idempotency_keys.created_at < now() - app.idempotency_ttl()
   RETURNING key INTO claimed;
   IF claimed IS NULL THEN
     SELECT request_hash, http_status, response_body, order_id INTO prev

@@ -35,6 +35,15 @@ LANGUAGE sql STABLE SET search_path = pg_catalog, app, pg_temp AS $$
    LIMIT 1
 $$;
 
+-- Plazo de vida de una clave de idempotencia (D-19): settings.idempotency_ttl, 24 h por defecto.
+-- Única fuente del plazo. Una clave está vencida si created_at < now() - app.idempotency_ttl(),
+-- con el now() del inicio de la transacción. Lo aplican place_order (reusa una clave vencida al
+-- reclamarla, bajo el lock) y cleanup_candidates / cleanup_idempotency (recuperan el espacio).
+CREATE OR REPLACE FUNCTION app.idempotency_ttl() RETURNS interval
+LANGUAGE sql STABLE SET search_path = pg_catalog, app, pg_temp AS $$
+  SELECT s.idempotency_ttl FROM app.settings s
+$$;
+
 -- Barrera de despliegue (D-24). Toda escritura la toma en modo compartido ANTES del lock de
 -- usuario; el bootstrap la toma en modo exclusivo mientras aplica migraciones y funciones.
 -- Mientras haya escritores en curso, el despliegue espera; cuando termina, todo escritor nuevo

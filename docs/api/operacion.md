@@ -18,7 +18,7 @@ Requieren la cabecera `X-Internal-Token` con el valor de `INTERNAL_TOKEN` (`401`
 | Ruta | Qué hace |
 |---|---|
 | `/internal/execute-limits` | Ejecuta las LIMIT `NEW` que la cotización vigente cruza, a su precio límite. Cada una en su transacción; la decisión final la toma `app.execute_limit_outcome`, bajo el lock ([D-28](../decisiones.md#d-28)). Responde `{ candidates, executed, not_crossed, cancelled, errors }`. `cancelled` lista `{ order_id, reason: "LIMIT" }` de las que se cancelaron porque ejecutarlas violaría los límites de [D-14](../decisiones.md#d-14); esas órdenes quedan con `cancel_reason: "LIMIT"`. |
-| `/internal/cleanup-idempotency` | Borra las claves de idempotencia de más de 24 h ([D-19](../decisiones.md#d-19)). |
+| `/internal/cleanup-idempotency` | Borra las claves de idempotencia vencidas (más viejas que `settings.idempotency_ttl`, 24 h). Solo recupera espacio: el vencimiento lo decide `app.place_order` al reclamar la clave, con el mismo plazo, así que una clave vencida que el job todavía no borró ya no da replay ni `422` ([D-19](../decisiones.md#d-19)). |
 
 ## Cuando la base se reinicia
 
@@ -26,7 +26,7 @@ Un reinicio de Postgres (mantenimiento, failover, `pg_terminate_backend`) corta 
 
 ## Jobs periódicos
 
-Con `JOBS_ENABLED=true` (activo en docker compose y en Fly), la API corre la limpieza de idempotencia cada hora (`CLEANUP_EVERY_MS`). Cada usuario se procesa en su propia transacción y con try-lock, así que nunca bloquea escrituras; que dos máquinas la corran a la vez durante un deploy solo duplica trabajo. En producción iría a un worker aparte.
+Con `JOBS_ENABLED=true` (activo en docker compose y en Fly), la API corre la limpieza de idempotencia cada hora (`CLEANUP_EVERY_MS`). Cada usuario se procesa en su propia transacción y con try-lock, así que nunca bloquea escrituras; que dos máquinas la corran a la vez durante un deploy solo duplica trabajo. Con `JOBS_ENABLED=false` las claves vencidas se acumulan hasta que alguien llame a `/internal/cleanup-idempotency`, pero vencen igual: la limpieza no es parte de la regla de negocio. En producción iría a un worker aparte.
 
 El executor de LIMIT no tiene job ([D-28](../decisiones.md#d-28)): en producción lo llamaría un cron externo cada N minutos, con `POST /internal/execute-limits` y el token ([D-29](../decisiones.md#d-29)).
 
@@ -56,7 +56,16 @@ fly tokens create deploy -a cocos-challenge-a-api | gh secret set FLY_API_TOKEN
 - **Ensayos** (`deploy/fly/drills.sh`, a mano, con `flyctl` y `gh` autenticados; no corren en el CI): el último merge pasó por `ci` y deploy y `/health` lo atiende (`merge`, conviene después del primer merge), un deploy roto (bootstrap que falla, `/health` en `503`, re-run del `ci` de un commit viejo) y los datos de Postgres después de redesplegar la base (`persistence`, corta la API mientras la base reinicia).
 - **Token interno** para `/internal/*`: `fly ssh console -a cocos-challenge-a-api -C 'printenv INTERNAL_TOKEN'`.
 
-**Cambio de hash de idempotencia.** Si cambia cómo se calcula el hash de `POST /orders`, las claves vigentes (24 h) guardan el hash viejo y su reintento respondería `422`. El cambio tiene que aceptar también el hash anterior, solo para reconocer claves existentes y dentro de la misma llamada a `app.place_order`, hasta que vence la ventana; después se borra esa compatibilidad. Así se hizo al canonizar `amount` y `price` ([D-19](../decisiones.md#d-19)).
+**Cambio de hash de idempotencia.** Si cambia cómo se calcula el hash de `POST /orders`, las claves vigentes (24 h) guardan el hash viejo y su reintento respondería `422`. El cambio tiene que aceptar también el hash anterior, solo para reconocer claves existentes y dentro de la misma llamada a `app.place_order`, hasta que vence la ventana; después se borra esa compatibilidad. Como el vencimiento lo decide `place_order` con `created_at`, la ventana termina 24 h después del despliegue aunque la limpieza no haya corrido. Así se hizo al canonizar `amount` y `price` ([D-19](../decisiones.md#d-19)).
+
+## Vencimiento de las claves de idempotencia
+
+```sql
+UPDATE app.settings SET idempotency_ttl = '12 hours';  -- por defecto: 24 h (D-19)
+UPDATE app.settings SET idempotency_ttl = DEFAULT;
+```
+
+Es la única fuente del plazo (`app.idempotency_ttl()`): la usan `app.place_order` para decidir si una clave venció y la limpieza para borrarla. Cambiarlo rige para la próxima transacción, también sobre las claves ya grabadas.
 
 ## Antigüedad máxima de una cotización
 

@@ -1,13 +1,15 @@
 -- 040 — Operación: limpieza de idempotencia, verificación de la historia, salud. Repetible.
 
--- Limpieza de claves de idempotencia de más de 24 h (D-19). El job pide los usuarios con
--- claves vencidas y limpia cada uno en su propia transacción, con try-lock: nunca borra una
--- clave en medio de un replay en curso (el replay corre bajo el mismo lock) y nunca hace
--- esperar a un escritor.
+-- Limpieza de claves de idempotencia vencidas (D-19): created_at anterior a now() -
+-- app.idempotency_ttl(), el mismo criterio con el que place_order las reusa. Solo recupera
+-- espacio: una clave vencida que el job todavía no borró ya no da replay ni 422. El job pide
+-- los usuarios con claves vencidas y limpia cada uno en su propia transacción, con try-lock:
+-- nunca borra una clave en medio de un replay en curso (el replay corre bajo el mismo lock) y
+-- nunca hace esperar a un escritor.
 CREATE OR REPLACE FUNCTION app.cleanup_candidates()
 RETURNS TABLE (userid int)
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, app, pg_temp AS $$
-  SELECT DISTINCT k.userid FROM app.idempotency_keys k WHERE k.created_at < now() - interval '24 hours'
+  SELECT DISTINCT k.userid FROM app.idempotency_keys k WHERE k.created_at < now() - app.idempotency_ttl()
 $$;
 
 CREATE OR REPLACE FUNCTION app.cleanup_idempotency(p_userid int) RETURNS int
@@ -16,7 +18,7 @@ DECLARE n int;
 BEGIN
   IF NOT app.try_lock_user(p_userid) THEN RETURN 0; END IF;   -- escritura en curso: próxima pasada
   DELETE FROM app.idempotency_keys
-   WHERE userid = p_userid AND created_at < now() - interval '24 hours';
+   WHERE userid = p_userid AND created_at < now() - app.idempotency_ttl();
   GET DIAGNOSTICS n = ROW_COUNT;
   RETURN n;
 END $$;

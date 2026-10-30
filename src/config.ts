@@ -9,6 +9,8 @@ const Env = z.object({
   // Espera máxima por una conexión libre del pool; al vencer, 503 TIMEOUT (D-20).
   PG_CONNECT_TIMEOUT_MS: z.coerce.number().int().positive().default(2000),
   INTERNAL_TOKEN: z.string().min(1).optional(),
+  // Commit desplegado: lo fija el deploy (D-29) y GET /health lo devuelve como `release`.
+  RELEASE: z.string().min(1).optional(),
   JOBS_ENABLED: z.enum(['true', 'false']).default('false').transform((v) => v === 'true'),
   CLEANUP_EVERY_MS: z.coerce.number().int().positive().default(60 * 60 * 1000),
 });

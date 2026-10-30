@@ -2,6 +2,7 @@
 // challenge; la segunda no cambia nada (idempotente). También: una migración ya aplicada que
 // cambia de contenido aborta, y una base que ya tiene las tablas del challenge no se re-siembra.
 import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { spawnSync } from 'node:child_process';
 import { cpSync, mkdtempSync, readFileSync, rmSync, appendFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -82,6 +83,33 @@ describe('bootstrap', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  }, 60_000);
+
+  // D-29: la CLI es el release_command del deploy en Fly. Si el bootstrap falla tiene que salir
+  // con 1, para que el deploy se corte y siga atendiendo la versión anterior.
+  it('la CLI (release_command) sale con 0 si el bootstrap pasa y con 1 si falla, sin dejar nada aplicado', async () => {
+    const cli = (dbDir: string) => spawnSync(resolve('node_modules/.bin/tsx'), [resolve('src/db/bootstrap.ts')], {
+      encoding: 'utf8',
+      env: { ...process.env, DATABASE_ADMIN_URL: url, API_DB_PASSWORD: 'api', DB_DIR: dbDir },
+    });
+    const ok = cli(resolve('db'));
+    expect(ok.stderr).toBe('');
+    expect(ok.status).toBe(0);
+    expect(ok.stdout).toContain('bootstrap OK');
+
+    const dir = mkdtempSync(join(tmpdir(), 'cocos-db-cli-'));
+    try {
+      cpSync(resolve('db'), dir, { recursive: true });
+      writeFileSync(join(dir, 'migrations', '999_cli_falla.sql'), "DO $$ BEGIN RAISE EXCEPTION 'migración de prueba'; END $$;");
+      const bad = cli(dir);
+      expect(bad.status).toBe(1);
+      expect(bad.stderr).toContain('bootstrap FALLÓ: migración de prueba');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+    const after = await stateOf(url);
+    expect(after).toEqual(first);
+    expect(after.migrations.map((m) => m.name)).not.toContain('999_cli_falla.sql');
   }, 60_000);
 
   it('base que ya tiene las tablas del challenge: el seed se registra sin correr (baseline)', async () => {

@@ -28,7 +28,7 @@ const portfolio = (u: number) => get(`/portfolio/${u}`);
 
 beforeAll(async () => {
   [q] = await quotes(1);
-  server = createApp({ internalToken: 'test-token' }).listen(0);
+  server = createApp({ internalToken: 'test-token', release: 'test-release' }).listen(0);
   base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
 });
 afterAll(async () => {
@@ -835,10 +835,33 @@ describe('GET /instruments', () => {
 });
 
 describe('internos y salud', () => {
-  it('GET /health → ok con la base arriba', async () => {
+  it('GET /health → ok con la base arriba y el commit desplegado en release', async () => {
     const r = await get('/health');
     expect(r.status).toBe(200);
-    expect(r.body).toMatchObject({ ok: true, db: 'up' });
+    expect(r.body).toMatchObject({ ok: true, db: 'up', release: 'test-release' });
+  });
+  // D-29: el gate del deploy lee release también cuando la base no responde, para saber qué
+  // commit atiende antes de desplegar.
+  it('GET /health con la consulta de salud fallando en Postgres → 503 con db down y el mismo release', async () => {
+    await admin.query('REVOKE EXECUTE ON FUNCTION app.health() FROM api');
+    try {
+      const r = await get('/health');
+      expect(r.status).toBe(503);
+      expect(r.body).toEqual({ ok: false, db: 'down', release: 'test-release' });
+    } finally {
+      await admin.query('GRANT EXECUTE ON FUNCTION app.health() TO api');
+    }
+    expect((await get('/health')).status).toBe(200);
+  });
+  it('GET /health sin RELEASE configurado → release null, como en docker compose', async () => {
+    const s = createApp({ internalToken: 'test-token' }).listen(0);
+    try {
+      const r = await fetch(`http://127.0.0.1:${(s.address() as { port: number }).port}/health`);
+      expect(r.status).toBe(200);
+      expect(await r.json()).toMatchObject({ ok: true, db: 'up', release: null });
+    } finally {
+      await new Promise((resolve) => s.close(resolve));
+    }
   });
   it('/internal/* sin token → 401', async () => {
     expect((await post('/internal/execute-limits', {})).status).toBe(401);

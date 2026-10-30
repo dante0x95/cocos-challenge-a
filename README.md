@@ -43,6 +43,19 @@ Crean su propia base `cocos_test` con el mismo bootstrap que producción. Las su
 
 El CI las corre en cada PR contra Postgres 18. Flujo de trabajo, formato de commits y revisión de Codex: [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
+## Desplegar
+
+Cada commit de `main` con el CI en verde se despliega en Fly.io: la API y Postgres 18 en dos apps, el bootstrap antes de cambiar de versión, el tráfico a la versión nueva solo si `/health` responde, y un gate que no deja desplegar un commit anterior al que atiende ([D-29](docs/decisiones.md#d-29)).
+
+La primera vez, parado en `main` y con [`flyctl`](https://fly.io/docs/flyctl/install/) autenticado:
+
+```bash
+deploy/fly/setup.sh                                              # apps, volumen, secretos y primer deploy
+fly tokens create deploy -a cocos-challenge-a-api | gh secret set FLY_API_TOKEN
+```
+
+Los ensayos de un deploy roto (bootstrap que falla, `/health` caído, re-run del CI de un commit viejo) se corren a mano con `deploy/fly/drills.sh`; no corren en el CI. Operación: [`docs/api/operacion.md`](docs/api/operacion.md#desplegar-en-flyio).
+
 ## Cómo está hecho, en cinco ideas
 
 1. **`orders` es la única fuente de verdad.** El balance se calcula a partir de las órdenes `FILLED` en cada request, como pide el enunciado; no hay tabla de saldos. Un índice parcial por usuario lo hace barato: 3 ms por lectura y p99 ≤ 26 ms a 400 req/s en un benchmark sobre 22 millones de órdenes. El mismo benchmark midió dónde deja de alcanzar (usuarios con más de 100.000 órdenes) y qué lo resolvería; ese perfil no está en el dataset. → [D-16](docs/decisiones.md#d-16), [`docs/decision-snapshot.md`](docs/decision-snapshot.md)
@@ -94,6 +107,7 @@ src/
 test/             unit · db · concurrency · property · bootstrap · oracle (fold independiente)
 docs/             decisiones · benchmark del balance · pruebas · contratos de la API
 rest-client/      colección de requests
+deploy/fly/       Postgres en Fly, setup del primer deploy, gate del workflow y ensayos (la API: fly.toml)
 ```
 
 ## Fuera de alcance

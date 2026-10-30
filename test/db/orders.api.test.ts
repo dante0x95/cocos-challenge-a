@@ -478,12 +478,14 @@ describe('POST /orders — enteros JSON fuera de ±2⁵³ y topes de los ids (is
     await rejected(() => order({ userid: 1, side: 'BUY', type: 'MARKET', instrumentid: 2_147_483_648, size: 1 }), /^instrumentid: debe ser ≤ 2147483647$/);
   });
 
-  it('price 1e3 → 201 con "1000.00"; price 1e21 → 400 con el mensaje de rango, no el de formato', async () => {
+  // JSON.stringify escribe 1e3 como 1000 y 1e21 como 1e+21: ese literal con exponente lo rechaza el
+  // reviver antes que la regla de rango (issue #42).
+  it('price 1e3 → 201 con "1000.00"; price 1e21 → 400 por el exponente del literal, antes del rango', async () => {
     const u = await holder('exp', 1);
     const r = await sellLimit(u, 1e3);
     expect(r.status).toBe(201);
     expect(r.body).toMatchObject({ status: 'NEW', price: '1000.00' });
-    await rejected(() => sellLimit(u, 1e21), `price: ${RANGE}`);
+    await rejected(() => sellLimit(u, 1e21), /^price: número JSON con punto decimal o exponente/);
   });
 
   it('size 1e9 → 201 (REJECTED por falta de cash, pero la orden se grabó); size 1e10 → 400 por el tope, no 22003', async () => {
@@ -535,6 +537,87 @@ describe('POST /orders — enteros JSON fuera de ±2⁵³ y topes de los ids (is
       expect(await keysOf(u, k), price).toBe(0);
     }
     expect(await ordersOf(u)).toBe(0);
+  });
+});
+
+// Issue #42: un literal con decimales que el double redondea a entero pasaba como ese entero, y la orden
+// se grababa por otra cantidad. El body va como texto, sin JSON.stringify, para mandar el literal exacto.
+describe('POST /orders — número JSON con decimales que JSON.parse redondea a entero (issue #42)', () => {
+  const sendRaw = async (text: string, k = key()) => {
+    const r = await fetch(`${base}/orders`, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'Idempotency-Key': k }, body: text,
+    });
+    return { status: r.status, headers: r.headers, body: (await r.json()) as Record<string, any> };
+  };
+  const ordersOf = async (u: number, side: string) =>
+    (await admin.query('SELECT count(*)::int AS n FROM app.orders WHERE userid = $1 AND side = $2', [u, side])).rows[0].n;
+  const keysOf = async (u: number, k: string) =>
+    (await admin.query('SELECT count(*)::int AS n FROM app.idempotency_keys WHERE userid = $1 AND key = $2', [u, k])).rows[0].n;
+  /** 400 BAD_REQUEST por el literal de `field`, sin un pool.query, sin orden nueva y con la clave libre. */
+  async function rejectedLiteral(u: number, side: string, field: string, text: string) {
+    const before = await ordersOf(u, side);
+    const spy = vi.spyOn(pool, 'query');
+    const k = key();
+    try {
+      const r = await sendRaw(text, k);
+      expect(r.status, text).toBe(400);
+      expect(r.body.error, text).toBe('BAD_REQUEST');
+      expect(r.body.message, text).toMatch(new RegExp(`^${field}: número JSON con punto decimal o exponente`));
+      expect(spy, text).not.toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+    }
+    expect(await keysOf(u, k), text).toBe(0);
+    expect(await ordersOf(u, side), text).toBe(before);
+  }
+
+  // Con 2 acciones, el número llegaba como 1000000000000000: size 2 en vez de 1, sin error.
+  it('SELL LIMIT a "500000000000000.00": amount 999999999999999.99 como número → 400 sin orden ni clave; como string → 201 NEW por 1 acción', async () => {
+    const u = await newUser('literal-42');
+    expect((await order({ userid: u, side: 'CASH_IN', amount: fmt(q.closeCents * 2n) })).body.status).toBe('FILLED');
+    expect((await order({ userid: u, side: 'BUY', type: 'MARKET', instrumentid: q.instrumentid, size: 2 })).body.status).toBe('FILLED');
+    const sell = (amount: string) =>
+      `{"userid":${u},"side":"SELL","type":"LIMIT","instrumentid":${q.instrumentid},"amount":${amount},"price":"500000000000000.00"}`;
+    await rejectedLiteral(u, 'SELL', 'amount', sell('999999999999999.99'));
+    const r = await sendRaw(sell('"999999999999999.99"'));
+    expect(r.status).toBe(201);
+    expect(r.body).toMatchObject({ status: 'NEW', size: '1', price: '500000000000000.00', amount: '500000000000000.00' });
+    expect(await ordersOf(u, 'SELL')).toBe(1);
+  });
+
+  it('price, size, userid e instrumentid con punto o exponente → 400 sin tocar la base', async () => {
+    const u = await newUser('literal-42-fields');
+    const iid = q.instrumentid;
+    await rejectedLiteral(u, 'SELL', 'price', `{"userid":${u},"side":"SELL","type":"LIMIT","instrumentid":${iid},"size":1,"price":1e2}`);
+    await rejectedLiteral(u, 'BUY', 'size', `{"userid":${u},"side":"BUY","instrumentid":${iid},"size":1.0000000000000001}`);
+    await rejectedLiteral(u, 'BUY', 'userid', `{"userid":${u}.0,"side":"BUY","instrumentid":${iid},"size":1}`);
+    await rejectedLiteral(u, 'BUY', 'instrumentid', `{"userid":${u},"side":"BUY","instrumentid":${iid}e0,"size":1}`);
+  });
+
+  // Generativa (semilla fija): montos con 2 decimales entre 10¹³ y 10¹⁵, como BUY LIMIT con amount = price
+  // (size 1, REJECTED por falta de cash pero grabada): como número nunca 201; como string, exactos.
+  it('generativa: como número → 400 sin orden; como string → la orden lleva exactamente el monto enviado', async () => {
+    let a = 4242;
+    const rnd = () => {
+      a = (a + 0x6d2b79f5) >>> 0;
+      let t = a;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+    const u = await newUser('literal-42-gen');
+    const buy = (amount: string, price: string) =>
+      `{"userid":${u},"side":"BUY","type":"LIMIT","instrumentid":${q.instrumentid},"amount":${amount},"price":${price}}`;
+    for (let i = 0; i < 25; i++) {
+      const lit = `${1e13 + Math.floor(rnd() * (1e15 - 1e13))}.${String(1 + Math.floor(rnd() * 99)).padStart(2, '0')}`;
+      await rejectedLiteral(u, 'BUY', 'amount', buy(lit, `"${lit}"`));
+      await rejectedLiteral(u, 'BUY', 'price', buy(`"${lit}"`, lit));
+      const r = await sendRaw(buy(`"${lit}"`, `"${lit}"`));
+      expect(r.status, lit).toBe(201);
+      expect(r.body, lit).toMatchObject({ status: 'REJECTED', size: '1', price: lit, amount: lit });
+      expect((await get(r.headers.get('location')!)).body, lit).toEqual(r.body);
+    }
+    expect(await ordersOf(u, 'BUY')).toBe(25);
   });
 });
 

@@ -1,0 +1,33 @@
+# El proxy del servidor de Lightsail (D-29): Caddy, lo único que publica puertos (80 y 443).
+# Termina HTTPS con certificados automáticos para los nombres de sslip.io del Caddyfile y pasa
+# cada uno a la API de su entorno por la red cocos-edge. Lo instala y levanta
+# deploy/lightsail/setup.sh, en /opt/cocos/proxy (proyecto cocos-proxy).
+services:
+  caddy:
+    image: caddy:2.11.7
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      # El directorio y no el archivo: setup.sh reemplaza el Caddyfile y un montaje de archivo
+      # seguiría viendo el anterior.
+      - ./caddy:/etc/caddy:ro
+      # Certificados y cuenta ACME: sin el volumen, cada reinicio pediría certificados nuevos.
+      - caddy_data:/data
+      - caddy_config:/config
+    networks: [edge]
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+networks:
+  edge:
+    name: cocos-edge
+    external: true
+
+volumes:
+  caddy_data:
+  caddy_config:

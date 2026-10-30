@@ -6,10 +6,10 @@
 { "ok": true, "db": "up", "release": "de01a01a…", "users": "4" }
 ```
 
-- `release` es el commit desplegado (variable `RELEASE`, la fija el deploy en Fly); `null` si no está configurada, como en `docker compose`.
+- `release` es el commit desplegado (variable `RELEASE`, la fija el deploy); `null` si no está configurada, como en `docker compose`.
 - Si la base no responde, `503` con `{ "ok": false, "db": "down", "release": … }`: `release` va igual, para saber qué commit atiende.
 
-Lo usan el healthcheck de docker compose, el check de las máquinas nuevas en Fly (bluegreen) y el workflow de deploy, antes y después de desplegar ([D-29](../decisiones.md#d-29)).
+Lo usan el healthcheck de docker compose (también en el servidor, antes de dar por buena la API nueva) y el workflow de deploy, por la URL pública, después de cambiar de versión ([D-29](../decisiones.md#d-29)).
 
 ## `/internal/*`
 
@@ -33,7 +33,7 @@ Un reinicio de Postgres (mantenimiento, failover, `pg_terminate_backend`) corta 
 
 ## Jobs periódicos
 
-Con `JOBS_ENABLED=true` (activo en docker compose y en Fly), la API corre la limpieza de idempotencia cada hora (`CLEANUP_EVERY_MS`). Cada usuario se procesa en su propia transacción y con try-lock, así que nunca bloquea escrituras; que dos máquinas la corran a la vez durante un deploy solo duplica trabajo. Con `JOBS_ENABLED=false` las claves vencidas se acumulan hasta que alguien llame a `/internal/cleanup-idempotency`, pero vencen igual: la limpieza no es parte de la regla de negocio. En producción iría a un worker aparte.
+Con `JOBS_ENABLED=true` (activo en docker compose y en el servidor), la API corre la limpieza de idempotencia cada hora (`CLEANUP_EVERY_MS`). Cada usuario se procesa en su propia transacción y con try-lock, así que nunca bloquea escrituras; que dos procesos la corran a la vez solo duplica trabajo. Con `JOBS_ENABLED=false` las claves vencidas se acumulan hasta que alguien llame a `/internal/cleanup-idempotency`, pero vencen igual: la limpieza no es parte de la regla de negocio. En producción iría a un worker aparte.
 
 El executor de LIMIT no tiene job ([D-28](../decisiones.md#d-28)): en producción lo llamaría un cron externo cada N minutos, con `POST /internal/execute-limits` y el token ([D-29](../decisiones.md#d-29)).
 
@@ -45,9 +45,9 @@ pnpm db:bootstrap      # o: docker compose run --rm migrate
 
 Aplica las migraciones pendientes y reaplica `db/functions` en una sola transacción, con la barrera de despliegue: se puede correr con la API activa; las escrituras esperan hasta el `COMMIT` (o responden `503` y se reintentan) y, si algo falla, no queda nada aplicado. Una migración nueva va en un archivo nuevo de `db/migrations`; nunca se edita una ya aplicada ([D-24](../decisiones.md#d-24)). Si aplicó alguna, verifica la historia: un corto heredado ([D-01](../decisiones.md#d-01)) o una historia fuera de los tipos ([D-14](../decisiones.md#d-14)) se informan, y una LIMIT `NEW` sin respaldo se cancela con `cancel_reason: "UNBACKED"` y se informa en el log (`historia: usuario N — reserva: …`, `orden N cancelada`), bajo el lock de ese usuario ([D-24](../decisiones.md#d-24)). Solo un cash que no cierra aborta el despliegue.
 
-En Fly lo corre el `release_command` de cada deploy, antes de cambiar de versión: si falla, sale con 1 y el deploy se corta ([D-29](../decisiones.md#d-29)).
+En el servidor lo corre cada deploy, con la imagen nueva y antes de cambiar de versión: si falla, sale con 1 y el deploy se corta sin cambiar nada ([D-29](../decisiones.md#d-29)).
 
-## Desplegar en Fly.io
+## Desplegar en Lightsail
 
 Se despliega al **publicar una versión**: un GitHub Release con tag `vX.Y.Z` sobre un commit de `main` con el check `ci` en verde (`.github/workflows/deploy.yml`, [D-29](../decisiones.md#d-29)). Un merge a `main` corre solo el CI. Para publicar una versión, después de mergear:
 
@@ -59,29 +59,80 @@ gh release create vX.Y.Z --target main --generate-notes
 
 1. **gate**: el tag es `vX.Y.Z` (sin sufijos: `v1.2.3-rc.1` no se despliega), apunta al commit del release, ese commit está en `main` y su `ci` terminó en verde (si todavía corre, espera hasta 20 minutos). Si no, el workflow queda en rojo con el motivo (`DEPLOY FRENADO: …`) y no se construye ni se despliega nada.
 2. **image**: la imagen se construye una vez y se publica en GHCR con dos etiquetas, el SHA y la versión (`ghcr.io/dante0x95/cocos-challenge-a:vX.Y.Z`).
-3. **staging** la despliega, sola, por digest.
-4. **production** despliega la misma imagen después de la aprobación manual del environment `production` (Actions → la corrida → Review deployments).
+3. **staging** (`https://staging.18-227-203-30.sslip.io`) la despliega por digest, por SSH: el commit tiene que descender del release que atiende, baja la imagen, corre el bootstrap con la API anterior atendiendo, cambia la API y exige que `/health` atienda el commit; si el cambio o `/health` fallan, vuelve a la versión anterior.
+4. **production** (`https://18-227-203-30.sslip.io`): lo mismo, con la misma imagen, solo si staging terminó en verde. No hay aprobación manual: publicar el release es la aprobación.
 
 Qué versión atiende cada entorno: Settings → Environments (el último deployment, con el tag) o `release` de `/health`, que es el SHA (`git tag --points-at <sha>`).
 
-La primera vez, antes del primer release, parado en `main`:
+### La primera vez
+
+Una sola vez, antes del primer release, desde la raíz del repo parado en `main`, con `gh` autenticado y la clave por defecto de la instancia que se baja de la consola de Lightsail (Account → SSH keys). Nada de esto lo hace el workflow.
 
 ```bash
 git switch main && git pull
-fly auth login
-deploy/fly/setup.sh                                              # producción: apps, volumen, secretos y primer deploy
-CONFIG=deploy/fly/staging.toml DB_CONFIG=deploy/fly/staging-db.toml deploy/fly/setup.sh   # staging, igual
-fly tokens create deploy -a cocos-challenge-a-staging | gh secret set FLY_API_TOKEN --env staging
-fly tokens create deploy -a cocos-challenge-a-api | gh secret set FLY_API_TOKEN --env production
+HOST=18.227.203.30
+LIGHTSAIL_KEY=~/.ssh/LightsailDefaultKey-us-east-2.pem
 ```
 
-El primer release tiene que ser el commit que desplegó `setup.sh` o uno posterior de `main`: el gate de cada entorno frena un commit anterior al que atiende. Y dos cosas en GitHub, una sola vez: el paquete `cocos-challenge-a` de GHCR tiene que ser **público** (Packages → el paquete → Package settings → Change visibility) para que Fly pueda bajar la imagen con `--image`: el paquete aparece con el primer release, así que si nace privado ese deploy falla en staging al bajar la imagen; se cambia la visibilidad y se re-corre (`gh run rerun <id>`, el mismo release); y los environments `staging` y `production` (Settings → Environments) creados antes de los dos `gh secret set --env` de arriba, con **required reviewers** en `production`, que es lo que convierte el job `production` en una aprobación manual. Sin eso, producción se despliega sola detrás de staging.
+1. La clave de deploy, dedicada: sin passphrase, porque la usa GitHub Actions.
 
-- **Un deploy en rojo.** `gh run list --workflow deploy` y `gh run view <id> --log`. Si frenó en el job `gate`, el release no se puede desplegar (tag que no es `vX.Y.Z`, commit fuera de `main` o con `ci` en rojo; el log dice cuál): no se construyó nada, y la corrección es otro release. Si frenó antes de `flyctl deploy`, el commit no desciende del release que atiende (un re-run del deploy de un release viejo, por ejemplo): no cambió nada. Si falló el `release_command`, el bootstrap no dejó nada aplicado y la versión anterior sigue; `fly logs -a cocos-challenge-a-api` tiene el error. Si falló el check de `/health`, las máquinas nuevas no recibieron tráfico. Si falló el deploy o la verificación de después (`/health atiende el commit`), el paso `Volver a la imagen anterior` devolvió a la imagen y el release de antes cada máquina de la API que no estaba así (si el deploy falló antes de conmutar, ninguna), sin correr el `release_command`; su log dice si `/health` atiende otra vez ese release. Si ese paso también falló, el entorno quedó en la versión nueva: `flyctl machines list -a <app>` y `deploy/fly/rollback.sh restore` a mano, con `PREVIOUS_IMAGE` y `PREVIOUS_RELEASE` del log.
-- **Re-desplegar** es volver a correr el workflow de ese release (`gh run rerun <id>`). Re-corre el gate, la construcción de la imagen (mismas etiquetas) y las dos etapas; la aprobación de producción se vuelve a pedir. Solo pasa si el release es el que atiende cada entorno o uno posterior: volver a una versión anterior no es un re-run (el gate de ancestría lo frena), es `deploy/fly/rollback.sh` o un deploy a mano.
-- **Staging en rojo, producción no**: el job `production` no corre (`needs: staging`); lo que atiende producción no cambia. Un deploy de staging con una migración nueva corre su `release_command` contra la base de staging antes de que esa migración llegue a producción.
-- **Ensayos** (`deploy/fly/drills.sh`, a mano, con `flyctl` y `gh` autenticados; no corren en el CI): el último release pasó por el workflow de deploy y `/health` lo atiende (`release [tag]`, conviene después del primer release), un deploy roto (bootstrap que falla, `/health` en `503`, re-run del deploy de un release viejo) y los datos de Postgres después de redesplegar la base (`persistence`, corta la API mientras la base reinicia).
-- **Token interno** para `/internal/*`: `fly ssh console -a cocos-challenge-a-api -C 'printenv INTERNAL_TOKEN'`.
+```bash
+ssh-keygen -t ed25519 -N '' -C cocos-deploy -f ~/.ssh/cocos-deploy
+```
+
+2. Preparar el servidor con [`deploy/lightsail/setup.sh`](../../deploy/lightsail/setup.sh): el usuario `deploy` con esa clave, los secretos de cada entorno (generados en el servidor, sin imprimirse) y Caddy. Es idempotente: volver a correrlo no cambia los secretos, actualiza el proxy y, con otra clave, la reemplaza.
+
+```bash
+ssh -i "$LIGHTSAIL_KEY" "ubuntu@$HOST" rm -rf cocos-setup
+scp -i "$LIGHTSAIL_KEY" -r deploy/lightsail "ubuntu@$HOST:cocos-setup"
+ssh -i "$LIGHTSAIL_KEY" "ubuntu@$HOST" "sudo bash cocos-setup/setup.sh '$(cat ~/.ssh/cocos-deploy.pub)'"
+ssh -i ~/.ssh/cocos-deploy -o IdentitiesOnly=yes "deploy@$HOST" docker ps
+```
+
+El primero borra una copia anterior (con una copia ya en el servidor, `scp -r` copiaría adentro de ella). El último prueba la clave de deploy: tiene que listar el contenedor de Caddy.
+
+3. La clave del host, leída por la conexión que ya es de confianza (la de la clave por defecto), para fijarla en Actions:
+
+```bash
+KNOWN="$HOST $(ssh -i "$LIGHTSAIL_KEY" "ubuntu@$HOST" cat /etc/ssh/ssh_host_ed25519_key.pub | cut -d' ' -f1,2)"
+```
+
+4. Los secretos de los environments `staging` y `production` (los mismos en los dos: es un solo servidor):
+
+```bash
+for env in staging production; do
+  gh secret set LIGHTSAIL_HOST --env "$env" --body "$HOST"
+  gh secret set LIGHTSAIL_SSH_KEY --env "$env" < ~/.ssh/cocos-deploy
+  gh secret set LIGHTSAIL_KNOWN_HOSTS --env "$env" --body "$KNOWN"
+done
+```
+
+5. Los dos environments solo aceptan deploys de tags `v*` (deployment branch policy). Con el plan Pro y el repo privado, `production` no puede tener reviewers obligatorios: publicar el release es la aprobación.
+
+```bash
+for env in staging production; do
+  gh api -X PUT "repos/dante0x95/cocos-challenge-a/environments/$env" --input - <<<'{"deployment_branch_policy":{"protected_branches":false,"custom_branch_policies":true}}'
+  gh api -X POST "repos/dante0x95/cocos-challenge-a/environments/$env/deployment-branch-policies" -f name='v*' -f type=tag
+done
+```
+
+6. El primer release, y el ensayo que verifica que llegó:
+
+```bash
+gh release create v0.1.0 --target main --generate-notes
+deploy/drills.sh release v0.1.0
+```
+
+El primer deploy de cada entorno no tiene release anterior: el gate de ancestría lo deja pasar, y si falla, la API sale y el entorno queda vacío hasta el próximo release. El primer `/health` tarda unos segundos más: Caddy pide el certificado de cada nombre. El paquete de GHCR puede quedar privado: cada deploy baja la imagen con el token de su job.
+
+### Operación
+
+- **Un deploy en rojo.** `gh run list --workflow deploy` y `gh run view <id> --log`. Si frenó en el job `gate`, el release no se puede desplegar (tag que no es `vX.Y.Z`, commit fuera de `main` o con `ci` en rojo; el log dice cuál): no se construyó nada, y la corrección es otro release. Si frenó en `Acceso SSH al servidor` o `Release que atiende`, faltan los secretos, el servidor no está preparado (`setup.sh`) o su `release.env` no dice qué atiende (el log lo nombra): se corrige a mano, nunca borrándolo, que lo haría pasar por un primer deploy. Si frenó en `El commit desciende del release actual`, el commit es anterior al que atiende (un re-run del deploy de un release viejo, por ejemplo): no cambió nada. Si falló `Bootstrap de la base`, no quedó nada aplicado y sigue la versión anterior; el log tiene el error del bootstrap. Si falló `Cambiar de versión` o `/health atiende el commit`, el paso `Volver a la versión anterior` devolvió la API a la imagen y el release de antes, y su log dice si `/health` atiende otra vez ese release. Si ese paso también falló, el entorno quedó como lo dejó el cambio: entrar al servidor y mirar `/opt/cocos/<entorno>` (`release.env`, `release.previous.env`) y `docker compose -p cocos-<entorno> ps`.
+- **Re-desplegar** es volver a correr el workflow de ese release (`gh run rerun <id>`). Re-corre el gate, la construcción de la imagen (mismas etiquetas) y las dos etapas. Solo pasa si el release es el que atiende cada entorno o uno posterior: volver a una versión anterior no es un re-run (el gate de ancestría lo frena).
+- **Staging en rojo, producción no**: el job `production` no corre (`needs: staging`); lo que atiende producción no cambia. Un deploy de staging con una migración nueva corre su bootstrap contra la base de staging antes de que esa migración llegue a producción.
+- **En el servidor**: `ssh -i ~/.ssh/cocos-deploy deploy@18.227.203.30`, y cada entorno es un proyecto de compose en `/opt/cocos/<entorno>`: `docker compose -p cocos-production --project-directory /opt/cocos/production --env-file /opt/cocos/production/release.env logs api`. Las imágenes viejas se acumulan (la vuelta atrás usa la anterior): `docker image prune -a` borra las que ningún contenedor usa.
+- **Ensayos** (a mano; no corren en el CI). `deploy/drills.sh`, con `gh` autenticado: el último release pasó por el workflow de deploy y `/health` lo atiende (`release [tag]`), y un re-run del deploy de un release viejo se frena en el gate (`rerun`); `URL` elige el entorno (por defecto, producción). `deploy/lightsail/drill-docker.sh`, con Docker en la máquina local y sin el servidor: `remote.sh` con imágenes rotas a propósito (un bootstrap que falla, una API cuyo `/health` responde `503`) tiene que rechazarlas y volver a la buena; conviene correrlo después de cambiar `remote.sh` o `compose.yml`.
+- **Token interno** para `/internal/*`: `ssh -i ~/.ssh/cocos-deploy deploy@18.227.203.30 cat /opt/cocos/production/api.env`.
 
 **Cambio de hash de idempotencia.** Si cambia cómo se calcula el hash de `POST /orders`, las claves vigentes (24 h) guardan el hash viejo y su reintento respondería `422`. El cambio tiene que aceptar también el hash anterior, solo para reconocer claves existentes y dentro de la misma llamada a `app.place_order`, hasta que vence la ventana; después se borra esa compatibilidad. Como el vencimiento lo decide `place_order` con `created_at`, la ventana termina 24 h después del despliegue aunque la limpieza no haya corrido. Así se hizo al canonizar `amount` y `price` ([D-19](../decisiones.md#d-19)).
 

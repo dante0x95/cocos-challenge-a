@@ -1,25 +1,24 @@
-# Deploy a Fly.io por versión (D-29, issue #30): solo al publicar un GitHub Release con tag
-# vX.Y.Z (gh release create vX.Y.Z --target main --generate-notes). Un merge a main corre solo
-# el CI. Cuatro etapas, en orden:
+# Deploy en AWS Lightsail por versión (D-29, issues #30 y #34): solo al publicar un GitHub
+# Release con tag vX.Y.Z (gh release create vX.Y.Z --target main --generate-notes). Un merge a
+# main corre solo el CI. Un servidor, dos entornos (proyectos de Docker Compose cocos-staging y
+# cocos-production, cada uno con su Postgres), detrás de Caddy con HTTPS. Cuatro etapas:
 #   gate        el tag es vX.Y.Z, apunta al commit del release, ese commit está en main y su
-#               check "ci" terminó en verde (deploy/fly/release-gate.sh). Si no, el job queda en
-#               rojo con el motivo y no se construye ni se despliega nada.
+#               check "ci" terminó en verde (deploy/release-gate.sh). Si no, el job queda en rojo
+#               con el motivo y no se construye ni se despliega nada.
 #   image       construye la imagen una sola vez, la publica en GHCR etiquetada con el SHA y con
-#               la versión, y entrega su digest (deploy/fly/image-digest.sh): la referencia
-#               inmutable.
-#   staging     despliega esa imagen, por digest, en la app de staging, con el gate de ancestría
-#               y el check de /health.
-#   production  la misma imagen, por el mismo digest, en la app de producción, detrás del
-#               environment `production` de GitHub, que exige aprobación manual (Settings →
-#               Environments → required reviewers; no se puede fijar en este archivo).
-# fly.toml y deploy/fly/staging.toml corren el bootstrap como release_command antes de cambiar
-# de versión, y la estrategia bluegreen pasa el tráfico solo si /health responde 2xx. Antes de
-# cada deploy, el commit del release tiene que descender del que atiende el entorno (RELEASE es
-# siempre un SHA, no el tag): un re-run del workflow de un release viejo, o la aprobación tardía
-# de su producción, no pisa uno más nuevo; volver a desplegar el mismo commit pasa. Después,
-# /health tiene que atenderlo. Las dos verificaciones: deploy/fly/release-check.sh. Si la de
-# después falla una vez desplegado, el entorno vuelve solo a la imagen y el release anteriores
-# (deploy/fly/rollback.sh) y el job queda en rojo. La primera vez: deploy/fly/setup.sh.
+#               la versión, y entrega su digest (deploy/image-digest.sh): la referencia inmutable.
+#   staging     despliega esa imagen, por digest, por SSH (deploy/lightsail/deploy.sh).
+#   production  la misma imagen, por el mismo digest, solo si staging terminó en verde. Publicar
+#               el release es la aprobación: el environment no tiene reviewers obligatorios (no
+#               se puede en un repo privado con plan Pro); se restringe a tags v*.
+# En cada entorno, en orden: lo que atiende (release e imagen, del servidor); el commit tiene que
+# descender de ese release (deploy/release-check.sh before: un re-run del workflow de un release
+# viejo no pisa uno más nuevo; el mismo commit pasa); bajar la imagen con el GITHUB_TOKEN del job
+# por stdin, sin que quede en el servidor; el bootstrap con la imagen nueva y la API anterior
+# atendiendo; el cambio de la API; /health por la URL pública tiene que atender el commit
+# (release-check.sh after). Si el cambio o esa verificación fallan, el entorno vuelve solo a la
+# imagen y el release anteriores y el job queda en rojo. La primera vez: deploy/lightsail/setup.sh
+# en el servidor y los secretos LIGHTSAIL_* de cada environment (docs/api/operacion.md).
 # No hay deploy manual desde acá: un commit sin release, fuera de main o sin el CI en verde no
 # se despliega.
 name: deploy
@@ -32,14 +31,14 @@ permissions:
   contents: read
 
 # Concurrencia por entorno, en cada job de deploy (staging y production), no del workflow: un
-# grupo del workflow lo retendría la corrida entera, también mientras production espera la
-# aprobación, y el staging de los releases siguientes no correría hasta que alguien aprobara (o
-# rechazara) el anterior. En cada entorno, un deploy a la vez, sin cortar uno en curso: cortarlo
-# a mitad del bootstrap no rompe nada (es una transacción), pero deja un deploy fallido que hay
-# que mirar. queue: max deja esperar a todos los pendientes, en orden de llegada: con la cola
-# por defecto (single) cada pendiente nuevo cancela al anterior, y un re-run del workflow de un
-# release viejo que llega mientras otro deploy corre cancelaría el deploy pendiente de un release
-# más nuevo; después el gate frena al viejo y ese release queda sin desplegar.
+# grupo del workflow lo retendría la corrida entera, y el staging de un release no correría
+# mientras la producción del anterior siguiera desplegándose. En cada entorno, un deploy a la
+# vez, sin cortar uno en curso: cortarlo a mitad del bootstrap no rompe nada (es una
+# transacción), pero deja un deploy fallido que hay que mirar. queue: max deja esperar a todos
+# los pendientes, en orden de llegada: con la cola por defecto (single) cada pendiente nuevo
+# cancela al anterior, y un re-run del workflow de un release viejo que llega mientras otro
+# deploy corre cancelaría el deploy pendiente de un release más nuevo; después el gate frena al
+# viejo y ese release queda sin desplegar.
 
 # El commit del release (en un evento release, github.sha es el commit del tag; un re-run
 # conserva el del evento original) y su tag.
@@ -62,7 +61,7 @@ jobs:
           ref: ${{ env.SHA }}
           fetch-depth: 0
       - name: Versión de main con ci en verde
-        run: deploy/fly/release-gate.sh
+        run: deploy/release-gate.sh
         env:
           REPO: ${{ github.repository }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -93,7 +92,7 @@ jobs:
       # mismo commit); el digest no.
       - name: Digest de la imagen publicada
         id: digest
-        run: deploy/fly/image-digest.sh
+        run: deploy/image-digest.sh
     outputs:
       ref: ${{ steps.digest.outputs.ref }}
 
@@ -105,12 +104,15 @@ jobs:
       cancel-in-progress: false
       queue: max
     timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: read
     environment:
       name: staging
-      url: https://cocos-challenge-a-staging.fly.dev
+      url: https://staging.18-227-203-30.sslip.io
     env:
-      URL: https://cocos-challenge-a-staging.fly.dev
-      CONFIG: deploy/fly/staging.toml
+      ENVIRONMENT: staging
+      URL: https://staging.18-227-203-30.sslip.io
       IMAGE_REF: ${{ needs.image.outputs.ref }}
     steps:
       # Con la historia completa: el gate compara el commit con el release que atiende.
@@ -118,34 +120,45 @@ jobs:
         with:
           ref: ${{ env.SHA }}
           fetch-depth: 0
-      - name: El commit desciende del release actual
-        id: gate
-        run: deploy/fly/release-check.sh before
-      - uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1 # 1.6
-      - name: Imagen que atiende
+      # Los secretos del environment, solo en este paso: la clave y el host quedan en
+      # $RUNNER_TEMP, que GitHub vacía al terminar el job.
+      - name: Acceso SSH al servidor
+        run: deploy/lightsail/deploy.sh access
+        env:
+          LIGHTSAIL_HOST: ${{ secrets.LIGHTSAIL_HOST }}
+          LIGHTSAIL_SSH_KEY: ${{ secrets.LIGHTSAIL_SSH_KEY }}
+          LIGHTSAIL_KNOWN_HOSTS: ${{ secrets.LIGHTSAIL_KNOWN_HOSTS }}
+      - name: Release que atiende
         id: serving
-        run: deploy/fly/rollback.sh record
+        run: deploy/lightsail/deploy.sh current
+      - name: El commit desciende del release actual
+        run: deploy/release-check.sh before
         env:
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-      - name: Deploy
+          CURRENT: ${{ steps.serving.outputs.release }}
+          FIRST_DEPLOY: ${{ steps.serving.outputs.first }}
+      - name: Bajar la imagen
+        run: deploy/lightsail/deploy.sh pull
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # Antes de cambiar, con la API anterior atendiendo: si falla, no cambió nada y no hay
+      # nada que volver (el paso Cambiar de versión no corre).
+      - name: Bootstrap de la base
+        run: deploy/lightsail/deploy.sh bootstrap
+      - name: Cambiar de versión
         id: deploy
-        run: flyctl deploy --config deploy/fly/staging.toml --image "$IMAGE_REF" --env "RELEASE=$SHA"
-        env:
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: deploy/lightsail/deploy.sh switch
       - name: /health atiende el commit
-        run: deploy/fly/release-check.sh after
-      # Si algo falló desde que empezó el deploy: la verificación de después, o el deploy mismo,
-      # que puede fallar después de conmutar (bluegreen habilita las máquinas nuevas antes de
-      # retirar las anteriores, y la retirada puede fallar). rollback.sh mira las máquinas: si el
-      # deploy falló antes de conmutar, todas siguen en la imagen anterior y no toca ninguna.
-      # Con el gate o record en rojo, el deploy no corrió (skipped) y no hay nada que volver.
-      - name: Volver a la imagen anterior
+        run: deploy/release-check.sh after
+      # Si algo falló desde que empezó el cambio: el cambio mismo (la API nueva no quedó sana) o
+      # la verificación de después. remote.sh mira el estado del servidor: si el cambio falló
+      # antes de tocar la API, sigue la anterior y solo verifica.
+      - name: Volver a la versión anterior
         if: failure() && steps.deploy.outcome != 'skipped'
-        run: deploy/fly/rollback.sh restore
+        run: deploy/lightsail/deploy.sh rollback
         env:
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
           PREVIOUS_IMAGE: ${{ steps.serving.outputs.image }}
-          PREVIOUS_RELEASE: ${{ steps.gate.outputs.previous }}
+          PREVIOUS_RELEASE: ${{ steps.serving.outputs.release }}
+          FIRST_DEPLOY: ${{ steps.serving.outputs.first }}
 
   production:
     needs: [image, staging]
@@ -155,43 +168,58 @@ jobs:
       cancel-in-progress: false
       queue: max
     timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: read
     environment:
       name: production
-      url: https://cocos-challenge-a-api.fly.dev
+      url: https://18-227-203-30.sslip.io
     env:
-      URL: https://cocos-challenge-a-api.fly.dev
-      CONFIG: fly.toml
+      ENVIRONMENT: production
+      URL: https://18-227-203-30.sslip.io
       IMAGE_REF: ${{ needs.image.outputs.ref }}
     steps:
+      # Con la historia completa: el gate compara el commit con el release que atiende.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.SHA }}
           fetch-depth: 0
-      - name: El commit desciende del release actual
-        id: gate
-        run: deploy/fly/release-check.sh before
-      - uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1 # 1.6
-      - name: Imagen que atiende
+      # Los secretos del environment, solo en este paso: la clave y el host quedan en
+      # $RUNNER_TEMP, que GitHub vacía al terminar el job.
+      - name: Acceso SSH al servidor
+        run: deploy/lightsail/deploy.sh access
+        env:
+          LIGHTSAIL_HOST: ${{ secrets.LIGHTSAIL_HOST }}
+          LIGHTSAIL_SSH_KEY: ${{ secrets.LIGHTSAIL_SSH_KEY }}
+          LIGHTSAIL_KNOWN_HOSTS: ${{ secrets.LIGHTSAIL_KNOWN_HOSTS }}
+      - name: Release que atiende
         id: serving
-        run: deploy/fly/rollback.sh record
+        run: deploy/lightsail/deploy.sh current
+      - name: El commit desciende del release actual
+        run: deploy/release-check.sh before
         env:
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-      - name: Deploy
+          CURRENT: ${{ steps.serving.outputs.release }}
+          FIRST_DEPLOY: ${{ steps.serving.outputs.first }}
+      - name: Bajar la imagen
+        run: deploy/lightsail/deploy.sh pull
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # Antes de cambiar, con la API anterior atendiendo: si falla, no cambió nada y no hay
+      # nada que volver (el paso Cambiar de versión no corre).
+      - name: Bootstrap de la base
+        run: deploy/lightsail/deploy.sh bootstrap
+      - name: Cambiar de versión
         id: deploy
-        run: flyctl deploy --config fly.toml --image "$IMAGE_REF" --env "RELEASE=$SHA"
-        env:
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: deploy/lightsail/deploy.sh switch
       - name: /health atiende el commit
-        run: deploy/fly/release-check.sh after
-      # Si algo falló desde que empezó el deploy: la verificación de después, o el deploy mismo,
-      # que puede fallar después de conmutar (bluegreen habilita las máquinas nuevas antes de
-      # retirar las anteriores, y la retirada puede fallar). rollback.sh mira las máquinas: si el
-      # deploy falló antes de conmutar, todas siguen en la imagen anterior y no toca ninguna.
-      # Con el gate o record en rojo, el deploy no corrió (skipped) y no hay nada que volver.
-      - name: Volver a la imagen anterior
+        run: deploy/release-check.sh after
+      # Si algo falló desde que empezó el cambio: el cambio mismo (la API nueva no quedó sana) o
+      # la verificación de después. remote.sh mira el estado del servidor: si el cambio falló
+      # antes de tocar la API, sigue la anterior y solo verifica.
+      - name: Volver a la versión anterior
         if: failure() && steps.deploy.outcome != 'skipped'
-        run: deploy/fly/rollback.sh restore
+        run: deploy/lightsail/deploy.sh rollback
         env:
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
           PREVIOUS_IMAGE: ${{ steps.serving.outputs.image }}
-          PREVIOUS_RELEASE: ${{ steps.gate.outputs.previous }}
+          PREVIOUS_RELEASE: ${{ steps.serving.outputs.release }}
+          FIRST_DEPLOY: ${{ steps.serving.outputs.first }}

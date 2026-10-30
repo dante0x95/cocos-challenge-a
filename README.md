@@ -45,26 +45,25 @@ El CI las corre en cada PR contra Postgres 18. Flujo de trabajo, formato de comm
 
 ## Desplegar
 
-Se despliega en Fly.io al publicar una versión, no en cada merge:
+Se despliega en un servidor de AWS Lightsail al publicar una versión, no en cada merge:
 
 ```bash
 gh release create vX.Y.Z --target main --generate-notes
 ```
 
-El workflow de deploy verifica que el tag sea `vX.Y.Z` y que su commit esté en `main` con el CI en verde; si no, frena con el motivo. Después construye una imagen, la publica en GHCR con el SHA y la versión, y la despliega primero en `staging` y después, con aprobación manual, en producción; en cada entorno la API y Postgres 18 en dos apps, el bootstrap antes de cambiar de versión, el tráfico a la versión nueva solo si `/health` responde, un gate que no deja desplegar un commit anterior al que atiende y la vuelta a la versión anterior si `/health` no la atiende ([D-29](docs/decisiones.md#d-29)).
+El workflow de deploy verifica que el tag sea `vX.Y.Z` y que su commit esté en `main` con el CI en verde; si no, frena con el motivo. Después construye una imagen, la publica en GHCR con el SHA y la versión, y la despliega por SSH primero en staging (`https://staging.18-227-203-30.sslip.io`) y, si staging terminó en verde, en producción (`https://18-227-203-30.sslip.io`). Cada entorno es un proyecto de Docker Compose con la API y su Postgres 18, detrás de Caddy con HTTPS; en cada uno, un gate que no deja desplegar un commit anterior al que atiende, el bootstrap antes de cambiar de versión, `/health` atendiendo el commit y la vuelta a la versión anterior si no ([D-29](docs/decisiones.md#d-29)).
 
-La primera vez, antes del primer release, parado en `main` y con [`flyctl`](https://fly.io/docs/flyctl/install/) autenticado:
+La primera vez, antes del primer release: una clave de deploy dedicada, [`deploy/lightsail/setup.sh`](deploy/lightsail/setup.sh) en el servidor (usuario `deploy`, secretos de cada entorno y Caddy) y los secretos de los environments, los mismos en los dos:
 
 ```bash
-deploy/fly/setup.sh                                                                        # producción
-CONFIG=deploy/fly/staging.toml DB_CONFIG=deploy/fly/staging-db.toml deploy/fly/setup.sh   # staging
-fly tokens create deploy -a cocos-challenge-a-staging | gh secret set FLY_API_TOKEN --env staging
-fly tokens create deploy -a cocos-challenge-a-api | gh secret set FLY_API_TOKEN --env production
+for env in staging production; do
+  gh secret set LIGHTSAIL_HOST --env "$env" --body "$HOST"
+  gh secret set LIGHTSAIL_SSH_KEY --env "$env" < ~/.ssh/cocos-deploy
+  gh secret set LIGHTSAIL_KNOWN_HOSTS --env "$env" --body "$KNOWN"
+done
 ```
 
-Y en GitHub: los environments `staging` y `production` (Settings → Environments) creados antes de los `gh secret set --env`, con **required reviewers** en `production` (sin eso, producción se despliega sola detrás de staging), y el paquete de GHCR público después del primer release, para que Fly baje la imagen. Detalle: [`docs/api/operacion.md`](docs/api/operacion.md#desplegar-en-flyio).
-
-Los ensayos (un release que llega a producción, un deploy roto: bootstrap que falla, `/health` caído, re-run del deploy de un release viejo; y los datos de Postgres después de redesplegar la base) se corren a mano con `deploy/fly/drills.sh`; no corren en el CI. Operación: [`docs/api/operacion.md`](docs/api/operacion.md#desplegar-en-flyio).
+Los comandos completos, en orden (de dónde salen `HOST` y `KNOWN`, cómo correr `setup.sh` y cómo restringir los environments a tags `v*`): [`docs/api/operacion.md`](docs/api/operacion.md#la-primera-vez). Los ensayos (un release que llega a producción y un re-run del deploy de un release viejo que se frena) se corren a mano con `deploy/drills.sh`; no corren en el CI.
 
 ## Cómo está hecho, en cinco ideas
 
@@ -117,7 +116,7 @@ src/
 test/             unit · db · concurrency · property · bootstrap · oracle (fold independiente)
 docs/             decisiones · benchmark del balance · pruebas · contratos de la API
 rest-client/      colección de requests
-deploy/fly/       Postgres en Fly, setup del primer deploy, gate del workflow y ensayos (la API: fly.toml)
+deploy/           gate del workflow, verificaciones y ensayos · lightsail/: el servidor (compose, Caddy, setup y deploy)
 ```
 
 ## Fuera de alcance

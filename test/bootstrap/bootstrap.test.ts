@@ -102,9 +102,9 @@ describe('bootstrap', () => {
     }
   }, 60_000);
 
-  // D-29: la CLI es el release_command del deploy en Fly. Si el bootstrap falla tiene que salir
+  // D-29: la CLI es el bootstrap de cada deploy, antes de cambiar de versión. Si falla tiene que salir
   // con 1, para que el deploy se corte y siga atendiendo la versión anterior.
-  it('la CLI (release_command) sale con 0 si el bootstrap pasa y con 1 si falla, sin dejar nada aplicado', async () => {
+  it('la CLI (el bootstrap del deploy) sale con 0 si el bootstrap pasa y con 1 si falla, sin dejar nada aplicado', async () => {
     const cli = (dbDir: string) => spawnSync(resolve('node_modules/.bin/tsx'), [resolve('src/db/bootstrap.ts')], {
       encoding: 'utf8',
       env: { ...process.env, DATABASE_ADMIN_URL: url, API_DB_PASSWORD: 'api', DB_DIR: dbDir },

@@ -1,24 +1,32 @@
-// El deploy a Fly (D-29, issues #12, #13 y #30) despliega solo un GitHub Release con tag
-// vX.Y.Z sobre un commit de main con el CI en verde, y exactamente ese commit: lo frena si no
-// desciende del release que atiende y, después, exige que /health lo atienda. Sin red:
+// El deploy en Lightsail (D-29, issues #12, #13, #30 y #34) despliega solo un GitHub Release con
+// tag vX.Y.Z sobre un commit de main con el CI en verde, y exactamente ese commit: primero en
+// staging y después en producción, en un servidor con dos proyectos de Docker Compose detrás de
+// Caddy. Lo frena si no desciende del release que atiende, corre el bootstrap antes de cambiar de
+// versión, exige que /health atienda el commit y, si no, vuelve a la versión anterior. Sin red:
 //
 // 1. .github/workflows/deploy.yml: su disparador, sus jobs y el orden de sus pasos, con un
 //    evaluador mínimo de expresiones de GitHub Actions (solo lo que el workflow usa: contextos
-//    github.*, env.*, needs.* y steps.*, strings, true/false/null, ==, !=, !, &&, || y
-//    paréntesis; otra sintaxis hace fallar el test, así que cambiarla obliga a mirar este
+//    github.*, env.*, needs.*, steps.* y secrets.*, strings, true/false/null, ==, !=, !, &&, ||
+//    y paréntesis; otra sintaxis hace fallar el test, así que cambiarla obliga a mirar este
 //    archivo).
-// 2. Los scripts que corren esos pasos (deploy/fly/*.sh), con `curl`, `gh`, `docker` y `flyctl`
-//    simulados y repositorios git temporales.
+// 2. La configuración del servidor (deploy/lightsail/compose.yml, el proxy y el Caddyfile).
+// 3. Los scripts que corren esos pasos (deploy/*.sh y deploy/lightsail/*.sh), con `curl`, `gh`,
+//    `ssh` y `docker` simulados y repositorios git temporales. El `ssh` simulado corre el comando
+//    en la máquina local, así que remote.sh corre de verdad sobre un directorio temporal que hace
+//    de /opt/cocos; el `docker` simulado anota cada llamada y qué API atiende cada entorno.
+// 4. Los jobs staging y production ejecutados paso a paso como los corre GitHub (if, outcome,
+//    salidas de los pasos), contra ese servidor simulado.
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 const ROOT = resolve(import.meta.dirname, '../..');
 const yml = readFileSync(join(ROOT, '.github/workflows/deploy.yml'), 'utf8');
-const SCRIPT = join(ROOT, 'deploy/fly/release-check.sh');
-const GATE = join(ROOT, 'deploy/fly/release-gate.sh');
+const SCRIPT = join(ROOT, 'deploy/release-check.sh');
+const GATE = join(ROOT, 'deploy/release-gate.sh');
+const read = (f: string) => readFileSync(join(ROOT, f), 'utf8');
 
 /** Valor de la primera clave `key:` del archivo, en una sola línea. */
 function valueOf(key: string): string {
@@ -52,7 +60,7 @@ function evaluate(expr: string, ctx: Ctx): unknown {
     if (t === 'true') return true;
     if (t === 'false') return false;
     if (t === 'null') return null;
-    if (/^(github|env|needs|steps)\./.test(t)) return t.split('.').reduce<unknown>((o, k) => (o as Ctx | undefined)?.[k], ctx);
+    if (/^(github|env|needs|steps|secrets)\./.test(t)) return t.split('.').reduce<unknown>((o, k) => (o as Ctx | undefined)?.[k], ctx);
     throw new Error(`sintaxis no soportada: ${t}`);
   };
   const cmp = (): unknown => {
@@ -111,6 +119,28 @@ const step = (block: string, name: string) => {
   return found;
 };
 
+/** El bloque `env:` con la clave a `indent` espacios (4: el del job; 8: el de un paso), como objeto. */
+const envOf = (block: string, indent: number): Record<string, string> => {
+  const m = block.match(new RegExp(`^ {${indent}}env:\\n((?: {${indent + 2}}.+\\n)+)`, 'm'));
+  return Object.fromEntries([...(m?.[1] ?? '').matchAll(/^\s*(\w+): (.+)$/gm)].map((e) => [e[1], e[2].trim()]));
+};
+
+const URLS: Record<string, string> = {
+  staging: 'https://staging.18-227-203-30.sslip.io',
+  production: 'https://18-227-203-30.sslip.io',
+};
+/** Los pasos de cada entorno, en orden: el bootstrap antes de cambiar, la vuelta atrás al final. */
+const DEPLOY_FLOW = [
+  'deploy/lightsail/deploy.sh access',
+  'deploy/lightsail/deploy.sh current',
+  'deploy/release-check.sh before',
+  'deploy/lightsail/deploy.sh pull',
+  'deploy/lightsail/deploy.sh bootstrap',
+  'deploy/lightsail/deploy.sh switch',
+  'deploy/release-check.sh after',
+  'deploy/lightsail/deploy.sh rollback',
+];
+
 describe('workflow de deploy', () => {
   it('el evaluador rechaza lo que no entiende', () => {
     expect(() => evaluate("contains(github.ref, 'main')", {})).toThrow(/sintaxis no soportada/);
@@ -124,6 +154,7 @@ describe('workflow de deploy', () => {
     expect(evaluate("github.event.release.tag_name == 'v1.2.3' && true", ctx)).toBe(true);
     expect(evaluate("github.event.release.tag_name == 'v1.2.4' || false", ctx)).toBe(false);
     expect(evaluate("!(github.event.release.tag_name == null) && github.sha != ''", ctx)).toBe(true);
+    expect(evaluate('secrets.X', { secrets: { X: 'x' } })).toBe('x');
   });
 
   it('lo dispara solo publicar un release: ni workflow_run (el CI de main) ni push', () => {
@@ -133,14 +164,11 @@ describe('workflow de deploy', () => {
     expect(yml).not.toContain('github.event.workflow_run');
   });
 
-  it('despliega el commit del tag, con RELEASE igual a ese SHA, y conoce la versión', () => {
+  it('despliega el commit del tag y conoce la versión', () => {
     const sha = 'c'.repeat(40);
     expect(evaluate(inner(valueOf('SHA')), released('v2.0.1', sha))).toBe(sha);
     expect(evaluate(inner(valueOf('TAG')), released('v2.0.1', sha))).toBe('v2.0.1');
     expect(valueOf('IMAGE')).toBe('ghcr.io/${{ github.repository }}');
-    for (const name of ['staging', 'production']) {
-      expect(runsOf(job(name)).find((r) => r.startsWith('flyctl deploy'))).toContain('--env "RELEASE=$SHA"');
-    }
   });
 
   // Los scripts y la configuración de cada entorno salen del mismo commit que la imagen.
@@ -152,18 +180,20 @@ describe('workflow de deploy', () => {
 
   it('antes de construir, el job gate corre release-gate.sh con la historia completa y permiso para leer los checks', () => {
     const gate = job('gate');
-    expect(runsOf(gate)).toEqual(['deploy/fly/release-gate.sh']);
+    expect(runsOf(gate)).toEqual(['deploy/release-gate.sh']);
     expect(keyIn(gate, 'fetch-depth')).toBe('0');
     expect(keyIn(gate, 'checks')).toBe('read');
     expect(keyIn(gate, 'GH_TOKEN')).toBe('${{ secrets.GITHUB_TOKEN }}');
     expect(keyIn(gate, 'REPO')).toBe('${{ github.repository }}');
-    expect(gate).not.toMatch(/packages: write|FLY_API_TOKEN|docker /);
+    expect(gate).not.toMatch(/packages: write|LIGHTSAIL|docker /);
     expect(statSync(GATE).mode & 0o111).not.toBe(0);
   });
 
   // Ningún job tiene `if`: con uno (always(), por ejemplo) correría aunque falle un job del que
-  // depende. Sin `if`, un gate en rojo deja sin correr todo lo que depende de él.
-  it('cuatro etapas en orden: el gate, la imagen una vez, staging con ella, producción con la misma y detrás de su environment', () => {
+  // depende. Sin `if`, un gate en rojo deja sin correr todo lo que depende de él, y un staging en
+  // rojo deja sin correr producción: publicar el release es la aprobación, y staging es la
+  // condición para que llegue a producción.
+  it('cuatro etapas en orden: el gate, la imagen una vez, staging con ella y producción con la misma, solo después de staging', () => {
     const names = [...jobs.matchAll(/^  (\w+):\n/gm)].map((m) => m[1]);
     expect(names).toEqual(['gate', 'image', 'staging', 'production']);
     expect(jobKey(job('gate'), 'needs')).toBeUndefined();
@@ -196,106 +226,108 @@ describe('workflow de deploy', () => {
     expect(pushed).toEqual(tags);
   });
 
-  it('la imagen se construye y publica una sola vez en GHCR; staging y producción solo despliegan su digest', () => {
+  it('la imagen se construye y publica una sola vez en GHCR; cada entorno la baja, corre el bootstrap y cambia, por SSH', () => {
     expect(runsOf(job('image'))).toEqual([
       'echo "$GITHUB_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin',
       'docker build -t "$IMAGE:$SHA" -t "$IMAGE:$TAG" .',
       'docker push "$IMAGE:$SHA"',
       'docker push "$IMAGE:$TAG"',
-      'deploy/fly/image-digest.sh',
+      'deploy/image-digest.sh',
     ]);
     expect(keyIn(job('image'), 'packages')).toBe('write');
     for (const name of ['staging', 'production']) {
       expect(job(name)).not.toMatch(/docker build|packages: write/);
+      // El token del job alcanza para bajar la imagen privada de GHCR, no para publicarla.
+      expect(job(name)).toMatch(/^ {4}permissions:\n {6}contents: read\n {6}packages: read\n {4}\w/m);
+      expect(runsOf(job(name))).toEqual(DEPLOY_FLOW);
     }
-    const deployFlow = (config: string) => [
-      'deploy/fly/release-check.sh before',
-      'deploy/fly/rollback.sh record',
-      `flyctl deploy --config ${config} --image "$IMAGE_REF" --env "RELEASE=$SHA"`,
-      'deploy/fly/release-check.sh after',
-      'deploy/fly/rollback.sh restore',
-    ];
-    expect(runsOf(job('staging'))).toEqual(deployFlow('deploy/fly/staging.toml'));
-    expect(runsOf(job('production'))).toEqual(deployFlow('fly.toml'));
   });
 
-  // La etiqueta <IMAGE>:<SHA> se puede sobrescribir entre el staging de una corrida y la
-  // aprobación de su producción (otra corrida del mismo commit reconstruye y publica); los dos
-  // entornos despliegan el digest que entregó el job image de su propia corrida.
+  // La etiqueta <IMAGE>:<SHA> se puede sobrescribir entre el staging de una corrida y su
+  // producción (otra corrida del mismo commit reconstruye y publica); los dos entornos despliegan
+  // el digest que entregó el job image de su propia corrida.
   it('staging y producción despliegan el digest que publicó su corrida, aunque la etiqueta cambie después', () => {
     expect(keyIn(step(job('image'), 'Digest de la imagen publicada'), 'id')).toBe('digest');
     expect(job('image')).toMatch(/^ {4}outputs:\n {6}ref: \$\{\{ steps\.digest\.outputs\.ref \}\}$/m);
     const digestA = `ghcr.io/o/r@sha256:${'a'.repeat(64)}`;
     const digestB = `ghcr.io/o/r@sha256:${'b'.repeat(64)}`;
     for (const name of ['staging', 'production']) {
-      const ref = keyIn(job(name), 'IMAGE_REF')!;
-      // Corrida 1: su job image publicó A. Después, la corrida 2 sobrescribió la etiqueta con B:
-      // lo que resuelve cada entorno de la corrida 1 sigue siendo A.
+      const ref = envOf(job(name), 4).IMAGE_REF;
       expect(evaluate(inner(ref), { needs: { image: { outputs: { ref: digestA } } } })).toBe(digestA);
       expect(evaluate(inner(ref), { needs: { image: { outputs: { ref: digestB } } } })).toBe(digestB);
-      expect(runsOf(job(name)).filter((r) => r.startsWith('flyctl deploy'))).toEqual([expect.stringContaining('--image "$IMAGE_REF"')]);
       expect(job(name)).not.toMatch(/\$IMAGE:\$SHA/);
     }
     // producción lee las salidas de image: tiene que depender de ese job directamente.
     expect(jobKey(job('production'), 'needs')).toMatch(/\bimage\b/);
   });
 
-  // Si /health deja de atender el commit después de que el tráfico pasó a la versión nueva, el
-  // entorno vuelve a la imagen y el release que atendían antes del deploy.
-  it.each(['staging', 'production'])('%s vuelve a la imagen anterior si algo falla desde el deploy, con la imagen y el release anotados antes', (name) => {
+  it.each(['staging', 'production'])('%s vuelve a la versión anterior si algo falla desde el cambio, con lo que atendía antes', (name) => {
     const block = job(name);
-    expect(keyIn(step(block, 'El commit desciende del release actual'), 'id')).toBe('gate');
-    expect(keyIn(step(block, 'Imagen que atiende'), 'id')).toBe('serving');
-    expect(keyIn(step(block, 'Deploy'), 'id')).toBe('deploy');
-    const back = step(block, 'Volver a la imagen anterior');
+    expect(keyIn(step(block, 'Release que atiende'), 'id')).toBe('serving');
+    expect(keyIn(step(block, 'Cambiar de versión'), 'id')).toBe('deploy');
+    const gate = envOf(step(block, 'El commit desciende del release actual'), 8);
+    expect(gate).toEqual({ CURRENT: '${{ steps.serving.outputs.release }}', FIRST_DEPLOY: '${{ steps.serving.outputs.first }}' });
+    const back = step(block, 'Volver a la versión anterior');
     expect(keyIn(back, 'if')).toBe("failure() && steps.deploy.outcome != 'skipped'");
-    expect(keyIn(back, 'PREVIOUS_IMAGE')).toBe('${{ steps.serving.outputs.image }}');
-    expect(keyIn(back, 'PREVIOUS_RELEASE')).toBe('${{ steps.gate.outputs.previous }}');
-    expect(keyIn(back, 'FLY_API_TOKEN')).toBe('${{ secrets.FLY_API_TOKEN }}');
-    // Cada entorno vuelve atrás en su propia app.
-    expect(keyIn(block, 'CONFIG')).toBe(name === 'staging' ? 'deploy/fly/staging.toml' : 'fly.toml');
-    expect(runsOf(block).find((r) => r.startsWith('flyctl deploy'))).toContain(`--config ${keyIn(block, 'CONFIG')} `);
+    expect(envOf(back, 8)).toEqual({
+      PREVIOUS_IMAGE: '${{ steps.serving.outputs.image }}',
+      PREVIOUS_RELEASE: '${{ steps.serving.outputs.release }}',
+      FIRST_DEPLOY: '${{ steps.serving.outputs.first }}',
+    });
   });
 
-  it('cada entorno verifica contra su propia URL, con la historia completa para el gate', () => {
+  it('cada entorno es el suyo en el servidor y verifica contra su propia URL, la que sirve Caddy', () => {
+    const caddy = read('deploy/lightsail/proxy/caddy/Caddyfile');
     for (const name of ['staging', 'production']) {
       const block = job(name);
-      const url = keyIn(block, 'URL');
-      expect(url).toMatch(/^https:\/\/[a-z0-9-]+\.fly\.dev$/);
-      expect(keyIn(block, 'url')).toBe(url);
+      const env = envOf(block, 4);
+      expect(env.ENVIRONMENT).toBe(name);
+      expect(env.URL).toBe(URLS[name]);
+      expect(keyIn(block, 'url')).toBe(env.URL);
       expect(keyIn(block, 'fetch-depth')).toBe('0');
+      // El sitio del Caddyfile con ese nombre pasa a la API de ese entorno (el alias de compose).
+      const site = caddy.match(new RegExp(`^${new URL(env.URL).host.replace(/\./g, '\\.')} \\{\\n([\\s\\S]*?)^\\}`, 'm'))?.[1];
+      expect(site).toMatch(new RegExp(`^\\treverse_proxy api-${name}:3000 \\{$`, 'm'));
     }
-    expect(keyIn(job('staging'), 'URL')).not.toBe(keyIn(job('production'), 'URL'));
+    expect(read('deploy/lightsail/compose.yml')).toContain('aliases: ["api-${ENVIRONMENT:?falta ENVIRONMENT}"]');
     expect(statSync(SCRIPT).mode & 0o111).not.toBe(0);
   });
 
-  it('staging y producción son apps distintas con bases distintas, y la misma configuración', () => {
-    const app = (f: string) => readFileSync(join(ROOT, f), 'utf8').match(/^app = "(.+)"$/m)?.[1];
-    expect(app('fly.toml')).toBe('cocos-challenge-a-api');
-    expect(app('deploy/fly/staging.toml')).toBe('cocos-challenge-a-staging');
-    expect(app('deploy/fly/db.toml')).toBe('cocos-challenge-a-db');
-    expect(app('deploy/fly/staging-db.toml')).toBe('cocos-challenge-a-staging-db');
-    const strip = (f: string) => readFileSync(join(ROOT, f), 'utf8').split('\n').filter((l) => !l.startsWith('#') && !l.startsWith('app = ')).join('\n');
-    expect(strip('deploy/fly/staging.toml')).toBe(strip('fly.toml'));
-    expect(strip('deploy/fly/staging-db.toml')).toBe(strip('deploy/fly/db.toml'));
+  // Los secretos del servidor van solo al paso que escribe la clave; el GITHUB_TOKEN, solo al que
+  // baja la imagen. Ningún otro paso los ve.
+  it.each(['staging', 'production'])('en %s, los secretos LIGHTSAIL_* solo los lee el paso de acceso y el token solo el que baja la imagen', (name) => {
+    const block = job(name);
+    const withSecrets = stepsOf(block).filter((st) => st.includes('secrets.')).map((st) => st.match(/^name: (.+)$/m)?.[1]);
+    expect(withSecrets).toEqual(['Acceso SSH al servidor', 'Bajar la imagen']);
+    expect(envOf(step(block, 'Acceso SSH al servidor'), 8)).toEqual({
+      LIGHTSAIL_HOST: '${{ secrets.LIGHTSAIL_HOST }}',
+      LIGHTSAIL_SSH_KEY: '${{ secrets.LIGHTSAIL_SSH_KEY }}',
+      LIGHTSAIL_KNOWN_HOSTS: '${{ secrets.LIGHTSAIL_KNOWN_HOSTS }}',
+    });
+    expect(envOf(step(block, 'Bajar la imagen'), 8)).toEqual({ GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}' });
+    expect(envOf(block, 4)).not.toHaveProperty('GITHUB_TOKEN');
+  });
+
+  it('no queda nada de Fly', () => {
+    expect(yml).not.toMatch(/fly/i);
+    for (const f of ['fly.toml', 'deploy/fly']) expect(existsSync(join(ROOT, f))).toBe(false);
   });
 });
 
-// Un token de deploy de Fly se acota a una sola app (`fly tokens create deploy -a <app>`; un
-// segundo -a no suma la otra). Cada environment de GitHub lleva el token de su app en su propio
-// secreto FLY_API_TOKEN, que es el que leen los jobs de ese environment.
-describe('tokens de deploy', () => {
-  const docs = ['README.md', 'docs/api/operacion.md'];
-  const tokenLines = (f: string) => readFileSync(join(ROOT, f), 'utf8').split('\n').filter((l) => l.includes('fly tokens create deploy'));
+// Dante crea los secretos: los mismos tres en cada environment (un servidor para los dos). Los
+// docs tienen que dar exactamente los nombres que lee el workflow.
+describe('secretos de los environments', () => {
+  const secrets = [...new Set([...yml.matchAll(/secrets\.(LIGHTSAIL_\w+)/g)].map((m) => m[1]))];
 
-  it.each(docs)('%s: un token por app, guardado en el secreto del environment de esa app', (f) => {
-    const lines = tokenLines(f);
-    expect(lines).toHaveLength(2);
-    const app = (cfg: string) => readFileSync(join(ROOT, cfg), 'utf8').match(/^app = "(.+)"$/m)?.[1];
-    expect(lines.map((l) => l.trim())).toEqual([
-      `fly tokens create deploy -a ${app('deploy/fly/staging.toml')} | gh secret set FLY_API_TOKEN --env staging`,
-      `fly tokens create deploy -a ${app('fly.toml')} | gh secret set FLY_API_TOKEN --env production`,
-    ]);
+  it('el workflow lee tres secretos del servidor', () => {
+    expect(secrets.sort()).toEqual(['LIGHTSAIL_HOST', 'LIGHTSAIL_KNOWN_HOSTS', 'LIGHTSAIL_SSH_KEY']);
+  });
+
+  it.each(['README.md', 'docs/api/operacion.md'])('%s: los tres, en los dos environments', (f) => {
+    const text = read(f);
+    const loop = text.match(/^for env in staging production; do\n([\s\S]*?)^done$/m)?.[1] ?? '';
+    const set = [...loop.matchAll(/^ {2}gh secret set (\w+) --env "\$env"/gm)].map((m) => m[1]);
+    expect(set.sort()).toEqual(secrets.sort());
   });
 });
 
@@ -358,43 +390,73 @@ describe('concurrencia del deploy', () => {
   });
 });
 
-// Postgres en Fly (deploy/fly/db.toml): la misma imagen que docker compose, con el volumen
-// montado donde compose monta el suyo. En postgres:18 el directorio de datos por defecto es
+// La configuración del servidor. Lo único que se publica son los puertos 80 y 443 de Caddy:
+// Postgres y la API no tienen `ports`, y la base está solo en la red interna de su proyecto (sin
+// salida), así que ni Caddy la alcanza. Postgres usa la imagen de docker compose, con el volumen
+// montado donde compose monta el suyo: en postgres:18 el directorio de datos por defecto es
 // /var/lib/postgresql/18/docker, dentro de ese montaje; un destino distinto, o un PGDATA que lo
-// saque de ahí, dejaría los datos en el disco efímero de la máquina. Que efectivamente
-// sobrevivan a reemplazarla lo ensaya deploy/fly/drills.sh persistence, a mano, contra Fly.
-describe('Postgres en Fly', () => {
-  const dbToml = readFileSync(join(ROOT, 'deploy/fly/db.toml'), 'utf8');
-  const compose = readFileSync(join(ROOT, 'docker-compose.yml'), 'utf8');
-  const section = (toml: string, name: string) => {
-    const m = toml.match(new RegExp(`^\\[${name}\\]\\n((?:[ \\t]+.+\\n)+)`, 'm'));
-    if (!m) throw new Error(`db.toml no tiene [${name}]`);
-    return Object.fromEntries([...m[1].matchAll(/^\s*(\w+) = "(.*)"$/gm)].map((e) => [e[1], e[2]]));
+// saque de ahí, dejaría los datos en la capa del contenedor y se perderían al recrearlo.
+describe('servidor de Lightsail', () => {
+  const env = read('deploy/lightsail/compose.yml');
+  const proxy = read('deploy/lightsail/proxy/compose.yml');
+  const compose = read('docker-compose.yml');
+  /** El bloque de un servicio (2 espacios) de un compose, sin las líneas de comentario. */
+  const service = (text: string, name: string) => {
+    const m = text.match(new RegExp(`^ {2}${name}:\\n((?: {4}.*\\n|\\s*#.*\\n)+)`, 'm'));
+    if (!m) throw new Error(`no hay un servicio ${name}`);
+    return m[1].split('\n').filter((l) => !l.trim().startsWith('#')).join('\n');
   };
 
-  it('usa la imagen de docker compose, con el volumen montado donde compose monta el suyo', () => {
-    const composeDb = compose.match(/^ {2}db:\n((?: {4}.*\n)+)/m)?.[1] ?? '';
-    expect(section(dbToml, 'build').image).toBe(composeDb.match(/^ {4}image: (.+)$/m)?.[1]);
-    const composeMount = composeDb.match(/^ {6}- pgdata:(\S+)$/m)?.[1];
-    expect(composeMount).toBe('/var/lib/postgresql');
-    expect(section(dbToml, 'mounts')).toEqual({ source: 'pgdata', destination: composeMount });
+  it('Postgres no se publica: ningún servicio del entorno tiene ports y la base no está en la red del proxy', () => {
+    expect(env).not.toMatch(/^\s*ports:/m);
+    expect(env).not.toMatch(/^\s*network_mode:/m);
+    expect(service(env, 'db')).not.toMatch(/networks:|edge/);
+    expect(service(env, 'api')).toMatch(/^ {6}edge:$/m);
+    // La red propia del proyecto es interna: la base no tiene salida.
+    expect(env).toMatch(/^networks:\n {2}default:\n {4}internal: true\n/m);
   });
 
-  it('no cambia el directorio de datos de la imagen (PGDATA), que queda dentro del volumen', () => {
-    expect(dbToml).not.toMatch(/PGDATA/);
+  it('solo Caddy publica puertos: 80 y 443', () => {
+    expect([...proxy.matchAll(/^\s*- "(.+)"$/gm)].map((m) => m[1]).filter((p) => /^\d+:\d+$/.test(p))).toEqual(['80:80', '443:443']);
+    expect(service(proxy, 'caddy')).toMatch(/^ {4}networks: \[edge\]$/m);
+    expect(proxy).toMatch(/^ {6}- caddy_data:\/data$/m);
+  });
+
+  it('Postgres usa la imagen de docker compose, con el volumen donde compose monta el suyo y sin PGDATA', () => {
+    const image = (text: string) => service(text, 'db').match(/^ {4}image: (.+)$/m)?.[1];
+    const mount = (text: string) => service(text, 'db').match(/^ {6}- pgdata:(\S+)$/m)?.[1];
+    expect(image(env)).toBe(image(compose));
+    expect(mount(compose)).toBe('/var/lib/postgresql');
+    expect(mount(env)).toBe(mount(compose));
+    expect(env).not.toMatch(/PGDATA/);
     expect(compose).not.toMatch(/PGDATA/);
   });
 
-  it('el ensayo de persistencia lee el montaje de db.toml', () => {
-    const drills = readFileSync(join(ROOT, 'deploy/fly/drills.sh'), 'utf8');
-    expect(drills).toContain("sed -n 's/^ *destination = \"\\(.*\\)\"$/\\1/p' deploy/fly/db.toml");
-    expect(drills).toMatch(/^ {2}persistence\) drill_persistence ;;$/m);
+  // La credencial de administrador de la base la recibe solo el bootstrap (migrate), no la API
+  // que atiende; ni la API ni el bootstrap bajan imágenes (no hay credenciales de GHCR acá).
+  it('la API recibe api.env y el bootstrap migrate.env; los dos con la imagen del release, sin bajarla', () => {
+    expect(service(env, 'api')).toMatch(/^ {4}env_file: \[api\.env\]$/m);
+    expect(service(env, 'migrate')).toMatch(/^ {4}env_file: \[migrate\.env\]$/m);
+    expect(service(env, 'migrate')).toMatch(/^ {4}command: \["node", "dist\/db\/bootstrap\.js"\]$/m);
+    expect(service(env, 'migrate')).toMatch(/^ {4}profiles: \[migrate\]$/m);
+    for (const s of ['api', 'migrate']) {
+      expect(service(env, s)).toMatch(/^ {4}image: \$\{IMAGE:\?falta IMAGE\}$/m);
+      expect(service(env, s)).toMatch(/^ {4}pull_policy: never$/m);
+    }
+    expect(service(env, 'api')).toMatch(/^ {6}RELEASE: \$\{RELEASE:\?falta RELEASE\}$/m);
+    expect(env).not.toMatch(/DATABASE_ADMIN_URL|POSTGRES_PASSWORD/);
+  });
+
+  it('la base, la API y Caddy vuelven solos después de reiniciar el servidor', () => {
+    for (const s of ['db', 'api']) expect(service(env, s)).toMatch(/^ {4}restart: unless-stopped$/m);
+    expect(service(proxy, 'caddy')).toMatch(/^ {4}restart: unless-stopped$/m);
   });
 });
 
-// deploy/fly/release-check.sh con un curl simulado: responde, en orden, cada línea de
-// RESPONSES (una por llamada; una línea `!<código>` falla con ese código de salida) y cuenta
-// las llamadas en CALLS. `sleep` también se simula: anota cuánto durmió y no espera.
+// deploy/release-check.sh. before, con CURRENT y FIRST_DEPLOY (lo que atiende, leído del servidor)
+// y un repositorio temporal; after, con un curl simulado: responde, en orden, cada línea de
+// RESPONSES (una por llamada; una línea `!<código>` falla con ese código de salida) y cuenta las
+// llamadas en CALLS. `sleep` también se simula: anota cuánto durmió y no espera.
 describe('release-check.sh', () => {
   const dirs: string[] = [];
   afterEach(() => {
@@ -477,37 +539,29 @@ describe('release-check.sh', () => {
 
   it('sin modo, o sin SHA o URL, no hace nada y sale con 2 o con 1', () => {
     const { bin, calls } = stubs([]);
-    expect(check('', bin, { SHA, URL: 'https://x.fly.dev' }).status).toBe(2);
-    expect(check('after', bin, { URL: 'https://x.fly.dev' }).status).toBe(1);
+    expect(check('', bin, { SHA, URL: 'https://x.sslip.io' }).status).toBe(2);
+    expect(check('after', bin, { URL: 'https://x.sslip.io' }).status).toBe(1);
     expect(check('after', bin, { SHA }).status).toBe(1);
     expect(calls()).toEqual([]);
   });
 
   describe('before: el commit a desplegar desciende del release que atiende', () => {
-    it('anota en $GITHUB_OUTPUT el release que atiende: al que vuelve rollback.sh restore', () => {
-      const { repo, shas } = repoWithThreeCommits();
-      const { bin } = stubs([health(shas[1])]);
-      const out = join(tmp('release-check-out-'), 'output');
-      writeFileSync(out, '');
-      const r = check('before', bin, { SHA: shas[2], URL: 'https://x.fly.dev', GITHUB_OUTPUT: out }, repo);
-      expect(r.status).toBe(0);
-      expect(readFileSync(out, 'utf8')).toBe(`previous=${shas[1]}\n`);
-    });
+    const before = (repo: string, sha: string, current: string, first = 'false') =>
+      check('before', stubs([]).bin, { SHA: sha, CURRENT: current, FIRST_DEPLOY: first }, repo);
 
-    it('despliega un commit posterior al release actual', () => {
+    it('despliega un commit posterior al release actual, sin mirar /health', () => {
       const { repo, shas } = repoWithThreeCommits();
-      const { bin, calls } = stubs([health(shas[1])]);
-      const r = check('before', bin, { SHA: shas[2], URL: 'https://x.fly.dev' }, repo);
+      const { bin, calls } = stubs([]);
+      const r = check('before', bin, { SHA: shas[2], CURRENT: shas[1], FIRST_DEPLOY: 'false' }, repo);
       expect(r.stderr).toBe('');
       expect(r.status).toBe(0);
       expect(r.stdout).toContain(`${shas[2]} desciende de ${shas[1]}`);
-      expect(calls()).toEqual(['-sS --max-time 10 https://x.fly.dev/health']);
+      expect(calls()).toEqual([]);
     });
 
-    it('frena un commit anterior al release actual: un release viejo (un re-run, o una aprobación tardía) no pisa uno nuevo', () => {
+    it('frena un commit anterior al release actual: un release viejo (un re-run) no pisa uno nuevo', () => {
       const { repo, shas } = repoWithThreeCommits();
-      const { bin } = stubs([health(shas[2])]);
-      const r = check('before', bin, { SHA: shas[0], URL: 'https://x.fly.dev' }, repo);
+      const r = before(repo, shas[0], shas[2]);
       expect(r.status).toBe(1);
       expect(r.stderr).toContain(`DEPLOY FRENADO: ${shas[0]} no desciende del release actual (${shas[2]})`);
     });
@@ -518,41 +572,46 @@ describe('release-check.sh', () => {
       git('checkout', '-q', '-b', 'otra', shas[0]);
       writeFileSync(join(repo, 'f'), 'otra');
       git('commit', '-q', '--no-verify', '-am', 'otra');
-      const other = git('rev-parse', 'HEAD');
-      const { bin } = stubs([health(shas[1])]);
-      expect(check('before', bin, { SHA: other, URL: 'https://x.fly.dev' }, repo).status).toBe(1);
+      expect(before(repo, git('rev-parse', 'HEAD'), shas[1]).status).toBe(1);
     });
 
     it('vuelve a desplegar el mismo commit', () => {
       const { repo, shas } = repoWithThreeCommits();
-      const { bin } = stubs([health(shas[2])]);
-      const r = check('before', bin, { SHA: shas[2], URL: 'https://x.fly.dev' }, repo);
+      const r = before(repo, shas[2], shas[2]);
       expect(r.status).toBe(0);
       expect(r.stdout).toContain('se vuelve a desplegar el mismo commit');
     });
 
-    it('lee el release también de un 503 con la base caída', () => {
+    it('el primer deploy del entorno (sin release) pasa', () => {
       const { repo, shas } = repoWithThreeCommits();
-      const { bin } = stubs([health(shas[1], false)]);
-      expect(check('before', bin, { SHA: shas[2], URL: 'https://x.fly.dev' }, repo).status).toBe(0);
+      const r = before(repo, shas[0], '', 'true');
+      expect(r.status).toBe(0);
+      expect(r.stdout).toContain(`primer deploy de ${shas[0]}`);
     });
 
+    // Un release vacío solo cuenta como "no hay" si el paso que lo leyó lo dijo: si su salida no
+    // llegó, el gate no puede saber qué atiende y no deja pasar.
     it.each([
-      ['un release que no está en la historia', health('f'.repeat(40)), /no está en la historia/],
-      ['release null (sin RELEASE configurado)', health(null), /no informa release/],
-      ['una respuesta que no es JSON', '<html>502</html>', /no devolvió JSON/],
-      ['curl que falla', '!7', /no responde/],
-    ])('frena con %s', (_name, response, message) => {
+      ['un release vacío sin FIRST_DEPLOY', '', ''],
+      ['un release vacío con FIRST_DEPLOY=false', '', 'false'],
+      ['un release con FIRST_DEPLOY=true', 'x', 'true'],
+    ])('frena con %s', (_name, current, first) => {
       const { repo, shas } = repoWithThreeCommits();
-      const { bin } = stubs([response]);
-      const r = check('before', bin, { SHA: shas[2], URL: 'https://x.fly.dev' }, repo);
+      const r = before(repo, shas[2], current === 'x' ? shas[1] : current, first);
       expect(r.status).toBe(1);
-      expect(r.stderr).toMatch(message);
+      expect(r.stderr).toContain('no se sabe qué release atiende el entorno');
+    });
+
+    it('frena con un release que no está en la historia', () => {
+      const { repo, shas } = repoWithThreeCommits();
+      const r = before(repo, shas[2], 'f'.repeat(40));
+      expect(r.status).toBe(1);
+      expect(r.stderr).toMatch(/no está en la historia/);
     });
   });
 
   describe('after: /health atiende el commit desplegado', () => {
-    const env = { SHA, URL: 'https://x.fly.dev', HEALTH_ATTEMPTS: '4', HEALTH_INTERVAL: '7' };
+    const env = { SHA, URL: 'https://x.sslip.io', HEALTH_ATTEMPTS: '4', HEALTH_INTERVAL: '7' };
     const OLD = 'b'.repeat(40);
 
     it('reintenta mientras release sea el anterior y termina bien cuando atiende el SHA', () => {
@@ -560,7 +619,7 @@ describe('release-check.sh', () => {
       const r = check('after', bin, env);
       expect(r.status).toBe(0);
       expect(r.stdout).toContain(`atiende ${SHA} con ok: true (intento 3 de 4)`);
-      expect(calls()).toHaveLength(3);
+      expect(calls()).toEqual(Array(3).fill('-sS --max-time 10 https://x.sslip.io/health'));
       expect(sleeps()).toEqual(['7', '7']);
     });
 
@@ -587,7 +646,7 @@ describe('release-check.sh', () => {
 
     it('por defecto son 30 intentos cada 5 segundos', () => {
       const { bin, calls, sleeps } = stubs(Array(40).fill(health(OLD)));
-      const r = check('after', bin, { SHA, URL: 'https://x.fly.dev' });
+      const r = check('after', bin, { SHA, URL: 'https://x.sslip.io' });
       expect(r.status).toBe(1);
       expect(calls()).toHaveLength(30);
       expect(sleeps()).toEqual(Array(29).fill('5'));
@@ -624,7 +683,7 @@ describe('image-digest.sh', () => {
   it('entrega la referencia por digest del repo de la imagen y la escribe en $GITHUB_OUTPUT', () => {
     const f = withDocker([`ghcr.io/otro/repo@${digest('c')}`, `${IMAGE}@${digest('a')}`]);
     const out = join(f.dir, 'output');
-    const r = runScript('deploy/fly/image-digest.sh', [], f.bin, { IMAGE, SHA, GITHUB_OUTPUT: out, CALLS: f.log });
+    const r = runScript('deploy/image-digest.sh', [], f.bin, { IMAGE, SHA, GITHUB_OUTPUT: out, CALLS: f.log });
     expect(r.stderr).toBe('');
     expect(r.status).toBe(0);
     expect(r.stdout.trim()).toBe(`${IMAGE}@${digest('a')}`);
@@ -636,7 +695,7 @@ describe('image-digest.sh', () => {
   it('cada publicación da su propio digest: la etiqueta sobrescrita no cambia el de una corrida anterior', () => {
     const refs = ['a', 'b'].map((c) => {
       const f = withDocker([`${IMAGE}@${digest(c)}`]);
-      const r = runScript('deploy/fly/image-digest.sh', [], f.bin, { IMAGE, SHA, CALLS: f.log });
+      const r = runScript('deploy/image-digest.sh', [], f.bin, { IMAGE, SHA, CALLS: f.log });
       rmSync(f.dir, { recursive: true, force: true });
       return r.stdout.trim();
     });
@@ -651,14 +710,14 @@ describe('image-digest.sh', () => {
     const f = withDocker(repoDigests as string[]);
     const out = join(f.dir, 'output');
     writeFileSync(out, '');
-    const r = runScript('deploy/fly/image-digest.sh', [], f.bin, { IMAGE, SHA, GITHUB_OUTPUT: out, CALLS: f.log });
+    const r = runScript('deploy/image-digest.sh', [], f.bin, { IMAGE, SHA, GITHUB_OUTPUT: out, CALLS: f.log });
     expect(r.status).toBe(1);
     expect(readFileSync(out, 'utf8')).toBe('');
     rmSync(f.dir, { recursive: true, force: true });
   });
 });
 
-// deploy/fly/release-gate.sh en un repositorio temporal: main con tres commits (origin/main en el
+// deploy/release-gate.sh en un repositorio temporal: main con tres commits (origin/main en el
 // último), una rama `otra` con un commit fuera de main y tags sobre ellos. `gh` responde, en
 // orden, cada línea de RESPONSES (la última se repite; `!<código>` falla con ese código) y anota
 // sus argumentos; `sleep` anota cuánto durmió y no espera.
@@ -719,7 +778,7 @@ describe('release-gate.sh', () => {
     dirs.push(f.dir);
     const responsesFile = join(f.dir, 'responses');
     writeFileSync(responsesFile, responses.join('\n') + '\n');
-    const r = runScript('deploy/fly/release-gate.sh', [], f.bin,
+    const r = runScript('deploy/release-gate.sh', [], f.bin,
       { ...GIT, REPO, CALLS: f.log, RESPONSES: responsesFile, CI_ATTEMPTS: '4', CI_INTERVAL: '7', ...env }, cwd);
     const calls = f.calls();
     return { ...r, gh: calls.filter((c) => c.startsWith('gh ')), sleeps: calls.filter((c) => c.startsWith('sleep ')).map((c) => c.slice(6)) };
@@ -824,296 +883,679 @@ describe('release-gate.sh', () => {
   });
 });
 
-describe('rollback.sh', () => {
-  const OLD = `ghcr.io/o/r@sha256:${'a'.repeat(64)}`;
-  const NEW = `ghcr.io/o/r@sha256:${'b'.repeat(64)}`;
-  const PREV = 'p'.repeat(40);
-  const machine = (id: string, image: string, group = 'app', state = 'started', release = image === OLD ? PREV : SHA) =>
-    ({ id, state, config: { image, env: { RELEASE: release }, metadata: { fly_process_group: group } } });
-  // flyctl: `machines list` responde MACHINES; `machine update` se anota. curl: responde, en
-  // orden, cada línea de HEALTH (la última se repite).
-  const fakes = (machines: unknown[], health: string[]) => {
+// El servidor simulado: un directorio que hace de /opt/cocos (COCOS_ROOT), preparado como lo
+// deja setup.sh, y un repositorio git con una copia de deploy/ y tres commits. `ssh` corre el
+// comando que recibe en esta máquina (con el stdin que recibe), así que remote.sh corre de verdad.
+// `docker` anota cada llamada (con IMAGE y RELEASE del --env-file, si hay) y lleva en
+// <entorno>/.running qué API atiende: `up ... api` la cambia, `rm ... api` la saca. `curl` responde
+// /health de esa API: ok con su RELEASE (o con SERVED, si está: otro release atendiendo), salvo
+// que esté en BROKEN (503, ok: false), y falla sin API.
+// DOCKER_FAIL (una regex sobre la llamada, con IMAGE y RELEASE) hace fallar las que coinciden.
+const GIT = { GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_AUTHOR_NAME: 'prueba',
+  GIT_AUTHOR_EMAIL: 'prueba@example.com', GIT_COMMITTER_NAME: 'prueba', GIT_COMMITTER_EMAIL: 'prueba@example.com' };
+const TOKEN = 'ghs_tokenDelJobQueNoTieneQueQuedar0123456789';
+/** Una cadena como literal de una regex (ERE de bash o de JS). */
+const ere = (t: string) => t.replace(/[.[\]()*+?{}|^$\\]/g, '\\$&');
+const imageOf = (c: string) => `ghcr.io/dante0x95/cocos-challenge-a@sha256:${c.repeat(64)}`;
+
+function server() {
+  const dir = mkdtempSync(join(tmpdir(), 'deploy-server-'));
+  const bin = join(dir, 'bin');
+  const root = join(dir, 'opt-cocos');
+  const repo = join(dir, 'repo');
+  const calls = join(dir, 'calls');
+  for (const d of [bin, root, join(dir, 'tmp'), join(dir, 'home'), join(dir, 'runner')]) mkdirSync(d);
+  writeFileSync(calls, '');
+  const scripts: Record<string, string> = {
+    ssh: [
+      // Las opciones y el host se anotan en CALLS; el comando (el último argumento, con el script
+      // entero) en CALLS.ssh, que también se revisa: un secreto ahí estaría en los argumentos de
+      // ssh y del bash remoto. Corre acá, con el stdin que recibió.
+      'cmd="${*: -1}"',
+      'echo "ssh ${*:1:$#-1}" >> "$CALLS"',
+      'printf "%s\\n" "$cmd" >> "$CALLS.ssh"',
+      'exec bash -c "$cmd"',
+    ].join('\n'),
+    docker: [
+      'line="$*"; envfile=""; project=""; a=("$@")',
+      'for ((i = 0; i < ${#a[@]}; i++)); do case "${a[i]}" in --env-file) envfile="${a[i+1]}" ;; -p) project="${a[i+1]}" ;; esac; done',
+      'if [ -n "$envfile" ]; then image="$(sed -n "s/^IMAGE=//p" "$envfile")"; release="$(sed -n "s/^RELEASE=//p" "$envfile")"; line="$line [IMAGE=$image RELEASE=$release]"; fi',
+      'echo "docker $line" >> "$CALLS"',
+      'if [ -n "${DOCKER_FAIL:-}" ] && [[ "$line" =~ $DOCKER_FAIL ]]; then echo "docker simulado: falla: $line" >&2; exit 1; fi',
+      'env="${project#cocos-}"',
+      'case "$1" in',
+      // Como docker: la credencial va a config.json del DOCKER_CONFIG (o de ~/.docker).
+      '  login) cfg="${DOCKER_CONFIG:-$HOME/.docker}"; mkdir -p "$cfg"; printf \'{"auths":{"ghcr.io":{"auth":"%s"}}}\' "$(cat)" > "$cfg/config.json" ;;',
+      '  compose)',
+      '    case " $* " in',
+      '      *" up "*" api "*) printf "%s %s\\n" "$image" "$release" > "$COCOS_ROOT/$env/.running" ;;',
+      '      *" rm "*" api "*) rm -f "$COCOS_ROOT/$env/.running" ;;',
+      '    esac ;;',
+      'esac',
+      'exit 0',
+    ].join('\n'),
+    curl: [
+      'url="${*: -1}"',
+      'echo "curl $url" >> "$CALLS"',
+      'case "$url" in *//staging.*) env=staging ;; *) env=production ;; esac',
+      'f="$COCOS_ROOT/$env/.running"',
+      '[ -f "$f" ] || { echo "curl: (7) sin API" >&2; exit 7; }',
+      'release="${SERVED:-$(cut -d" " -f2 "$f")}"',
+      'if [[ " ${BROKEN:-} " == *" $release "* ]]; then printf \'{"ok":false,"db":"down","release":"%s"}\' "$release";',
+      'else printf \'{"ok":true,"db":"up","release":"%s","users":"4"}\' "$release"; fi',
+    ].join('\n'),
+    sleep: ':',
+  };
+  for (const [name, body] of Object.entries(scripts)) {
+    writeFileSync(join(bin, name), `#!/usr/bin/env bash\n${body}\n`);
+    chmodSync(join(bin, name), 0o755);
+  }
+  // Lo que deja setup.sh en cada entorno.
+  for (const env of ['staging', 'production']) {
+    mkdirSync(join(root, env));
+    for (const f of ['db.env', 'migrate.env', 'api.env']) writeFileSync(join(root, env, f), `${f}=secreto\n`, { mode: 0o600 });
+  }
+  // El checkout del release: deploy/ del commit actual y tres commits en línea.
+  cpSync(join(ROOT, 'deploy'), join(repo, 'deploy'), { recursive: true });
+  const git = (...args: string[]) => {
+    const r = spawnSync('git', args, { cwd: repo, encoding: 'utf8', env: { ...process.env, ...GIT } });
+    if (r.status !== 0) throw new Error(`git ${args.join(' ')}: ${r.stderr}`);
+    return r.stdout.trim();
+  };
+  git('init', '-q', '-b', 'main');
+  const shas: string[] = [];
+  for (const n of ['uno', 'dos', 'tres']) {
+    writeFileSync(join(repo, 'f'), n);
+    git('add', '.');
+    git('commit', '-q', '--no-verify', '-m', n);
+    shas.push(git('rev-parse', 'HEAD'));
+  }
+  const baseEnv = {
+    PATH: `${bin}:${process.env.PATH}`, HOME: join(dir, 'home'), TMPDIR: join(dir, 'tmp'), ...GIT,
+    CALLS: calls, COCOS_ROOT: root, RUNNER_TEMP: join(dir, 'runner'), HEALTH_ATTEMPTS: '2',
+    GITHUB_ACTOR: 'dante0x95', COMPOSE_WAIT_TIMEOUT: '7',
+  };
+  const secrets = { LIGHTSAIL_HOST: '203.0.113.7', LIGHTSAIL_SSH_KEY: '-----BEGIN OPENSSH PRIVATE KEY-----\nclave\n-----END OPENSSH PRIVATE KEY-----', LIGHTSAIL_KNOWN_HOSTS: '203.0.113.7 ssh-ed25519 AAAAhost', GITHUB_TOKEN: TOKEN };
+  return {
+    dir, root, repo, shas, secrets,
+    calls: () => readFileSync(calls, 'utf8').split('\n').filter(Boolean),
+    clearCalls: () => writeFileSync(calls, ''),
+    running: (env: string) => (existsSync(join(root, env, '.running')) ? readFileSync(join(root, env, '.running'), 'utf8').trim() : null),
+    state: (env: string, file = 'release.env') => (existsSync(join(root, env, file)) ? readFileSync(join(root, env, file), 'utf8') : null),
+    /** deploy.sh o release-check.sh en el checkout, con el entorno de un paso. */
+    run: (cmd: string, env: Record<string, string>, input?: string) =>
+      spawnSync('bash', ['-c', cmd], { cwd: repo, encoding: 'utf8', input, env: { ...baseEnv, ...env } }),
+    /** Todos los archivos que quedaron, en el servidor y en el runner, con su contenido. */
+    files: () => {
+      const out: { path: string; text: string }[] = [];
+      const walk = (d: string) => {
+        for (const e of readdirSync(d, { withFileTypes: true })) {
+          const p = join(d, e.name);
+          if (e.isDirectory()) { if (p !== join(repo, '.git')) walk(p); } else out.push({ path: p, text: readFileSync(p, 'utf8') });
+        }
+      };
+      walk(dir);
+      return out;
+    },
+  };
+}
+type Server = ReturnType<typeof server>;
+const releaseEnv = (image: string, sha: string, env: string) => `IMAGE=${image}\nRELEASE=${sha}\nENVIRONMENT=${env}\n`;
+
+/**
+ * Un job de deploy ejecutado como lo corre GitHub: cada paso con su `if` (por defecto success()),
+ * el entorno del workflow, del job y del paso (con sus expresiones evaluadas: env.*, needs.*,
+ * secrets.* y las salidas de los pasos anteriores, leídas de $GITHUB_OUTPUT), y el `run` de
+ * verdad en el checkout del servidor simulado. Devuelve los `run` que corrieron y cómo terminó.
+ */
+function execJob(s: Server, name: string, sha: string, image: string, extra: Record<string, string> = {}) {
+  const block = job(name);
+  const steps: Record<string, { outcome: string; outputs: Record<string, string> }> = {};
+  const ctx = (): Ctx => ({ env: { SHA: sha, TAG: 'v1.0.0' }, needs: { image: { outputs: { ref: image } } }, secrets: s.secrets, steps });
+  const resolveAll = (vars: Record<string, string>) =>
+    Object.fromEntries(Object.entries(vars).map(([k, v]) => [k, v.startsWith('${{') ? String(evaluate(inner(v), ctx()) ?? '') : v]));
+  let status = 'success';
+  const ran: string[] = [];
+  const output = join(s.dir, 'github-output');
+  for (const st of stepsOf(block)) {
+    const run = keyIn(st, 'run');
+    let outcome = 'skipped';
+    const outputs: Record<string, string> = {};
+    if (evaluate(keyIn(st, 'if') ?? 'success()', { job: { status }, steps })) {
+      outcome = 'success';
+      if (run) {
+        ran.push(run);
+        writeFileSync(output, '');
+        const r = s.run(run, { SHA: sha, ...resolveAll(envOf(block, 4)), ...resolveAll(envOf(st, 8)), GITHUB_OUTPUT: output, ...extra });
+        for (const m of readFileSync(output, 'utf8').matchAll(/^(\w+)=(.*)$/gm)) outputs[m[1]] = m[2];
+        if (r.status !== 0) { outcome = 'failure'; status = 'failure'; }
+      }
+    }
+    const id = keyIn(st, 'id');
+    if (id) steps[id] = { outcome, outputs };
+  }
+  return { ran, status };
+}
+
+describe.each(['staging', 'production'])('el job %s contra el servidor simulado', (name) => {
+  const servers: Server[] = [];
+  afterEach(() => {
+    for (const s of servers.splice(0)) rmSync(s.dir, { recursive: true, force: true });
+  });
+  const fresh = () => { const s = server(); servers.push(s); return s; };
+  const [ACCESS, CURRENT, BEFORE, PULL, BOOTSTRAP, SWITCH, AFTER, ROLLBACK] = DEPLOY_FLOW;
+  const [I0, I1, I2] = [imageOf('a'), imageOf('b'), imageOf('c')];
+
+  it('el primer deploy y uno posterior: cada uno corre el bootstrap con su imagen antes de cambiar la API, y atiende su commit', () => {
+    const s = fresh();
+    const first = execJob(s, name, s.shas[0], I0);
+    expect(first).toEqual({ ran: DEPLOY_FLOW.slice(0, -1), status: 'success' });
+    expect(s.running(name)).toBe(`${I0} ${s.shas[0]}`);
+    expect(s.state(name)).toBe(releaseEnv(I0, s.shas[0], name));
+
+    s.clearCalls();
+    expect(execJob(s, name, s.shas[2], I2)).toEqual({ ran: DEPLOY_FLOW.slice(0, -1), status: 'success' });
+    expect(s.running(name)).toBe(`${I2} ${s.shas[2]}`);
+    expect(s.state(name, 'release.previous.env')).toBe(releaseEnv(I0, s.shas[0], name));
+    // En el servidor: bajar la imagen, la base, el bootstrap con la imagen nueva y recién después
+    // la API, en el proyecto del entorno.
+    const docker = s.calls().filter((c) => c.startsWith('docker '));
+    const tag = `[IMAGE=${I2} RELEASE=${s.shas[2]}]`;
+    expect(docker.map((c) => c.replace(/ -p cocos-\w+ --project-directory \S+ -f \S+ --env-file \S+/, ''))).toEqual([
+      `docker login ghcr.io -u dante0x95 --password-stdin`,
+      `docker pull -q ${I2}`,
+      `docker image inspect ${I2}`,
+      `docker compose up -d --wait --wait-timeout 7 db ${tag}`,
+      `docker compose run --rm -T --no-deps migrate ${tag}`,
+      `docker compose up -d --wait --wait-timeout 7 --no-deps api ${tag}`,
+    ]);
+    expect(docker.slice(3).every((c) => c.includes(` -p cocos-${name} --project-directory ${join(s.root, name)} `))).toBe(true);
+    // Lo que se instaló es el compose.yml del commit.
+    expect(s.state(name, 'compose.yml')).toBe(read('deploy/lightsail/compose.yml'));
+  });
+
+  it('si /health no atiende el commit nuevo, vuelve a la imagen y el release anteriores y el job queda en rojo', () => {
+    const s = fresh();
+    execJob(s, name, s.shas[0], I0);
+    s.clearCalls();
+    const r = execJob(s, name, s.shas[1], I1, { BROKEN: s.shas[1] });
+    expect(r).toEqual({ ran: DEPLOY_FLOW, status: 'failure' });
+    expect(s.running(name)).toBe(`${I0} ${s.shas[0]}`);
+    expect(s.state(name)).toBe(releaseEnv(I0, s.shas[0], name));
+    // La vuelta atrás recrea la API con la imagen anterior, sin correr el bootstrap anterior, y
+    // verifica que /health atienda otra vez el release anterior.
+    const after = s.calls().slice(s.calls().findIndex((c) => c.includes(`--no-deps api [IMAGE=${I1}`)) + 1);
+    expect(after.filter((c) => c.startsWith('docker '))).toEqual([
+      expect.stringMatching(new RegExp(`up -d --wait --wait-timeout 7 --no-deps api \\[IMAGE=${ere(I0)} RELEASE=${s.shas[0]}\\]$`)),
+    ]);
+    expect(after.filter((c) => c.startsWith('curl')).at(-1)).toBe(`curl ${URLS[name]}/health`);
+  });
+
+  it('si la API nueva no queda sana al cambiar, vuelve a la anterior', () => {
+    const s = fresh();
+    execJob(s, name, s.shas[0], I0);
+    const r = execJob(s, name, s.shas[1], I1, { DOCKER_FAIL: `--no-deps api \\[IMAGE=${ere(I1)}` });
+    expect(r).toEqual({ ran: [ACCESS, CURRENT, BEFORE, PULL, BOOTSTRAP, SWITCH, ROLLBACK], status: 'failure' });
+    expect(s.running(name)).toBe(`${I0} ${s.shas[0]}`);
+    expect(s.state(name)).toBe(releaseEnv(I0, s.shas[0], name));
+  });
+
+  it('si el bootstrap falla, no cambia de versión ni vuelve atrás: sigue la API anterior', () => {
+    const s = fresh();
+    execJob(s, name, s.shas[0], I0);
+    s.clearCalls();
+    const r = execJob(s, name, s.shas[1], I1, { DOCKER_FAIL: 'run --rm' });
+    expect(r).toEqual({ ran: [ACCESS, CURRENT, BEFORE, PULL, BOOTSTRAP], status: 'failure' });
+    expect(s.calls().some((c) => / api \[/.test(c))).toBe(false);
+    expect(s.running(name)).toBe(`${I0} ${s.shas[0]}`);
+    expect(s.state(name)).toBe(releaseEnv(I0, s.shas[0], name));
+  });
+
+  it('un release anterior al que atiende (un re-run viejo) se frena antes de bajar nada: el servidor no cambia', () => {
+    const s = fresh();
+    execJob(s, name, s.shas[2], I2);
+    s.clearCalls();
+    const r = execJob(s, name, s.shas[0], I0);
+    expect(r).toEqual({ ran: [ACCESS, CURRENT, BEFORE], status: 'failure' });
+    expect(s.calls().filter((c) => c.startsWith('docker '))).toEqual([]);
+    expect(s.running(name)).toBe(`${I2} ${s.shas[2]}`);
+    expect(s.state(name)).toBe(releaseEnv(I2, s.shas[2], name));
+  });
+
+  it('con un release.env inválido en el servidor, el job frena antes de bajar nada y la API sigue', () => {
+    const s = fresh();
+    execJob(s, name, s.shas[2], I2);
+    writeFileSync(join(s.root, name, 'release.env'), `IMAGE=${I2}\nENVIRONMENT=${name}\n`);
+    s.clearCalls();
+    const r = execJob(s, name, s.shas[0], I0);
+    expect(r).toEqual({ ran: [ACCESS, CURRENT], status: 'failure' });
+    expect(s.calls().filter((c) => c.startsWith('docker '))).toEqual([]);
+    expect(s.running(name)).toBe(`${I2} ${s.shas[2]}`);
+  });
+
+  // La vuelta atrás termina bien solo si /health, por la URL pública, atiende otra vez el release
+  // anterior: si sigue caída, o atiende otro release, el paso falla y no dice que volvió.
+  it.each([
+    ['/health sigue fallando', (prev: string) => ({ BROKEN: prev })],
+    ['/health atiende otro release', () => ({ SERVED: 'f'.repeat(40) })],
+  ])('si después de volver %s, la vuelta atrás falla', (_label, health) => {
+    const s = fresh();
+    execJob(s, name, s.shas[0], I0);
+    const step = (cmd: string, env: Record<string, string>, input?: string) =>
+      s.run(cmd, { ENVIRONMENT: name, URL: URLS[name], IMAGE_REF: I1, SHA: s.shas[1], ...env }, input);
+    expect(step('deploy/lightsail/deploy.sh bootstrap', {}, read('deploy/lightsail/compose.yml')).status).toBe(0);
+    expect(step('deploy/lightsail/deploy.sh switch', {}).status).toBe(0);
+    const r = step('deploy/lightsail/deploy.sh rollback',
+      { FIRST_DEPLOY: 'false', PREVIOUS_IMAGE: I0, PREVIOUS_RELEASE: s.shas[0], ...health(s.shas[0]) });
+    // El servidor sí volvió (la API anterior corre), pero desde afuera no se confirma.
+    expect(s.running(name)).toBe(`${I0} ${s.shas[0]}`);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain(`/health no atiende ${s.shas[0]}`);
+    expect(r.stdout).not.toContain('atiende otra vez');
+  });
+
+  it('el mismo commit se puede volver a desplegar', () => {
+    const s = fresh();
+    execJob(s, name, s.shas[1], I1);
+    expect(execJob(s, name, s.shas[1], I1).status).toBe('success');
+  });
+
+  it('si el primer deploy falla, saca la API y el entorno queda sin release: el siguiente vuelve a ser el primero', () => {
+    const s = fresh();
+    const r = execJob(s, name, s.shas[1], I1, { BROKEN: s.shas[1] });
+    expect(r).toEqual({ ran: DEPLOY_FLOW, status: 'failure' });
+    expect(s.running(name)).toBeNull();
+    expect(s.state(name)).toBeNull();
+    expect(execJob(s, name, s.shas[0], I0).status).toBe('success');
+  });
+
+  it('el token del job no queda en el servidor ni en ningún argumento', () => {
+    const s = fresh();
+    execJob(s, name, s.shas[0], I0);
+    expect(s.calls().filter((c) => c.includes(TOKEN))).toEqual([]);
+    // Los archivos incluyen CALLS.ssh: los comandos remotos, con sus argumentos.
+    expect(readFileSync(`${join(s.dir, 'calls')}.ssh`, 'utf8')).toContain(' pull ');
+    expect(s.files().filter((f) => f.text.includes(TOKEN)).map((f) => f.path)).toEqual([]);
+    // docker login lo recibió (por stdin) en una configuración temporal, que ya no está.
+    const login = s.calls().find((c) => c.startsWith('docker login'))!;
+    expect(login).toBe('docker login ghcr.io -u dante0x95 --password-stdin');
+    expect(readdirSync(join(s.dir, 'tmp'))).toEqual([]);
+    expect(existsSync(join(s.dir, 'home', '.docker'))).toBe(false);
+  });
+
+  it('el entorno no toca al otro', () => {
+    const s = fresh();
+    execJob(s, name, s.shas[0], I0);
+    const other = name === 'staging' ? 'production' : 'staging';
+    expect(s.state(other)).toBeNull();
+    expect(s.calls().filter((c) => c.includes(`cocos-${other}`) || c.includes(join(s.root, other)))).toEqual([]);
+  });
+});
+
+describe('deploy.sh y remote.sh', () => {
+  const servers: Server[] = [];
+  afterEach(() => {
+    for (const s of servers.splice(0)) rmSync(s.dir, { recursive: true, force: true });
+  });
+  const fresh = () => { const s = server(); servers.push(s); return s; };
+  const I0 = imageOf('a');
+  const access = (s: Server, env: Record<string, string> = {}) =>
+    s.run('deploy/lightsail/deploy.sh access', { ENVIRONMENT: 'staging', ...s.secrets, ...env });
+
+  it('access: la clave y el host fijado quedan en RUNNER_TEMP, con permisos 600, y ssh los usa', () => {
+    const s = fresh();
+    expect(access(s).status).toBe(0);
+    const d = join(s.dir, 'runner', 'lightsail');
+    expect(readFileSync(join(d, 'key'), 'utf8')).toBe(`${s.secrets.LIGHTSAIL_SSH_KEY}\n`);
+    expect(readFileSync(join(d, 'known_hosts'), 'utf8')).toBe(`${s.secrets.LIGHTSAIL_KNOWN_HOSTS}\n`);
+    for (const f of ['key', 'known_hosts', 'config']) expect(statSync(join(d, f)).mode & 0o777).toBe(0o600);
+    const config = readFileSync(join(d, 'config'), 'utf8');
+    for (const line of ['HostName 203.0.113.7', 'User deploy', `IdentityFile ${d}/key`, 'IdentitiesOnly yes',
+      `UserKnownHostsFile ${d}/known_hosts`, 'StrictHostKeyChecking yes', 'BatchMode yes']) {
+      expect(config).toContain(`  ${line}\n`);
+    }
+    s.run('deploy/lightsail/deploy.sh current', { ENVIRONMENT: 'staging' });
+    expect(s.calls()).toEqual([`ssh -F ${d}/config lightsail`]);
+  });
+
+  it.each(['LIGHTSAIL_HOST', 'LIGHTSAIL_SSH_KEY', 'LIGHTSAIL_KNOWN_HOSTS'])('access frena sin %s', (secret) => {
+    const s = fresh();
+    const r = access(s, { [secret]: '' });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain(`falta el secreto ${secret}`);
+  });
+
+  it('current: sin release, first=true; con release, la imagen y el commit; sin setup.sh, frena', () => {
+    const s = fresh();
+    access(s);
+    const out = join(s.dir, 'out');
+    const current = (env: string) => {
+      writeFileSync(out, '');
+      const r = s.run('deploy/lightsail/deploy.sh current', { ENVIRONMENT: env, GITHUB_OUTPUT: out });
+      return { ...r, output: readFileSync(out, 'utf8') };
+    };
+    expect(current('staging').output).toBe('release=\nimage=\nfirst=true\n');
+    writeFileSync(join(s.root, 'staging', 'release.env'), releaseEnv(I0, s.shas[0], 'staging'));
+    expect(current('staging').output).toBe(`release=${s.shas[0]}\nimage=${I0}\nfirst=false\n`);
+    rmSync(join(s.root, 'production', 'api.env'));
+    const r = current('production');
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('el servidor no está preparado');
+    expect(r.output).toBe('');
+  });
+
+  // Un release.env que existe pero no dice qué atiende no es un primer deploy: si lo fuera, el gate
+  // dejaría pasar cualquier commit y la vuelta atrás sacaría la API.
+  it.each([
+    ['vacío', ''],
+    ['sin RELEASE', `IMAGE=${imageOf('a')}\nENVIRONMENT=staging\n`],
+    ['sin IMAGE', `RELEASE=${'a'.repeat(40)}\nENVIRONMENT=staging\n`],
+    ['con un RELEASE que no es un SHA', `IMAGE=${imageOf('a')}\nRELEASE=main\nENVIRONMENT=staging\n`],
+    ['con dos RELEASE', `IMAGE=${imageOf('a')}\nRELEASE=${'a'.repeat(40)}\nRELEASE=${'b'.repeat(40)}\n`],
+  ])('current frena con un release.env %s, sin escribir salidas', (_name, content) => {
+    const s = fresh();
+    access(s);
+    writeFileSync(join(s.root, 'staging', 'release.env'), content);
+    const out = join(s.dir, 'out');
+    writeFileSync(out, '');
+    const r = s.run('deploy/lightsail/deploy.sh current', { ENVIRONMENT: 'staging', GITHUB_OUTPUT: out });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('no tiene un RELEASE y una IMAGE válidos');
+    expect(readFileSync(out, 'utf8')).toBe('');
+  });
+
+  it('switch sin el bootstrap de esa imagen y ese commit no toca la API', () => {
+    const s = fresh();
+    access(s);
+    const r = s.run('deploy/lightsail/deploy.sh switch', { ENVIRONMENT: 'staging', IMAGE_REF: I0, SHA: s.shas[0] });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('no terminó bien en staging');
+    expect(s.calls().filter((c) => c.startsWith('docker '))).toEqual([]);
+  });
+
+  // Un bootstrap que falla deja escritos el compose y el release.env nuevos (los necesita para
+  // correr), pero no la confirmación: un switch posterior de esa misma versión se rechaza.
+  it.each([
+    ['la base no queda sana', 'up -d --wait --wait-timeout [0-9]+ db'],
+    ['migrate falla', 'run --rm'],
+  ])('si el bootstrap falla porque %s, un switch posterior de esa versión no toca la API ni el estado', (_name, failing) => {
+    const s = fresh();
+    access(s);
+    const deploy = (cmd: string, sha: string, image: string, env: Record<string, string> = {}) =>
+      s.run(`deploy/lightsail/deploy.sh ${cmd}`, { ENVIRONMENT: 'staging', IMAGE_REF: image, SHA: sha, ...env }, cmd === 'bootstrap' ? read('deploy/lightsail/compose.yml') : undefined);
+    expect(deploy('bootstrap', s.shas[0], I0).status).toBe(0);
+    expect(deploy('switch', s.shas[0], I0).status).toBe(0);
+    const I1 = imageOf('b');
+    expect(deploy('bootstrap', s.shas[1], I1, { DOCKER_FAIL: failing }).status).toBe(1);
+    expect(existsSync(join(s.root, 'staging', 'release.next.env'))).toBe(true);
+    s.clearCalls();
+    const r = deploy('switch', s.shas[1], I1);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('no terminó bien en staging');
+    expect(s.calls().filter((c) => c.startsWith('docker '))).toEqual([]);
+    expect(s.running('staging')).toBe(`${I0} ${s.shas[0]}`);
+    expect(s.state('staging')).toBe(releaseEnv(I0, s.shas[0], 'staging'));
+  });
+
+  it('la confirmación del bootstrap sirve para un solo switch: otro cambio necesita otro bootstrap', () => {
+    const s = fresh();
+    access(s);
+    const env = { ENVIRONMENT: 'staging', IMAGE_REF: I0, SHA: s.shas[0] };
+    expect(s.run('deploy/lightsail/deploy.sh bootstrap', env, read('deploy/lightsail/compose.yml')).status).toBe(0);
+    expect(s.run('deploy/lightsail/deploy.sh switch', env).status).toBe(0);
+    expect(existsSync(join(s.root, 'staging', 'bootstrap.ok'))).toBe(false);
+    expect(s.run('deploy/lightsail/deploy.sh switch', env).status).toBe(1);
+  });
+
+  it('bootstrap frena sin la imagen bajada, sin tocar la base', () => {
+    const s = fresh();
+    access(s);
+    const r = s.run('deploy/lightsail/deploy.sh bootstrap', { ENVIRONMENT: 'staging', IMAGE_REF: I0, SHA: s.shas[0], DOCKER_FAIL: '^image inspect' });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('falta el paso pull');
+    expect(s.calls().filter((c) => c.startsWith('docker compose'))).toEqual([]);
+  });
+
+  it.each([
+    ['una imagen por etiqueta', 'ghcr.io/o/r:v1', 'a'.repeat(40), 'no es una referencia por digest'],
+    ['un commit que no es un SHA', imageOf('a'), 'main', 'no es el SHA de un commit'],
+  ])('remote.sh rechaza %s', (_name, ref, sha, message) => {
+    const s = fresh();
+    access(s);
+    const r = s.run('deploy/lightsail/deploy.sh bootstrap', { ENVIRONMENT: 'staging', IMAGE_REF: ref, SHA: sha });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain(message);
+    expect(s.calls().filter((c) => c.startsWith('docker '))).toEqual([]);
+  });
+
+  it('remote.sh rechaza un entorno desconocido', () => {
+    const s = fresh();
+    access(s);
+    const r = s.run('deploy/lightsail/deploy.sh current', { ENVIRONMENT: 'otro' });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("entorno desconocido: 'otro'");
+  });
+
+  // La vuelta atrás sin la salida de current (o con una que no cierra) no adivina: no toca nada.
+  it.each([
+    ['sin FIRST_DEPLOY', { PREVIOUS_IMAGE: imageOf('a'), PREVIOUS_RELEASE: 'a'.repeat(40) }],
+    ['primer deploy con un release anterior', { FIRST_DEPLOY: 'true', PREVIOUS_IMAGE: imageOf('a'), PREVIOUS_RELEASE: 'a'.repeat(40) }],
+    ['sin release anterior y FIRST_DEPLOY=false', { FIRST_DEPLOY: 'false' }],
+  ])('rollback no toca nada %s', (_name, env) => {
+    const s = fresh();
+    access(s);
+    s.clearCalls();
+    const r = s.run('deploy/lightsail/deploy.sh rollback', { ENVIRONMENT: 'staging', URL: URLS.staging, ...env });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('no se sabe a qué volver');
+    expect(s.calls()).toEqual([]);
+  });
+
+  it('rollback frena si ni lo que atiende ni lo guardado como anterior es el release anterior', () => {
+    const s = fresh();
+    access(s);
+    writeFileSync(join(s.root, 'staging', 'release.env'), releaseEnv(imageOf('c'), s.shas[2], 'staging'));
+    s.clearCalls();
+    const r = s.run('deploy/lightsail/deploy.sh rollback', { ENVIRONMENT: 'staging', URL: URLS.staging,
+      FIRST_DEPLOY: 'false', PREVIOUS_IMAGE: I0, PREVIOUS_RELEASE: s.shas[0] });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('no se toca nada');
+    expect(s.calls().filter((c) => c.startsWith('docker '))).toEqual([]);
+  });
+});
+
+// deploy/lightsail/drill-docker.sh usa el proyecto fijo cocos-staging de remote.sh y al terminar
+// hace `down -v`: si en el Docker local ya hay algo de ese proyecto (un volumen sin contenedores,
+// como deja un `down` sin -v, también), no empieza ni crea nada, así que tampoco lo borra. Con un
+// `docker` simulado que anota cada llamada y responde los listados con EXISTING.
+describe('drill-docker.sh', () => {
+  const dirs: string[] = [];
+  afterEach(() => {
+    for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  });
+  const drill = (existing: Record<string, string>, fail = '') => {
     const f = fakeBin({
-      flyctl: [
-        'echo "flyctl $*" >> "$CALLS"',
-        'case "$1 $2" in',
-        '  "machines list") cat "$MACHINES" ;;',
-        '  "machine update") exit "${UPDATE_EXIT:-0}" ;;',
-        '  *) echo "flyctl simulado: no soportado: $*" >&2; exit 9 ;;',
+      docker: [
+        'echo "docker $*" >> "$CALLS"',
+        '[ -n "$FAIL" ] && [[ "$*" == *"$FAIL"* ]] && exit 1',
+        'case "$*" in',
+        '  *"ps -aq --filter label=com.docker.compose.project=cocos-staging") printf "%s" "${PS_PROJECT:-}" ;;',
+        '  *"volume ls -q --filter label=com.docker.compose.project=cocos-staging") printf "%s" "${VOL_PROJECT:-}" ;;',
+        '  *"volume ls -q --filter name=cocos-staging_") printf "%s" "${VOL_NAME:-}" ;;',
+        '  *"ps -aq --filter name=cocos-drill-registry") printf "%s" "${PS_REGISTRY:-}" ;;',
         'esac',
       ].join('\n'),
-      curl: [
-        'echo "curl $*" >> "$CALLS"',
-        'n=$(grep -c "^curl " "$CALLS")',
-        'total=$(wc -l < "$HEALTH")',
-        '[ "$n" -le "$total" ] || n=$total',
-        'sed -n "${n}p" "$HEALTH" | tr -d "\\n"',
-      ].join('\n'),
-      sleep: ':',
     });
-    writeFileSync(join(f.dir, 'machines.json'), JSON.stringify(machines));
-    writeFileSync(join(f.dir, 'health'), health.join('\n') + '\n');
-    const env = {
-      CALLS: f.log, MACHINES: join(f.dir, 'machines.json'), HEALTH: join(f.dir, 'health'),
-      CONFIG: 'deploy/fly/staging.toml', URL: 'https://cocos-challenge-a-staging.fly.dev', HEALTH_ATTEMPTS: '3',
-    };
-    return { ...f, env };
+    dirs.push(f.dir);
+    const r = runScript('deploy/lightsail/drill-docker.sh', [], f.bin, { CALLS: f.log, FAIL: fail, TMPDIR: f.dir, ...existing });
+    return { ...r, calls: f.calls(), leftovers: readdirSync(f.dir).filter((e) => !['bin', 'calls'].includes(e)) };
   };
-  const body = (release: string, ok = true) => JSON.stringify({ ok, db: ok ? 'up' : 'down', release });
-
-  it('record: la imagen de las máquinas de la API de la app del CONFIG, en $GITHUB_OUTPUT', () => {
-    const f = fakes([machine('m1', OLD), machine('m2', OLD), machine('r1', NEW, 'release_command'), machine('m0', NEW, 'app', 'destroyed')], []);
-    const out = join(f.dir, 'output');
-    const r = runScript('deploy/fly/rollback.sh', ['record'], f.bin, { ...f.env, GITHUB_OUTPUT: out });
-    expect(r.stderr).toBe('');
-    expect(r.status).toBe(0);
-    expect(readFileSync(out, 'utf8')).toBe(`image=${OLD}\n`);
-    expect(f.calls()).toEqual(['flyctl machines list --app cocos-challenge-a-staging --json']);
-    rmSync(f.dir, { recursive: true, force: true });
-  });
+  const LISTS = [
+    'docker ps -aq --filter label=com.docker.compose.project=cocos-staging',
+    'docker volume ls -q --filter label=com.docker.compose.project=cocos-staging',
+    'docker volume ls -q --filter name=cocos-staging_',
+    'docker ps -aq --filter name=cocos-drill-registry',
+  ];
 
   it.each([
-    ['sin máquinas de la API', [machine('r1', OLD, 'release_command')]],
-    ['con dos imágenes a la vez', [machine('m1', OLD), machine('m2', NEW)]],
-  ])('record falla %s', (_name, machines) => {
-    const f = fakes(machines, []);
-    expect(runScript('deploy/fly/rollback.sh', ['record'], f.bin, f.env).status).toBe(1);
-    rmSync(f.dir, { recursive: true, force: true });
+    ['un volumen cocos-staging_pgdata sin contenedores', { VOL_NAME: 'cocos-staging_pgdata' }, 'volúmenes cocos-staging_*'],
+    ['un volumen con la etiqueta del proyecto', { VOL_PROJECT: 'otro_nombre' }, 'volúmenes del proyecto cocos-staging'],
+    ['contenedores del proyecto', { PS_PROJECT: 'abc123' }, 'contenedores del proyecto cocos-staging'],
+    ['el contenedor del registro', { PS_REGISTRY: 'def456' }, 'un contenedor cocos-drill-registry'],
+  ])('con %s no empieza: solo lista, no crea ni borra nada', (_name, existing, what) => {
+    const r = drill(existing);
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain(`NO SE ENSAYA: ya hay ${what}`);
+    expect(r.calls.every((c) => LISTS.includes(c))).toBe(true);
+    expect(r.leftovers).toEqual([]);
   });
 
-  // El caso que bluegreen no cubre: el deploy terminó, el tráfico pasó a la versión nueva y
-  // /health dejó de atender el commit. Las máquinas vuelven a la imagen anterior, sin correr el
-  // release_command (machine update, no deploy), y /health vuelve a atender el release anterior.
-  it('restore: vuelve cada máquina de la API a la imagen anterior y exige que /health atienda el release anterior', () => {
-    const f = fakes([machine('m1', NEW), machine('m2', NEW), machine('r1', NEW, 'release_command')],
-      [body(SHA, false), body(PREV)]);
-    const r = runScript('deploy/fly/rollback.sh', ['restore'], f.bin, { ...f.env, PREVIOUS_IMAGE: OLD, PREVIOUS_RELEASE: PREV });
-    expect(r.status).toBe(0);
-    expect(r.stdout).toContain(`atiende otra vez ${PREV}`);
-    expect(f.calls()).toEqual([
-      'flyctl machines list --app cocos-challenge-a-staging --json',
-      `flyctl machine update m1 --app cocos-challenge-a-staging --image ${OLD} --env RELEASE=${PREV} --yes`,
-      `flyctl machine update m2 --app cocos-challenge-a-staging --image ${OLD} --env RELEASE=${PREV} --yes`,
-      'curl -sS --max-time 10 https://cocos-challenge-a-staging.fly.dev/health',
-      'curl -sS --max-time 10 https://cocos-challenge-a-staging.fly.dev/health',
-    ]);
-    expect(f.calls().some((c) => c.startsWith('flyctl deploy'))).toBe(false);
-    rmSync(f.dir, { recursive: true, force: true });
+  it('si no puede consultar Docker, no empieza', () => {
+    const r = drill({}, 'volume ls');
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain('NO SE ENSAYA: no se pudo consultar Docker');
+    expect(r.calls.every((c) => LISTS.includes(c))).toBe(true);
   });
 
-  // Los pasos de un job como los corre GitHub: el `if` de cada uno (por defecto success()) con el
-  // estado del job y los outcome de los pasos anteriores; `outcome` decide cómo termina cada
-  // `run`. Devuelve los `run` que corrieron, en orden.
-  function runJob(block: string, outcome: (run: string) => 'success' | 'failure'): string[] {
-    const steps: Record<string, { outcome: string }> = {};
-    let status = 'success';
-    const ran: string[] = [];
-    for (const st of stepsOf(block)) {
-      const run = keyIn(st, 'run');
-      let out = 'skipped';
-      if (evaluate(keyIn(st, 'if') ?? 'success()', { job: { status }, steps })) {
-        out = run ? outcome(run) : 'success';
-        if (run) ran.push(run);
-        if (out === 'failure') status = 'failure';
-      }
-      const id = keyIn(st, 'id');
-      if (id) steps[id] = { outcome: out };
-    }
-    return ran;
-  }
-  const failing = (...prefixes: string[]) => (run: string) => (prefixes.some((p) => run.startsWith(p)) ? 'failure' as const : 'success' as const);
-
-  describe.each(['staging', 'production'])('orquestación del job %s', (name) => {
-    const block = job(name);
-    const deployRun = runsOf(block).find((r) => r.startsWith('flyctl deploy'))!;
-    const BEFORE = 'deploy/fly/release-check.sh before';
-    const RECORD = 'deploy/fly/rollback.sh record';
-    const AFTER = 'deploy/fly/release-check.sh after';
-    const RESTORE = 'deploy/fly/rollback.sh restore';
-    const app = readFileSync(join(ROOT, keyIn(block, 'CONFIG')!), 'utf8').match(/^app = "(.+)"$/m)![1];
-    /** rollback.sh restore con el entorno del job y las máquinas como quedaron. */
-    const restore = (machines: unknown[]) => {
-      const f = fakes(machines, [body(PREV)]);
-      const r = runScript('deploy/fly/rollback.sh', ['restore'], f.bin,
-        { ...f.env, CONFIG: keyIn(block, 'CONFIG')!, URL: keyIn(block, 'URL')!, PREVIOUS_IMAGE: OLD, PREVIOUS_RELEASE: PREV });
-      const calls = f.calls();
-      rmSync(f.dir, { recursive: true, force: true });
-      return { status: r.status, updates: calls.filter((c) => c.startsWith('flyctl machine update')), health: calls.filter((c) => c.startsWith('curl')) };
-    };
-
-    // bluegreen habilita las máquinas nuevas antes de retirar las anteriores; si la retirada
-    // falla, flyctl termina con error y quedan las nuevas (y quizá las anteriores) atendiendo.
-    it('flyctl deploy falla después de conmutar: no verifica el commit, vuelve las máquinas nuevas a la imagen anterior y verifica el release anterior', () => {
-      expect(runJob(block, failing(deployRun))).toEqual([BEFORE, RECORD, deployRun, RESTORE]);
-      const r = restore([machine('m1', NEW), machine('m2', OLD)]);
-      expect(r.status).toBe(0);
-      expect(r.updates).toEqual([`flyctl machine update m1 --app ${app} --image ${OLD} --env RELEASE=${PREV} --yes`]);
-      expect(r.health).toEqual([`curl -sS --max-time 10 ${keyIn(block, 'URL')}/health`]);
-    });
-
-    it('flyctl deploy falla antes de conmutar: la vuelta atrás no toca ninguna máquina y verifica que sigue el release anterior', () => {
-      expect(runJob(block, failing(deployRun))).toContain(RESTORE);
-      const r = restore([machine('m1', OLD), machine('m2', OLD)]);
-      expect(r.status).toBe(0);
-      expect(r.updates).toEqual([]);
-      expect(r.health).toHaveLength(1);
-    });
-
-    it('el deploy termina y /health no atiende el commit: vuelve a la imagen anterior', () => {
-      expect(runJob(block, failing(AFTER))).toEqual([BEFORE, RECORD, deployRun, AFTER, RESTORE]);
-      const r = restore([machine('m1', NEW)]);
-      expect(r.status).toBe(0);
-      expect(r.updates).toHaveLength(1);
-    });
-
-    it('todo bien: no vuelve atrás; con el gate o record en rojo no hay deploy ni vuelta atrás', () => {
-      expect(runJob(block, failing())).toEqual([BEFORE, RECORD, deployRun, AFTER]);
-      expect(runJob(block, failing(BEFORE))).toEqual([BEFORE]);
-      expect(runJob(block, failing(RECORD))).toEqual([BEFORE, RECORD]);
-    });
-  });
-
-  // Dos commits pueden dar la misma imagen (uno que solo cambia docs, que el Dockerfile no
-  // copia): la máquina ya corre la imagen anterior pero con el RELEASE rechazado. Igual se
-  // actualiza, para que /health vuelva a informar el release anterior.
-  it('restore actualiza una máquina con la imagen anterior pero otro RELEASE', () => {
-    const f = fakes([machine('m1', OLD, 'app', 'started', SHA), machine('m2', OLD, 'app', 'started', PREV)], [body(PREV)]);
-    const r = runScript('deploy/fly/rollback.sh', ['restore'], f.bin, { ...f.env, PREVIOUS_IMAGE: OLD, PREVIOUS_RELEASE: PREV });
-    expect(r.status).toBe(0);
-    expect(f.calls()).toEqual([
-      'flyctl machines list --app cocos-challenge-a-staging --json',
-      `flyctl machine update m1 --app cocos-challenge-a-staging --image ${OLD} --env RELEASE=${PREV} --yes`,
-      'curl -sS --max-time 10 https://cocos-challenge-a-staging.fly.dev/health',
-    ]);
-    rmSync(f.dir, { recursive: true, force: true });
-  });
-
-  it('restore falla si después de volver /health no atiende el release anterior', () => {
-    const f = fakes([machine('m1', NEW)], [body(SHA, false)]);
-    const r = runScript('deploy/fly/rollback.sh', ['restore'], f.bin, { ...f.env, PREVIOUS_IMAGE: OLD, PREVIOUS_RELEASE: PREV });
-    expect(r.status).toBe(1);
-    expect(r.stderr).toContain(`no atiende ${PREV}`);
-    rmSync(f.dir, { recursive: true, force: true });
-  });
-
-  it('restore falla si una máquina no se puede actualizar, y sin imagen o release anterior no toca nada', () => {
-    const f = fakes([machine('m1', NEW)], [body(PREV)]);
-    expect(runScript('deploy/fly/rollback.sh', ['restore'], f.bin,
-      { ...f.env, PREVIOUS_IMAGE: OLD, PREVIOUS_RELEASE: PREV, UPDATE_EXIT: '1' }).status).toBe(1);
-    expect(f.calls().some((c) => c.startsWith('curl'))).toBe(false);
-    writeFileSync(f.log, '');
-    expect(runScript('deploy/fly/rollback.sh', ['restore'], f.bin, { ...f.env, PREVIOUS_RELEASE: PREV }).status).toBe(1);
-    expect(runScript('deploy/fly/rollback.sh', ['restore'], f.bin, { ...f.env, PREVIOUS_IMAGE: OLD }).status).toBe(1);
-    expect(f.calls()).toEqual([]);
-    rmSync(f.dir, { recursive: true, force: true });
+  it('sin nada del proyecto, pasa las comprobaciones y empieza por el registro', () => {
+    const r = drill({}, 'run -d --name cocos-drill-registry');
+    expect(r.calls.slice(0, 4)).toEqual(LISTS);
+    expect(r.calls[4]).toMatch(/^docker run -d --name cocos-drill-registry /);
+    // Falla al crear el registro: la limpieza no toca volúmenes (no hubo compose).
+    expect(r.status).not.toBe(0);
+    expect(r.calls.some((c) => / down -v|volume rm/.test(c))).toBe(false);
   });
 });
 
-// deploy/fly/setup.sh con `fly` y `curl` simulados, en un repositorio temporal parado en main
-// con los archivos que usa: crea cada app y su base desde la configuración elegida (CONFIG y
-// DB_CONFIG, por defecto producción), y los secretos van a la app correcta por stdin, nunca en
-// los argumentos ni en la salida.
+// deploy/lightsail/setup.sh, en el servidor con sudo. Corre con `id`, `getent`, `useradd`,
+// `usermod`, `chown` y `docker` simulados (anotan sus argumentos) sobre directorios temporales
+// en lugar de /opt/cocos y /home/deploy.
 describe('setup.sh', () => {
-  const FILES = ['deploy/fly/setup.sh', 'deploy/fly/release-check.sh', 'fly.toml',
-    'deploy/fly/db.toml', 'deploy/fly/staging.toml', 'deploy/fly/staging-db.toml'];
-  const GIT = { GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_AUTHOR_NAME: 'prueba',
-    GIT_AUTHOR_EMAIL: 'prueba@example.com', GIT_COMMITTER_NAME: 'prueba', GIT_COMMITTER_EMAIL: 'prueba@example.com' };
-
-  const setup = (env: Record<string, string>) => {
+  const KEY = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDeployDeployDeployDeployDeployDeployDeploy cocos-deploy';
+  const dirs: string[] = [];
+  afterEach(() => {
+    for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  });
+  const machine = () => {
     const f = fakeBin({
-      fly: [
-        'echo "fly $*" >> "$CALLS"',
-        'if [ "$1 $2" = "secrets import" ]; then { echo "--- $*"; cat; } >> "$SECRETS"; fi',
-      ].join('\n'),
-      // /health de la app recién desplegada: atiende el HEAD del repositorio temporal.
-      curl: 'echo "curl $*" >> "$CALLS"\nprintf \'{"ok":true,"db":"up","release":"%s"}\' "$(git -C "$REPO" rev-parse HEAD)"',
+      id: 'echo "${FAKE_UID:-0}"',
+      getent: 'echo "getent $*" >> "$CALLS"; [ -f "$USERS/$2" ]',
+      useradd: 'echo "useradd $*" >> "$CALLS"; touch "$USERS/${*: -1}"',
+      usermod: 'echo "usermod $*" >> "$CALLS"',
+      chown: 'echo "chown $*" >> "$CALLS"',
+      docker: 'echo "docker $*" >> "$CALLS"; [ "$1 $2" != "network inspect" ] || [ -f "$USERS/.network" ] || { touch "$USERS/.network"; exit 1; }',
       sleep: ':',
     });
-    const repo = join(f.dir, 'repo');
-    for (const file of FILES) {
-      mkdirSync(join(repo, file, '..'), { recursive: true });
-      writeFileSync(join(repo, file), readFileSync(join(ROOT, file)));
-      chmodSync(join(repo, file), statSync(join(ROOT, file)).mode);
-    }
-    const git = (...args: string[]) => {
-      const r = spawnSync('git', args, { cwd: repo, encoding: 'utf8', env: { ...process.env, ...GIT } });
-      if (r.status !== 0) throw new Error(`git ${args.join(' ')}: ${r.stderr}`);
-      return r.stdout.trim();
+    dirs.push(f.dir);
+    const users = join(f.dir, 'users');
+    mkdirSync(users);
+    const root = join(f.dir, 'opt-cocos');
+    const home = join(f.dir, 'home-deploy');
+    const run = (args: string[], env: Record<string, string> = {}) => {
+      writeFileSync(f.log, '');
+      const r = runScript('deploy/lightsail/setup.sh', args, f.bin, { CALLS: f.log, USERS: users, COCOS_ROOT: root, DEPLOY_HOME: home, ...env });
+      return { ...r, calls: f.calls() };
     };
-    git('init', '-q', '-b', 'main');
-    git('add', '.');
-    git('commit', '-q', '--no-verify', '-m', 'setup');
-    const secrets = join(f.dir, 'secrets');
-    writeFileSync(secrets, '');
-    const r = spawnSync('bash', [join(repo, 'deploy/fly/setup.sh')], {
-      cwd: repo, encoding: 'utf8',
-      env: { PATH: `${f.bin}:${process.env.PATH}`, HOME: process.env.HOME ?? '/', ...GIT,
-        CALLS: f.log, SECRETS: secrets, REPO: repo, HEALTH_ATTEMPTS: '1', ...env },
-    });
-    const result = { r, sha: git('rev-parse', 'HEAD'), calls: f.calls(), secrets: readFileSync(secrets, 'utf8') };
-    rmSync(f.dir, { recursive: true, force: true });
-    return result;
+    const secretsOf = (env: string) => Object.fromEntries(['db.env', 'migrate.env', 'api.env'].map((file) =>
+      [file, Object.fromEntries(readFileSync(join(root, env, file), 'utf8').split('\n').filter(Boolean).map((l) => [l.slice(0, l.indexOf('=')), l.slice(l.indexOf('=') + 1)]))]));
+    return { root, home, run, secretsOf };
   };
 
-  /** Secretos importados por app: { app: { CLAVE: valor } }. */
-  const imported = (text: string) => {
-    const byApp: Record<string, Record<string, string>> = {};
-    let app = '';
-    for (const line of text.split('\n').filter(Boolean)) {
-      const header = line.match(/^--- secrets import --app (\S+) --stage$/);
-      if (header) { app = header[1]; byApp[app] = {}; continue; }
-      const [k, ...v] = line.split('=');
-      byApp[app][k] = v.join('=');
-    }
-    return byApp;
-  };
-
-  it.each([
-    ['producción, por defecto', {}, 'cocos-challenge-a-api', 'cocos-challenge-a-db', 'fly.toml', 'deploy/fly/db.toml'],
-    ['staging, con CONFIG y DB_CONFIG', { CONFIG: 'deploy/fly/staging.toml', DB_CONFIG: 'deploy/fly/staging-db.toml' },
-      'cocos-challenge-a-staging', 'cocos-challenge-a-staging-db', 'deploy/fly/staging.toml', 'deploy/fly/staging-db.toml'],
-  ])('%s: apps, volumen, secretos y deploys sobre la configuración elegida', (_name, env, api, db, config, dbConfig) => {
-    const { r, sha, calls, secrets } = setup(env as Record<string, string>);
+  it('genera los secretos de cada entorno una vez, coherentes entre sí, en archivos 600 que solo lee deploy, sin imprimirlos', () => {
+    const m = machine();
+    const r = m.run([KEY]);
     expect(r.stderr).toBe('');
     expect(r.status).toBe(0);
-    expect(calls).toEqual([
-      `fly apps create ${db} --org personal`,
-      `fly volumes create pgdata --app ${db} --region gru --size 1 --yes`,
-      `fly secrets import --app ${db} --stage`,
-      `fly deploy --config ${dbConfig} --ha=false`,
-      `fly apps create ${api} --org personal`,
-      `fly secrets import --app ${api} --stage`,
-      `fly deploy --config ${config} --ha=false --remote-only --image-label ${sha} --env RELEASE=${sha}`,
-      `curl -sS --max-time 10 https://${api}.fly.dev/health`,
-    ]);
-    const s = imported(secrets);
-    expect(Object.keys(s)).toEqual([db, api]);
-    expect(Object.keys(s[db])).toEqual(['POSTGRES_PASSWORD']);
-    expect(Object.keys(s[api])).toEqual(['DATABASE_ADMIN_URL', 'API_DB_PASSWORD', 'DATABASE_URL', 'INTERNAL_TOKEN']);
-    const pg = s[db].POSTGRES_PASSWORD;
-    const apiPassword = s[api].API_DB_PASSWORD;
-    expect(s[api].DATABASE_ADMIN_URL).toBe(`postgresql://postgres:${pg}@${db}.internal:5432/cocos`);
-    expect(s[api].DATABASE_URL).toBe(`postgresql://api:${apiPassword}@${db}.internal:5432/cocos`);
-    // Contraseñas y token generados, distintos entre sí, y fuera de argumentos y salida.
-    const values = [pg, apiPassword, s[api].INTERNAL_TOKEN];
+    const values: string[] = [];
+    for (const env of ['staging', 'production']) {
+      expect(statSync(join(m.root, env)).mode & 0o777).toBe(0o700);
+      for (const f of ['db.env', 'migrate.env', 'api.env']) expect(statSync(join(m.root, env, f)).mode & 0o777).toBe(0o600);
+      const s = m.secretsOf(env);
+      expect(Object.keys(s['db.env'])).toEqual(['POSTGRES_PASSWORD']);
+      expect(Object.keys(s['migrate.env'])).toEqual(['DATABASE_ADMIN_URL', 'API_DB_PASSWORD']);
+      expect(Object.keys(s['api.env'])).toEqual(['DATABASE_URL', 'INTERNAL_TOKEN']);
+      const pg = s['db.env'].POSTGRES_PASSWORD;
+      const api = s['migrate.env'].API_DB_PASSWORD;
+      expect(s['migrate.env'].DATABASE_ADMIN_URL).toBe(`postgresql://postgres:${pg}@db:5432/cocos`);
+      expect(s['api.env'].DATABASE_URL).toBe(`postgresql://api:${api}@db:5432/cocos`);
+      values.push(pg, api, s['api.env'].INTERNAL_TOKEN);
+    }
     for (const v of values) {
       expect(v).toMatch(/^[0-9a-f]{48}$/);
-      expect(calls.join('\n')).not.toContain(v);
-      expect(r.stdout + r.stderr).not.toContain(v);
+      expect(r.stdout + r.stderr + r.calls.join('\n')).not.toContain(v);
     }
-    expect(new Set(values).size).toBe(3);
+    expect(new Set(values).size).toBe(6);
+    expect(statSync(m.root).mode & 0o777).toBe(0o700);
+    expect(r.calls).toContain(`chown -R deploy:deploy ${m.root}`);
   });
 
-  it('cada configuración apunta a su propia base: staging nunca recibe la URL de la base de producción', () => {
-    const prod = imported(setup({}).secrets)['cocos-challenge-a-api'];
-    const staging = imported(setup({ CONFIG: 'deploy/fly/staging.toml', DB_CONFIG: 'deploy/fly/staging-db.toml' }).secrets)['cocos-challenge-a-staging'];
-    expect(prod.DATABASE_URL).toContain('@cocos-challenge-a-db.internal:');
-    expect(staging.DATABASE_URL).toContain('@cocos-challenge-a-staging-db.internal:');
-    expect(staging.DATABASE_ADMIN_URL).not.toContain('@cocos-challenge-a-db.internal:');
+  it('es idempotente: la segunda vez no cambia ningún secreto ni recrea el usuario', () => {
+    const m = machine();
+    m.run([KEY]);
+    const before = ['staging', 'production'].map(m.secretsOf);
+    const r = m.run([KEY]);
+    expect(r.status).toBe(0);
+    expect(['staging', 'production'].map(m.secretsOf)).toEqual(before);
+    expect(r.stdout).toContain('== staging: secretos ya generados, sin cambios');
+    expect(r.calls.filter((c) => c.startsWith('useradd'))).toEqual([]);
+    expect(r.calls.filter((c) => c.startsWith('docker network create'))).toEqual([]);
+  });
+
+  it('frena si a un entorno le falta uno de sus secretos: no regenera contraseñas que la base ya tiene', () => {
+    const m = machine();
+    m.run([KEY]);
+    rmSync(join(m.root, 'production', 'api.env'));
+    const r = m.run([KEY]);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('tiene 2 de los 3 archivos de secretos');
+    expect(existsSync(join(m.root, 'production', 'api.env'))).toBe(false);
+  });
+
+  it('el usuario deploy, en el grupo docker, con solo la clave de deploy y restringida', () => {
+    const m = machine();
+    const r = m.run([KEY]);
+    expect(r.calls).toContain(`useradd --create-home --home-dir ${m.home} --shell /bin/bash deploy`);
+    expect(r.calls).toContain('usermod -aG docker deploy');
+    const keys = join(m.home, '.ssh', 'authorized_keys');
+    expect(readFileSync(keys, 'utf8')).toBe(`restrict ${KEY}\n`);
+    expect(statSync(keys).mode & 0o777).toBe(0o600);
+    expect(statSync(join(m.home, '.ssh')).mode & 0o777).toBe(0o700);
+    // Otra clave reemplaza a la anterior: rotarla es volver a correrlo.
+    const other = KEY.replace('Deploy', 'Otra');
+    m.run([other]);
+    expect(readFileSync(keys, 'utf8')).toBe(`restrict ${other}\n`);
+  });
+
+  it('instala el proxy del commit y lo levanta en la red cocos-edge', () => {
+    const m = machine();
+    const r = m.run([KEY]);
+    expect(readFileSync(join(m.root, 'proxy/compose.yml'), 'utf8')).toBe(read('deploy/lightsail/proxy/compose.yml'));
+    expect(readFileSync(join(m.root, 'proxy/caddy/Caddyfile'), 'utf8')).toBe(read('deploy/lightsail/proxy/caddy/Caddyfile'));
+    const proxy = `docker compose -p cocos-proxy --project-directory ${m.root}/proxy -f ${m.root}/proxy/compose.yml`;
+    expect(r.calls.filter((c) => c.startsWith('docker'))).toEqual([
+      'docker compose version',
+      'docker network inspect cocos-edge',
+      'docker network create cocos-edge',
+      `${proxy} up -d`,
+      `${proxy} exec -T caddy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile`,
+    ]);
+  });
+
+  it.each([
+    ['sin clave', [], {}],
+    ['con una clave que no es ssh-ed25519', ['ssh-rsa AAAAB3Nza cocos'], {}],
+    ['con una clave en dos líneas', [`${KEY}\nssh-ed25519 AAAAotra`], {}],
+    ['sin sudo', [KEY], { FAKE_UID: '1000' }],
+  ])('frena %s, sin tocar nada', (_name, args, env) => {
+    const m = machine();
+    const r = m.run(args as string[], env as Record<string, string>);
+    expect(r.status).toBe(1);
+    expect(existsSync(m.root)).toBe(false);
+    expect(r.calls.filter((c) => !c.startsWith('docker compose version'))).toEqual([]);
   });
 });
 
-// deploy/fly/drills.sh release y rerun (issue #30), sin Fly ni GitHub: un repositorio temporal
+// deploy/drills.sh release y rerun (issues #30 y #34), sin el servidor ni GitHub: un repositorio temporal
 // con origin en un repositorio bare local (main con dos commits y tags), `curl` que responde
 // /health con HEALTH, y un `gh` simulado que lee y escribe el estado de las corridas en STATE:
 // cada corrida con su tag (headBranch), su commit y sus intentos (conclusión y log).
@@ -1179,8 +1621,8 @@ process.exit(9);
       if (r.status !== 0) throw new Error(`git ${args.join(' ')}: ${r.stderr}`);
       return r.stdout.trim();
     };
-    mkdirSync(join(repo, 'deploy/fly'), { recursive: true });
-    for (const file of ['deploy/fly/drills.sh', 'fly.toml']) {
+    mkdirSync(join(repo, 'deploy'), { recursive: true });
+    for (const file of ['deploy/drills.sh']) {
       writeFileSync(join(repo, file), readFileSync(join(ROOT, file)));
       chmodSync(join(repo, file), statSync(join(ROOT, file)).mode);
     }
@@ -1202,7 +1644,7 @@ process.exit(9);
     const drill = (args: string[], state: State, serving: string) => {
       writeFileSync(stateFile, JSON.stringify(state));
       writeFileSync(f.log, '');
-      const r = spawnSync('bash', [join(repo, 'deploy/fly/drills.sh'), ...args], {
+      const r = spawnSync('bash', [join(repo, 'deploy/drills.sh'), ...args], {
         cwd: repo, encoding: 'utf8',
         env: { PATH: `${f.bin}:${process.env.PATH}`, HOME: process.env.HOME ?? '/', ...GIT, CALLS: f.log, STATE: stateFile,
           HEALTH: JSON.stringify({ ok: true, db: 'up', release: serving }) },

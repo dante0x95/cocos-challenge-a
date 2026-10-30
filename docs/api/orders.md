@@ -30,6 +30,8 @@ Toda la decisión (saldo, tenencia, precio, estado) la toma `app.place_order` en
 
 `amount` y `price` también se aceptan como número JSON, pero solo si es un entero dentro de ±2⁵³ (`9007199254740991` como máximo), el rango que `JSON.parse` representa exacto; uno mayor responde `400` con `entero fuera del rango exacto de JSON (±2^53); enviarlo como string`. Cualquier magnitud mayor, y todo valor con decimales, va como string ([D-13](../decisiones.md#d-13)). `100` y `"100.00"` cuentan como el mismo body para la idempotencia.
 
+El string preserva la precisión, pero no quita los límites: el importe de la orden (`size × price`) no puede superar 10¹⁵ ARS ([D-14](../decisiones.md#d-14)) y la cantidad, 2³¹ − 1. Un `price` como `"9007199254740993"` llega exacto a la base y responde `422 LIMIT`; un `amount` como `"12345678901234567890"` no puede dar una orden (con `size` hasta 2³¹ − 1 y el importe hasta 10¹⁵, ningún precio lo usa) y responde `422 LIMIT` o `400` según el precio, sin orden y con la clave libre.
+
 No se aceptan campos de más.
 
 ```json

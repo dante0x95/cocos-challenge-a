@@ -32,7 +32,7 @@ describe('OrderBody (zod) — enteros JSON fuera de ±2⁵³ y topes de los ids 
     expect(a.success).toBe(false);
     expect(messageOf(a, 'amount')).toEqual([RANGE]);
   });
-  it('los mismos valores como string → aceptados exactos', () => {
+  it('los mismos valores como string → aceptados exactos (el tope de magnitud lo pone place_order, D-14)', () => {
     expect(limit('9007199254740993').data?.price).toBe('9007199254740993.00');
     expect(cash('12345678901234567890').data?.amount).toBe('12345678901234567890.00');
   });
@@ -54,15 +54,24 @@ describe('OrderBody (zod) — enteros JSON fuera de ±2⁵³ y topes de los ids 
     const u = parse({ ...base, userid: 2_147_483_648, instrumentid: 1 });
     expect(u.success).toBe(false);
     expect(u.error?.issues.map((i) => i.path.join('.'))).toEqual(['userid']);
+    expect(messageOf(u, 'userid')).toEqual(['debe ser ≤ 2147483647']);
     const i = parse({ ...base, userid: 1, instrumentid: 2_147_483_648 });
     expect(i.success).toBe(false);
     expect(i.error?.issues.map((i) => i.path.join('.'))).toEqual(['instrumentid']);
+    expect(messageOf(i, 'instrumentid')).toEqual(['debe ser ≤ 2147483647']);
   });
   it('size 1e9 se acepta; 1e10 se rechaza por el tope', () => {
     expect(parse({ userid: 1, side: 'BUY', instrumentid: 1, size: 1e9 }).data?.size).toBe(1_000_000_000);
     const r = parse({ userid: 1, side: 'BUY', instrumentid: 1, size: 1e10 });
     expect(r.success).toBe(false);
     expect(r.error?.issues.map((i) => i.path.join('.'))).toEqual(['size']);
+    expect(messageOf(r, 'size')).toEqual(['debe ser ≤ 2147483647']);
+  });
+  it('ids y size: 0 y 1.5 se rechazan con mensajes en español', () => {
+    const base = { side: 'BUY', type: 'MARKET', userid: 1, instrumentid: 1, size: 1 };
+    expect(messageOf(parse({ ...base, userid: 0 }), 'userid')).toEqual(['debe ser > 0']);
+    expect(messageOf(parse({ ...base, instrumentid: 1.5 }), 'instrumentid')).toEqual(['debe ser un entero']);
+    expect(messageOf(parse({ ...base, size: -1 }), 'size')).toEqual(['debe ser > 0']);
   });
 });
 

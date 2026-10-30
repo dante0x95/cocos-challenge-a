@@ -1,13 +1,14 @@
 // Vencimiento de las claves de idempotencia (D-19, issue #4 de este repositorio): lo decide
-// app.place_order al reclamar la clave, con created_at y app.idempotency_ttl(); la limpieza solo
-// recupera espacio. Plan de pruebas del issue, puntos 1 a 7 y 9; el 8 (la limpieza en cola antes o
-// después del request) está en orders.api.test.ts, con la clave de la transición del hash.
+// app.place_order al reclamar la clave, con created_at y app.idempotency_reclaim_age() (el plazo
+// más un minuto, issue #38); la limpieza solo recupera espacio, un minuto después. Plan de pruebas
+// del issue #4, puntos 1 a 7 y 9; el 8 (la limpieza en cola antes o después del request) está en
+// orders.api.test.ts, con la clave de la transición del hash. Del issue #38, los puntos 10 a 12.
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import type { Server } from 'node:http';
 import { createApp } from '../../src/app.js';
 import { config } from '../../src/config.js';
 import { pool } from '../../src/db/pool.js';
-import { admin, apiClient, arsId, newUser, placeOrder as placeOrderDb } from '../support/db.js';
+import { admin, apiClient, arsId, newUser, placeOrder as placeOrderDb, type PlaceResult } from '../support/db.js';
 import { requestHash } from '../../src/domain/orders.js';
 
 let server: Server;
@@ -43,6 +44,9 @@ const ordersOf = async (u: number) =>
 const age = (u: number, k: string, by: string) =>
   admin.query('UPDATE app.idempotency_keys SET created_at = now() - $3::interval WHERE userid = $1 AND key = $2', [u, k, by]);
 const ttl = async () => (await admin.query<{ ttl: string }>('SELECT app.idempotency_ttl()::text AS ttl')).rows[0].ttl;
+/** Pone created_at = t − `expr` (SQL), con t un timestamptz como texto, a microsegundos. */
+const ageFrom = (u: number, k: string, t: string, expr: string) =>
+  admin.query(`UPDATE app.idempotency_keys SET created_at = $3::timestamptz - (${expr}) WHERE userid = $1 AND key = $2`, [u, k, t]);
 /** Lo que corre el job, por usuario (cleanup_candidates elige a quién; cleanup_idempotency borra). */
 const candidates = async () => (await pool.query<{ userid: number }>('SELECT userid FROM app.cleanup_candidates()')).rows.map((r) => r.userid);
 const cleanup = async (u: number) => (await pool.query<{ n: number }>('SELECT app.cleanup_idempotency($1) AS n', [u])).rows[0].n;
@@ -74,21 +78,21 @@ afterAll(async () => {
 });
 
 describe('el vencimiento lo decide place_order con created_at y app.idempotency_ttl()', () => {
-  it('1. a exactamente 24 h la clave está viva (replay / 422); a 24 h + 1 µs está vencida (201 nueva): la comparación es estricta', async () => {
+  it('1. hasta 24 h + 1 min exactos la clave no se reclama (replay / 422, también pasadas las 24 h); a 24 h + 1 min + 1 µs se reclama (201 nueva): la comparación es estricta', async () => {
     const u = await newUser('ttl-borde');
     const k = 'borde';
     const first = await placeOrderDb(pool, { userid: u, key: k, hash: 'h1', side: 'CASH_IN', type: 'MARKET', instrumentid: ars, amount: '1.00' });
     expect(first).toMatchObject({ status: 201, replay: false });
 
     // place_order compara con el now() de su transacción. Para ponerse exactamente en el borde, la
-    // clave se envejece a 24 h de ESE now(), con precisión de microsegundos (como texto: un Date de
+    // clave se envejece desde ESE now(), con precisión de microsegundos (como texto: un Date de
     // JS perdería los microsegundos), y place_order corre en la misma transacción.
     const c = await apiClient();
-    const atBoundary = async (offset: string, hash: string) => {
+    const atAge = async (expr: string, hash: string) => {
       await c.query('BEGIN');
       try {
         const t0 = (await c.query<{ t0: string }>('SELECT now()::text AS t0')).rows[0].t0;
-        await admin.query(`UPDATE app.idempotency_keys SET created_at = $3::timestamptz - app.idempotency_ttl() ${offset} WHERE userid = $1 AND key = $2`, [u, k, t0]);
+        await ageFrom(u, k, t0, expr);
         const r = await placeOrderDb(c, { userid: u, key: k, hash, side: 'CASH_IN', type: 'MARKET', instrumentid: ars, amount: '1.00' });
         await c.query('COMMIT');
         return { ...r, t0 };
@@ -98,20 +102,23 @@ describe('el vencimiento lo decide place_order con created_at y app.idempotency_
       }
     };
     try {
-      // created_at = now() − 24 h exacto: viva. Mismo hash → replay; otro hash → 422.
-      const replay = await atBoundary('', 'h1');
-      expect(replay).toMatchObject({ status: 201, replay: true, order_id: first.order_id, body: first.body });
-      await expect(atBoundary('', 'h2')).rejects.toMatchObject({ code: 'APP03' });
+      // created_at = now() − 24 h exacto (fin del replay garantizado), 24 h + 1 µs y 24 h + 1 min
+      // exacto (el margen): no se reclama. Mismo hash → replay; otro hash → 422.
+      for (const expr of ['app.idempotency_ttl()', "app.idempotency_ttl() + interval '1 microsecond'", 'app.idempotency_reclaim_age()']) {
+        expect(await atAge(expr, 'h1'), expr).toMatchObject({ status: 201, replay: true, order_id: first.order_id, body: first.body });
+        await expect(atAge(expr, 'h2'), expr).rejects.toMatchObject({ code: 'APP03' });
+      }
       expect(await row(u, k)).toMatchObject({ request_hash: 'h1', order_id: first.order_id });
       expect(await ordersOf(u)).toBe(1);
 
-      // created_at = now() − 24 h − 1 µs: vencida. Mismo hash → orden nueva, y la fila se renueva con ese now().
-      const fresh = await atBoundary("- interval '1 microsecond'", 'h1');
+      // created_at = now() − (24 h + 1 min) − 1 µs: reclamable. Mismo hash → orden nueva, y la fila se renueva con ese now().
+      const past = "app.idempotency_reclaim_age() + interval '1 microsecond'";
+      const fresh = await atAge(past, 'h1');
       expect(fresh).toMatchObject({ status: 201, replay: false });
       expect(fresh.order_id).not.toBe(first.order_id);
       expect(await row(u, k)).toMatchObject({ request_hash: 'h1', order_id: fresh.order_id, http_status: 201, response_body: fresh.body, created_at: fresh.t0 });
-      // Y otro hash sobre una clave vencida también crea: no es un 422.
-      const other = await atBoundary("- interval '1 microsecond'", 'h2');
+      // Y otro hash sobre una clave reclamable también crea: no es un 422.
+      const other = await atAge(past, 'h2');
       expect(other).toMatchObject({ status: 201, replay: false });
       expect(await row(u, k)).toMatchObject({ request_hash: 'h2', order_id: other.order_id });
       expect(await ordersOf(u)).toBe(3);
@@ -119,9 +126,11 @@ describe('el vencimiento lo decide place_order con created_at y app.idempotency_
     } finally {
       await c.end();
     }
+    // El margen es de un minuto sobre settings.idempotency_ttl.
+    expect((await admin.query<{ m: string }>('SELECT (app.idempotency_reclaim_age() - app.idempotency_ttl())::text AS m')).rows[0].m).toBe('00:01:00');
   });
 
-  it('2. la clave vence por reloj mientras el request espera el lock 1,5 s → sigue viva: decide con el now() del inicio de su transacción, como la limpieza', async () => {
+  it('2. la clave se vuelve reclamable por reloj mientras el request espera el lock 1,5 s → no la reclama: decide con el now() del inicio de su transacción, como la limpieza', async () => {
     const u = await newUser('ttl-espera');
     const k = key();
     const first = await order(cashIn(u), k);
@@ -133,9 +142,9 @@ describe('el vencimiento lo decide place_order con created_at y app.idempotency_
       await a.query(userLock, [u]);
       const pending = order(cashIn(u), k);
       await waiting(u, 1);
-      // El now() del request ya quedó fijado. Desde acá, la clave vence dentro de 1 s: viva para ese
-      // now(), vencida para el reloj cuando el request obtenga el lock, 1,5 s después.
-      await admin.query("UPDATE app.idempotency_keys SET created_at = now() - app.idempotency_ttl() + interval '1 second' WHERE userid = $1 AND key = $2", [u, k]);
+      // El now() del request ya quedó fijado. Desde acá, la clave se vuelve reclamable dentro de 1 s:
+      // no reclamable para ese now(), reclamable por reloj cuando el request obtenga el lock, 1,5 s después.
+      await admin.query("UPDATE app.idempotency_keys SET created_at = now() - app.idempotency_reclaim_age() + interval '1 second' WHERE userid = $1 AND key = $2", [u, k]);
       await a.query('SELECT pg_sleep(1.5)');
       await a.query('COMMIT');
       const r = await pending;
@@ -144,43 +153,51 @@ describe('el vencimiento lo decide place_order con created_at y app.idempotency_
       await a.query('ROLLBACK').catch(() => undefined);
       a.release();
     }
-    // Por reloj ya venció (si no, la prueba no probó nada), así que un request nuevo, con otro now(), la reusa.
+    // Por reloj ya es reclamable (si no, la prueba no probó nada), así que un request nuevo, con otro now(), la reusa.
     expect((await admin.query<{ expired: boolean }>(
-      'SELECT clock_timestamp() > created_at + app.idempotency_ttl() AS expired FROM app.idempotency_keys WHERE userid = $1 AND key = $2', [u, k])).rows[0].expired).toBe(true);
+      'SELECT clock_timestamp() > created_at + app.idempotency_reclaim_age() AS expired FROM app.idempotency_keys WHERE userid = $1 AND key = $2', [u, k])).rows[0].expired).toBe(true);
     const fresh = await order(cashIn(u), k);
     expect(fresh).toMatchObject({ status: 201, replay: 'false' });
     expect(fresh.body.id).not.toBe(first.body.id);
     expect(await ordersOf(u)).toBe(2);
   });
 
-  it('3. settings.idempotency_ttl es la única fuente del plazo: a 1 minuto, una clave de 3 min la reusa place_order y la borra la limpieza; a 24 h, ninguno la toca', async () => {
+  it('3. settings.idempotency_ttl es la única fuente del plazo: a 1 minuto, una clave de 90 s da replay (margen), una de 3 min la reusa place_order y una de 4 min la borra la limpieza; a 24 h, ninguno la toca', async () => {
     const u = await newUser('ttl-1min');
     const w = await newUser('ttl-1min-limpieza');
     const v = await newUser('ttl-1min-margen');
+    const x = await newUser('ttl-1min-replay');
     const k = key();
     const first = await order(cashIn(u), k);
     expect(first.status).toBe(201);
     expect((await order(cashIn(w), k)).status).toBe(201);
     expect((await order(cashIn(v), k)).status).toBe(201);
+    const fx = await order(cashIn(x), k);
+    expect(fx.status).toBe(201);
     expect(await ttl()).toBe('24:00:00');
 
     let reused: Awaited<ReturnType<typeof order>>;
     try {
+      // Plazo de 1 min: place_order reclama desde los 2 min y la limpieza borra desde los 3 min.
       await admin.query("UPDATE app.settings SET idempotency_ttl = '1 minute'");
       expect(await ttl()).toBe('00:01:00');
       await age(u, k, '3 minutes');
-      await age(w, k, '3 minutes');
-      // Vencida hace 30 s: la limpieza todavía no la borra (la borra un minuto después de vencer).
-      await age(v, k, '90 seconds');
-      // place_order la reusa…
+      await age(w, k, '4 minutes');
+      // Reclamable hace 30 s: la limpieza todavía no la borra (la borra un minuto después).
+      await age(v, k, '150 seconds');
+      // Pasado el plazo pero dentro del margen: place_order todavía no la reclama.
+      await age(x, k, '90 seconds');
+      expect(await order(cashIn(x), k)).toMatchObject({ status: 201, replay: 'true', body: fx.body });
+      // place_order reusa la de 3 min…
       reused = await order(cashIn(u), k);
       expect(reused).toMatchObject({ status: 201, replay: 'false' });
       expect(reused.body.id).not.toBe(first.body.id);
-      // …y la limpieza la borra (la de w; la de u acaba de renovarse y ya no es candidata).
+      // …y la limpieza borra la de 4 min (la de u acaba de renovarse y ya no es candidata).
       const c = await candidates();
       expect(c).toContain(w);
       expect(c).not.toContain(u);
       expect(c).not.toContain(v);
+      expect(c).not.toContain(x);
       expect(await cleanup(w)).toBe(1);
       expect(await rows(w, k)).toBe(0);
       expect(await cleanup(v)).toBe(0);
@@ -197,12 +214,13 @@ describe('el vencimiento lo decide place_order con created_at y app.idempotency_
     expect(await cleanup(u)).toBe(0);
     expect(await rows(u, k)).toBe(1);
     expect(await ordersOf(u)).toBe(2);
+    expect(await ordersOf(x)).toBe(1);
   });
 
   // CR-1 de la revisión: la limpieza corre con su propio now(), posterior. Si borrara la clave apenas
-  // vence, un request que empezó con la clave viva y espera la barrera de despliegue (D-23) la
+  // se vuelve reclamable, un request que empezó con la clave viva y espera la barrera de despliegue (D-23) la
   // encontraría borrada al llegar al lock y crearía otra orden.
-  it('2b. la clave vence mientras el request espera la barrera de despliegue y la limpieza corre en ese rato → no la borra: el request da replay y no hay otra orden', async () => {
+  it('2b. la clave se vuelve reclamable mientras el request espera la barrera de despliegue y la limpieza corre en ese rato → no la borra: el request da replay y no hay otra orden', async () => {
     const u = await newUser('ttl-barrera');
     const k = key();
     const first = await order(cashIn(u), k);
@@ -220,11 +238,11 @@ describe('el vencimiento lo decide place_order con created_at y app.idempotency_
         if (w.rowCount) break;
         await new Promise((r) => setTimeout(r, 5));
       }
-      // Viva para el now() del request; vencida por reloj 1 s después.
-      await admin.query("UPDATE app.idempotency_keys SET created_at = now() - app.idempotency_ttl() + interval '1 second' WHERE userid = $1 AND key = $2", [u, k]);
+      // No reclamable para el now() del request; reclamable por reloj 1 s después.
+      await admin.query("UPDATE app.idempotency_keys SET created_at = now() - app.idempotency_reclaim_age() + interval '1 second' WHERE userid = $1 AND key = $2", [u, k]);
       await admin.query('SELECT pg_sleep(1.5)');
       expect((await admin.query<{ expired: boolean }>(
-        'SELECT now() > created_at + app.idempotency_ttl() AS expired FROM app.idempotency_keys WHERE userid = $1 AND key = $2', [u, k])).rows[0].expired).toBe(true);
+        'SELECT now() > created_at + app.idempotency_reclaim_age() AS expired FROM app.idempotency_keys WHERE userid = $1 AND key = $2', [u, k])).rows[0].expired).toBe(true);
       // La limpieza corre mientras el request espera: el lock de usuario está libre, pero no la borra.
       expect(await candidates()).not.toContain(u);
       expect(await cleanup(u)).toBe(0);
@@ -321,6 +339,131 @@ describe('el vencimiento lo decide place_order con created_at y app.idempotency_
     expect(await rows(u, k)).toBe(1);
     expect(await ordersOf(u)).toBe(2);
     expect(await candidates()).not.toContain(u);   // la fila renovada ya no está vencida: a la limpieza no le queda nada
+  });
+});
+
+// Issue #38. El lock del usuario serializa en el orden en que se obtiene, no en el de los now(): un
+// reintento R1 que empezó con la clave dentro del plazo (t₁ < c + 24 h) y se demora antes del lock,
+// y un request posterior R2 (c + 24 h < t₂) que toma el lock primero. R2 no puede reclamar la clave
+// (lo hace recién desde c + 24 h + 1 min), así que R1 recibe la respuesta original.
+describe('10–11. un request posterior que toma el lock primero no reclama la clave de un reintento que empezó dentro del plazo', () => {
+  async function lateRetry(r2hash: string) {
+    const u = await newUser('ttl-reintento');
+    const k = 'k';
+    const first = await placeOrderDb(pool, { userid: u, key: k, hash: 'h1', side: 'CASH_IN', type: 'MARKET', instrumentid: ars, amount: '1.00' });
+    expect(first).toMatchObject({ status: 201, replay: false });
+
+    const settle = (p: Promise<PlaceResult>) => p.then((ok) => ({ ok }), (e: { code?: string }) => ({ err: e.code }));
+    const a = await admin.connect();
+    const r1 = await apiClient();
+    const r2 = await apiClient();
+    try {
+      // R1 empieza (su now() queda fijado en t₁) y se demora; R2 empieza después, en t₂.
+      await r1.query('BEGIN');
+      const t1 = (await r1.query<{ t: string }>('SELECT now()::text AS t')).rows[0].t;
+      await r2.query('BEGIN');
+      const t2 = (await r2.query<{ t: string }>('SELECT now()::text AS t')).rows[0].t;
+      // La clave pasa el plazo entre los dos: c + 24 h es el punto medio entre t₁ y t₂.
+      await admin.query(
+        `UPDATE app.idempotency_keys SET created_at = $3::timestamptz + ($4::timestamptz - $3::timestamptz) / 2 - app.idempotency_ttl()
+          WHERE userid = $1 AND key = $2`, [u, k, t1, t2]);
+      expect((await admin.query<{ ok: boolean }>(
+        `SELECT $3::timestamptz < created_at + app.idempotency_ttl() AND created_at + app.idempotency_ttl() < $4::timestamptz AS ok
+           FROM app.idempotency_keys WHERE userid = $1 AND key = $2`, [u, k, t1, t2])).rows[0].ok).toBe(true);
+
+      // Barrera: con el lock del usuario tomado, R2 llega a la cola primero y R1 detrás. Al
+      // soltarlo, R2 decide primero; si crea, retiene el lock hasta su COMMIT y R1 lo espera.
+      await a.query('BEGIN');
+      await a.query(userLock, [u]);
+      const pending2 = settle(placeOrderDb(r2, { userid: u, key: k, hash: r2hash, side: 'CASH_IN', type: 'MARKET', instrumentid: ars, amount: r2hash === 'h1' ? '1.00' : '2.00' }));
+      await waiting(u, 1);
+      // R1, el reintento del depósito original (mismo body).
+      const pending1 = settle(placeOrderDb(r1, { userid: u, key: k, hash: 'h1', side: 'CASH_IN', type: 'MARKET', instrumentid: ars, amount: '1.00' }));
+      await waiting(u, 2);
+      await a.query('COMMIT');
+      const second = await pending2;
+      await r2.query('COMMIT');   // si R2 falló, COMMIT revierte
+      const retried = await pending1;
+      await r1.query('COMMIT');
+      return { u, k, first, second, retried };
+    } finally {
+      await a.query('ROLLBACK').catch(() => undefined);
+      a.release();
+      await r1.query('ROLLBACK').catch(() => undefined);
+      await r2.query('ROLLBACK').catch(() => undefined);
+      await r1.end();
+      await r2.end();
+    }
+  }
+
+  it('10. R2 con otro body → R2 recibe 422 IDEMPOTENCY_MISMATCH y R1 el replay original; la fila y las órdenes no cambian', async () => {
+    const { u, k, first, second, retried } = await lateRetry('h2');
+    expect(retried).toEqual({ ok: { status: 201, replay: true, order_id: first.order_id, body: first.body } });
+    expect(second).toEqual({ err: 'APP03' });
+    expect(await row(u, k)).toMatchObject({ request_hash: 'h1', order_id: first.order_id, http_status: 201, response_body: first.body });
+    expect(await ordersOf(u)).toBe(1);
+  });
+
+  it('11. R2 con el mismo body → los dos reciben el replay de la orden original: R1 la de su propia orden', async () => {
+    const { u, k, first, second, retried } = await lateRetry('h1');
+    expect(retried).toEqual({ ok: { status: 201, replay: true, order_id: first.order_id, body: first.body } });
+    expect(second).toEqual({ ok: { status: 201, replay: true, order_id: first.order_id, body: first.body } });
+    expect(await row(u, k)).toMatchObject({ request_hash: 'h1', order_id: first.order_id });
+    expect(await ordersOf(u)).toBe(1);
+  });
+});
+
+describe('12. la limpieza no borra una clave que place_order todavía trata como viva', () => {
+  it('borra recién un minuto después de que la clave es reclamable, en el borde exacto y con el now() de su transacción', async () => {
+    const u = await newUser('ttl-limpieza-borde');
+    const k = 'k';
+    const first = await placeOrderDb(pool, { userid: u, key: k, hash: 'h1', side: 'CASH_IN', type: 'MARKET', instrumentid: ars, amount: '1.00' });
+    const c = await apiClient();
+    /** En una transacción del rol api: envejece la clave desde su now(), corre la limpieza y, si sigue, place_order. Revierte. */
+    const atAge = async (expr: string) => {
+      await c.query('BEGIN');
+      try {
+        const t0 = (await c.query<{ t0: string }>('SELECT now()::text AS t0')).rows[0].t0;
+        await ageFrom(u, k, t0, expr);
+        const candidate = (await c.query('SELECT 1 FROM app.cleanup_candidates() WHERE userid = $1', [u])).rowCount === 1;
+        const deleted = (await c.query<{ n: number }>('SELECT app.cleanup_idempotency($1) AS n', [u])).rows[0].n;
+        const placed = deleted ? null
+          : await placeOrderDb(c, { userid: u, key: k, hash: 'h1', side: 'CASH_IN', type: 'MARKET', instrumentid: ars, amount: '1.00' });
+        return { candidate, deleted, replay: placed?.replay ?? null };
+      } finally {
+        await c.query('ROLLBACK');
+      }
+    };
+    try {
+      // Hasta el umbral de reclamo, place_order da replay y la limpieza no la toca.
+      expect(await atAge('app.idempotency_ttl()')).toEqual({ candidate: false, deleted: 0, replay: true });
+      expect(await atAge('app.idempotency_reclaim_age()')).toEqual({ candidate: false, deleted: 0, replay: true });
+      // Reclamable (place_order crea, replay false), pero todavía no se borra: hasta 24 h + 2 min exactos.
+      expect(await atAge("app.idempotency_reclaim_age() + interval '1 microsecond'")).toEqual({ candidate: false, deleted: 0, replay: false });
+      expect(await atAge('app.idempotency_purge_age()')).toEqual({ candidate: false, deleted: 0, replay: false });
+      // 1 µs después, la borra.
+      expect(await atAge("app.idempotency_purge_age() + interval '1 microsecond'")).toEqual({ candidate: true, deleted: 1, replay: null });
+    } finally {
+      await c.end();
+    }
+    expect(await row(u, k)).toMatchObject({ request_hash: 'h1', order_id: first.order_id });   // todo se revirtió
+  });
+
+  it('los márgenes (reclamo − plazo y limpieza − reclamo) superan el statement_timeout del rol api', async () => {
+    const c = await apiClient();
+    let timeout: string;
+    try {
+      timeout = (await c.query<{ statement_timeout: string }>('SHOW statement_timeout')).rows[0].statement_timeout;
+    } finally {
+      await c.end();
+    }
+    expect(timeout).toBe('5s');
+    const r = (await admin.query<{ reclaim: string; purge: string; ok: boolean }>(
+      `SELECT (app.idempotency_reclaim_age() - app.idempotency_ttl())::text AS reclaim,
+              (app.idempotency_purge_age() - app.idempotency_reclaim_age())::text AS purge,
+              app.idempotency_reclaim_age() - app.idempotency_ttl() > $1::interval
+                AND app.idempotency_purge_age() - app.idempotency_reclaim_age() > $1::interval AS ok`, [timeout])).rows[0];
+    expect(r).toEqual({ reclaim: '00:01:00', purge: '00:01:00', ok: true });
   });
 });
 

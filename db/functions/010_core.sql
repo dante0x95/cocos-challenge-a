@@ -45,13 +45,27 @@ LANGUAGE sql STABLE SET search_path = pg_catalog, app, pg_temp AS $$
 $$;
 
 -- Plazo de vida de una clave de idempotencia (D-19): settings.idempotency_ttl, 24 h por defecto.
--- Única fuente del plazo. Una clave está vencida si created_at < now() - app.idempotency_ttl(),
--- con el now() del inicio de la transacción. Lo aplican place_order (reusa una clave vencida al
--- reclamarla, bajo el lock) y la limpieza (recupera el espacio un minuto después:
--- app.idempotency_purge_age(), en 040_ops.sql).
+-- Única fuente del plazo. Es el replay garantizado: un request que empieza (now() del inicio de
+-- su transacción) a más tardar en created_at + app.idempotency_ttl() recibe la respuesta original
+-- con el mismo body, o 422 con otro. De este plazo salen los otros dos umbrales:
+-- app.idempotency_reclaim_age() (abajo) y app.idempotency_purge_age() (040_ops.sql).
 CREATE OR REPLACE FUNCTION app.idempotency_ttl() RETURNS interval
 LANGUAGE sql STABLE SET search_path = pg_catalog, app, pg_temp AS $$
   SELECT s.idempotency_ttl FROM app.settings s
+$$;
+
+-- Edad desde la que place_order puede reclamar una clave (D-19, issue #38): el plazo más un
+-- minuto. Única fuente de ese margen. Se reclama si created_at < now() - reclaim_age, con el now()
+-- del inicio de la transacción. El lock del usuario serializa en el orden en que se obtiene, no en
+-- el de los now(): sin margen, un request posterior que toma el lock primero podía reclamar la
+-- clave (y sobrescribir la respuesta original) antes de que la usara un reintento que empezó con
+-- la clave viva, que recibía 422 en vez del replay. Una escritura dura a lo sumo el
+-- statement_timeout del rol api (5 s, D-20): un request que empezó a más tardar en
+-- created_at + ttl termina antes de created_at + ttl + 1 min, así que ningún reclamo se le adelanta.
+-- Entre ttl y ttl + 1 min la clave sigue respondiendo como viva (replay o 422).
+CREATE OR REPLACE FUNCTION app.idempotency_reclaim_age() RETURNS interval
+LANGUAGE sql STABLE SET search_path = pg_catalog, app, pg_temp AS $$
+  SELECT app.idempotency_ttl() + interval '1 minute'
 $$;
 
 -- Barrera de despliegue (D-24). Toda escritura la toma en modo compartido ANTES del lock de

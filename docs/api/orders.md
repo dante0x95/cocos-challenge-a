@@ -65,7 +65,7 @@ Una orden `REJECTED` también es `201`: la orden se grabó y su estado lo dice.
 
 Un replay devuelve la respuesta del request original, no el estado actual de la orden: si la orden se canceló después, el replay sigue diciendo `NEW` y `cancel_reason: null`. El estado actual está en `GET /orders/:id`. Una clave grabada antes de que existiera `cancel_reason` devuelve su respuesta original, sin ese campo, hasta que vence (24 h).
 
-Una clave vence exactamente 24 h después del primer request que la usó, lo decida o no el job de limpieza. Un reintento con la misma clave 24 h después **crea una orden nueva** (`201`, `Idempotent-Replay: false`), con el mismo body o con otro: la clave pasa a identificar esa orden y la anterior sigue existiendo. No es una referencia única de depósito ([D-19](../decisiones.md#d-19)).
+Un reintento con la misma clave y el mismo body tiene el replay **garantizado durante 24 h** desde el primer request que la usó (cuenta cuándo empieza el reintento en la base, no cuándo termina). La clave se puede **reutilizar desde 24 h + 1 min**, lo decida o no el job de limpieza; en el minuto intermedio sigue respondiendo como viva (replay, o `422` con otro body). Ese minuto asegura que un reintento que empezó dentro de las 24 h reciba su respuesta aunque otro request con la misma clave llegue justo después ([D-19](../decisiones.md#d-19)). Un request con la misma clave desde 24 h + 1 min **crea una orden nueva** (`201`, `Idempotent-Replay: false`), con el mismo body o con otro: la clave pasa a identificar esa orden y la anterior sigue existiendo. No es una referencia única de depósito ([D-19](../decisiones.md#d-19)).
 
 ### Errores
 

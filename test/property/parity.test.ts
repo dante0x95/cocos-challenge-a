@@ -240,9 +240,8 @@ describe(`tope por orden cerca de 10¹⁵ ARS (${Number(process.env.PARITY_CAP_C
       const size = BigInt([() => int(1, 9), () => int(10, 100_000), () => int(100_001, MAX_SIZE)][int(0, 2)]());
       const edge = CAP / size;
       const priceCents = rnd() < 0.5 ? edge + BigInt(int(-1, 1)) : big(edge / 2n, edge + edge / 2n);
-      // Por amount, el resto queda por debajo de medio precio: floor(amount / price) en numeric
-      // redondea el cociente a 16 dígitos (issue #10), y acá se prueba el tope, no esa división.
-      const amountCents = size * priceCents + big(0n, priceCents / 2n);
+      // Por amount, cualquier resto: la cantidad sigue siendo `size` (D-11, división entera).
+      const amountCents = size * priceCents + big(0n, priceCents - 1n);
       const iid = await instrument(`CAP${c}`, priceCents);
 
       // Estado del usuario: sin nada (REJECTED) o con lo necesario para operar (FILLED o NEW). Una

@@ -68,11 +68,16 @@ describe('la cantidad por monto es la división entera en centavos', () => {
     expect((await buyLimit(u, 'b', '999999999999999.99', '500000000000000.00')).body.size).toBe('1');
   });
 
-  it('amount > 10¹⁵ → 422 LIMIT antes de dividir, sin 22003 ni orden', async () => {
+  // El tope de D-14 es sobre el importe (size × price), no sobre el monto: un amount por encima de
+  // 10¹⁵ da una orden válida si el importe entra. La división es sobre numeric, así que un amount
+  // enorme no desborda: la cantidad se acota antes del cast.
+  it('amount > 10¹⁵: sin 22003; 400 si la cantidad supera 2³¹ − 1, la orden si el importe entra', async () => {
     const u = await newUser('d11-cap');
-    await expect(buyLimit(u, 'c', '1000000000000000.01', '0.01')).rejects.toMatchObject({ code: 'APP05' });
-    await expect(buyLimit(u, 'd', '99999999999999999999999999.00', '1.00')).rejects.toMatchObject({ code: 'APP05' });
+    await expect(buyLimit(u, 'c', '1000000000000000.01', '0.01')).rejects.toMatchObject({ code: 'APP02' });
+    await expect(buyLimit(u, 'd', '99999999999999999999999999.00', '1.00')).rejects.toMatchObject({ code: 'APP02' });
     expect(await ordersOf(u)).toBe(0);
+    const ok = await buyLimit(u, 'e', '1999999999999999.99', '1000000000000000.00');
+    expect(ok.body).toMatchObject({ size: '1', amount: '1000000000000000.00' });
   });
 
   it('amount que da más de 2³¹ − 1 acciones (10¹⁵ a 0,01) → 400 APP02 como siempre, no 22003', async () => {

@@ -1,0 +1,43 @@
+# Un PR pasa a ready for review solo con codex/review en verde (CONTRIBUTING.md). GitHub no
+# deja bloquear ese paso con una regla: si se marca ready antes, scripts/ready-gate.sh lo
+# devuelve a borrador y falla. El merge en main lo bloquea aparte el ruleset, que exige
+# codex/review.
+# pull_request_target corre la versión de este archivo que está en la rama base (main), y el
+# checkout es el de esa rama (github.sha), así que un PR no puede ablandar su propia gate: no
+# se hace checkout ni se ejecuta nada del PR. test/unit/ready-gate.test.ts prueba el script y
+# este archivo.
+name: ready-gate
+
+on:
+  pull_request_target:
+    types: [opened, reopened, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: write
+  statuses: read
+
+# De a una corrida por PR, sin cancelar la que está corriendo: cada una decide sobre el head y
+# el status vigentes, así que una corrida atrasada no pisa a una más nueva.
+concurrency:
+  group: ready-gate-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  codex-review-before-ready:
+    if: ${{ !github.event.pull_request.draft }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: codex/review en verde, o de vuelta a borrador
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_NODE_ID: ${{ github.event.pull_request.node_id }}
+          EVENT_SHA: ${{ github.event.pull_request.head.sha }}
+        run: scripts/ready-gate.sh

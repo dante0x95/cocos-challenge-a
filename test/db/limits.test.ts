@@ -70,6 +70,25 @@ async function richUser(cashCents: bigint, iid = inst): Promise<number> {
   return u;
 }
 
+/** Espera hasta que alguna sesión que cumpla `where` esté bloqueada en un advisory lock. */
+async function waitingOnLock(where: string, arg: unknown, failed: () => unknown): Promise<void> {
+  for (;;) {
+    const err = failed();
+    if (err) throw err;
+    const w = await admin.query(
+      `SELECT 1 FROM pg_stat_activity WHERE ${where} AND wait_event_type = 'Lock' AND wait_event = 'advisory'`, [arg]);
+    if (w.rowCount) return;
+    await new Promise((r) => setTimeout(r, 5));
+  }
+}
+
+/** Cliente api; cada sentencia es su propia transacción. */
+async function session() {
+  const c = await apiClient();
+  const pid = (await c.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows[0].pid;
+  return { c, pid };
+}
+
 /** LIMIT `NEW` escrita directo como administrador (historia heredada): la API no la validó. */
 const legacyNew = async (u: number, iid: number, side: 'BUY' | 'SELL', size: number, price: string) =>
   (await admin.query<{ id: string }>(
@@ -227,25 +246,6 @@ describe('una cancelación del usuario no se confunde con una por LIMIT', () => 
 // Dos conexiones reales y el lock del usuario como barrera (nunca setTimeout para coordinar).
 describe('concurrencia: la decisión de D-14 se toma con el estado leído bajo el lock', () => {
   const userLock = "SELECT pg_advisory_xact_lock(hashtext('user-balance'), $1)";
-
-  /** Espera hasta que alguna sesión que cumpla `where` esté bloqueada en un advisory lock. */
-  async function waitingOnLock(where: string, arg: unknown, failed: () => unknown): Promise<void> {
-    for (;;) {
-      const err = failed();
-      if (err) throw err;
-      const w = await admin.query(
-        `SELECT 1 FROM pg_stat_activity WHERE ${where} AND wait_event_type = 'Lock' AND wait_event = 'advisory'`, [arg]);
-      if (w.rowCount) return;
-      await new Promise((r) => setTimeout(r, 5));
-    }
-  }
-
-  /** Cliente api; cada sentencia es su propia transacción. */
-  async function session() {
-    const c = await apiClient();
-    const pid = (await c.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows[0].pid;
-    return { c, pid };
-  }
 
   it('un crédito confirmado mientras la ejecución espera el lock la vuelve inválida → LIMIT, CANCELLED, cash sin el importe', async () => {
     const start = CAP_CENTS - 500_000_000n;   // la SELL entra justo: el cash quedaría en 10¹⁵
@@ -419,17 +419,48 @@ describe('tope por orden: el importe no supera 10¹⁵ ARS en ningún estado', (
   });
 
   describe('orden de evaluación y efectos del 422', () => {
-    it('con el lock del usuario tomado por otra sesión, una LIMIT por size fuera del tope responde 422 enseguida, no 503', async () => {
-      const u = await newUser('cap-lock');
-      const a = await apiClient();
+    // D-17 y D-19: si la clave existe se lee bajo el lock, así que una LIMIT fuera del tope espera
+    // el lock como cualquier escritura. La limpieza de claves vencidas también lo toma: la borra
+    // mientras el request espera y el request la reclama recién → 422, sin orden ni clave.
+    it('una clave vencida que se borra mientras la LIMIT fuera del tope espera el lock → 422 LIMIT, sin orden nueva ni clave', async () => {
+      const u = await richUser(1_000_000n, big);
+      const req = { userid: u, key: 'old', side: 'SELL', type: 'LIMIT', instrumentid: big, size: 1000, limit: '9500000000000.00' } as const;
+      const id = await legacyNew(u, big, 'SELL', 1000, '9500000000000.00');
+      await admin.query(
+        `INSERT INTO app.idempotency_keys (userid, key, request_hash, order_id, http_status, response_body, created_at)
+         VALUES ($1, 'old', 'h', $2, 201, '{}', now() - interval '25 hours')`, [u, id]);
+      const before = await ordersOf(u);
+      const a = await admin.connect();
+      const b = await session();
       try {
         await a.query('BEGIN');
         await a.query("SELECT pg_advisory_xact_lock(hashtext('user-balance'), $1)", [u]);
-        const t0 = Date.now();
-        await expect(limit(u, 'l', 'BUY', inst, 2, ONE_E15)).rejects.toMatchObject({ code: 'APP05' });
-        expect(Date.now() - t0).toBeLessThan(1000);   // lock_timeout es 2 s: no lo esperó
-        await a.query('ROLLBACK');
-      } finally { await a.end(); }
+        await a.query("DELETE FROM app.idempotency_keys WHERE userid = $1 AND key = 'old'", [u]);
+        let failed: unknown = null;
+        const p = placeOrder(b.c, req).catch((e) => { failed = e; throw e; });
+        await waitingOnLock('pid = $1', b.pid, () => failed);
+        await a.query('COMMIT');
+        await expect(p).rejects.toMatchObject({ code: 'APP05' });
+        expect(await ordersOf(u)).toBe(before);
+        expect((await admin.query("SELECT 1 FROM app.idempotency_keys WHERE userid = $1 AND key = 'old'", [u])).rowCount).toBe(0);
+      } finally { a.release(); await b.c.end(); }
+    });
+
+    it('otra transacción reclamó la clave con una orden válida y no confirmó: la LIMIT fuera del tope la espera y responde conflicto de clave', async () => {
+      const u = await newUser('cap-pending-key');
+      const a = await session();
+      const b = await session();
+      try {
+        await a.c.query('BEGIN');
+        const ok = await placeOrder(a.c, { userid: u, key: 'k', side: 'BUY', type: 'LIMIT', instrumentid: inst, size: 1, limit: '5000.00' });
+        expect(ok.body.status).toBe('REJECTED');
+        let failed: unknown = null;
+        const p = placeOrder(b.c, { userid: u, key: 'k', hash: 'otro body', side: 'BUY', type: 'LIMIT', instrumentid: inst, size: 2, limit: ONE_E15 }).catch((e) => { failed = e; throw e; });
+        await waitingOnLock('pid = $1', b.pid, () => failed);
+        await a.c.query('COMMIT');
+        await expect(p).rejects.toMatchObject({ code: 'APP03' });
+        expect(await statusAndCount(u)).toEqual([{ status: 'REJECTED', n: '1' }]);
+      } finally { await a.c.end(); await b.c.end(); }
     });
 
     it('amount cuyo cociente no entra en bigint, LIMIT y MARKET por HTTP → 400, sin orden, y la clave sigue libre', async () => {

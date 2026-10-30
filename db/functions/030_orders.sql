@@ -49,7 +49,7 @@ DECLARE
   is_cash     boolean := p_side IN ('CASH_IN','CASH_OUT');
   v_size      bigint;
   v_qty       numeric;
-  over_cap    boolean := false;   -- LIMIT fuera del tope con una clave existente: se decide tras el replay
+  over_cap    boolean := false;   -- LIMIT fuera del tope: 422 después del bloque de idempotencia
 BEGIN
   PERFORM app.deploy_barrier();
 
@@ -101,15 +101,11 @@ BEGIN
         RAISE EXCEPTION 'una orden LIMIT requiere precio > 0 con a lo sumo 2 decimales' USING ERRCODE = 'APP02';
       END IF;
       -- Tope por orden (D-14), antes de asignar `price` (numeric(18,2)): un precio o un importe por
-      -- encima de 10^15 ARS nunca podría ejecutarse. Con la clave libre responde sin esperar el
-      -- lock. Si la clave ya existe, puede guardar la respuesta de una orden aceptada antes del
-      -- tope (D-19): la decisión espera al bloque de idempotencia, bajo el lock.
-      IF p_limit > 1e15 OR (p_size IS NOT NULL AND p_size::numeric * p_limit > 1e15) THEN
-        IF NOT EXISTS (SELECT 1 FROM app.idempotency_keys k WHERE k.userid = p_userid AND k.key = p_key) THEN
-          RAISE EXCEPTION 'el importe de la orden supera 10^15 ARS' USING ERRCODE = 'APP05';
-        END IF;
-        over_cap := true;
-      ELSE
+      -- encima de 10^15 ARS nunca podría ejecutarse. El 422 sale después del bloque de
+      -- idempotencia: una clave grabada antes del tope guarda la respuesta que dio la versión
+      -- anterior (D-19), y la clave se lee bajo el lock (D-17).
+      over_cap := p_limit > 1e15 OR (p_size IS NOT NULL AND p_size::numeric * p_limit > 1e15);
+      IF NOT over_cap THEN
         price := p_limit;
       END IF;
     END IF;

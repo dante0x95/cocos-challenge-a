@@ -193,6 +193,7 @@ describe('tope del costo por posición: 10¹⁷ ARS', () => {
       let failed: unknown = null;
       const second = placeOrder(b, { userid: u, key: 'b', side: 'BUY', type: 'MARKET', instrumentid: inst, size: 1 })
         .catch((e) => { failed = e; throw e; });
+      second.catch(() => undefined);   // rechaza a propósito, a veces antes de que el COMMIT vuelva: que no quede sin manejar
       for (;;) {   // la segunda ya espera el lock del usuario
         if (failed) throw failed;
         if ((await admin.query("SELECT 1 FROM pg_stat_activity WHERE pid = $1 AND wait_event_type = 'Lock' AND wait_event = 'advisory'", [pidB])).rowCount) break;

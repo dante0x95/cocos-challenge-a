@@ -1,0 +1,77 @@
+# Un entorno en el servidor de Lightsail (D-29): staging y production son dos proyectos de
+# Docker Compose con este mismo archivo (cocos-staging y cocos-production), cada uno en su
+# directorio (/opt/cocos/<entorno>), con su base, su volumen y sus secretos. Lo instala cada
+# deploy desde el commit del release (deploy/lightsail/remote.sh); no se usa a mano.
+#
+# Las variables vienen de release.env, que escribe el deploy: IMAGE (la imagen de GHCR por
+# digest), RELEASE (el SHA que GET /health devuelve) y ENVIRONMENT. Los secretos, de los .env
+# que genera deploy/lightsail/setup.sh (600, del usuario deploy): db.env, migrate.env y api.env.
+#
+#   db       Postgres 18 con un volumen. Sin puertos publicados y en una red interna, sin salida.
+#   migrate  el bootstrap (D-24). Solo con `docker compose run`, antes de cambiar de versión: es
+#            el único que recibe la credencial de administrador de la base.
+#   api      la API. Sin puertos publicados: la alcanza solo Caddy, por la red cocos-edge, con
+#            el nombre api-<entorno>.
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: 10m
+    max-file: "3"
+
+services:
+  db:
+    image: postgres:18
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_DB: cocos
+    env_file: [db.env]
+    volumes:
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d cocos"]
+      interval: 2s
+      retries: 30
+    logging: *logging
+
+  migrate:
+    image: ${IMAGE:?falta IMAGE}
+    # La imagen la baja el paso pull, con el token del job; acá no hay credenciales de GHCR.
+    pull_policy: never
+    profiles: [migrate]
+    command: ["node", "dist/db/bootstrap.js"]
+    env_file: [migrate.env]
+    logging: *logging
+
+  api:
+    image: ${IMAGE:?falta IMAGE}
+    pull_policy: never
+    restart: unless-stopped
+    environment:
+      PORT: 3000
+      PG_POOL_MAX: 10
+      PG_CONNECT_TIMEOUT_MS: 2000
+      # Limpieza de idempotencia dentro del proceso de la API (docs/api/operacion.md).
+      JOBS_ENABLED: "true"
+      RELEASE: ${RELEASE:?falta RELEASE}
+    env_file: [api.env]
+    networks:
+      default: {}
+      edge:
+        aliases: ["api-${ENVIRONMENT:?falta ENVIRONMENT}"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/health >/dev/null || exit 1"]
+      interval: 5s
+      retries: 10
+    logging: *logging
+
+networks:
+  default:
+    internal: true
+  edge:
+    name: cocos-edge
+    external: true
+
+volumes:
+  pgdata:

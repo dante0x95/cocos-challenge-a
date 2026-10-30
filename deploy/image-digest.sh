@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # La referencia inmutable de la imagen publicada (D-29, issue #13): <IMAGE>@sha256:<digest>, la
 # que despliegan staging y producción. La etiqueta <IMAGE>:<SHA> se puede sobrescribir: una
-# reejecución del CI del mismo commit reconstruye y vuelve a publicar, y la imagen base
-# (node:22-alpine) no garantiza los mismos bytes. Si producción resolviera la etiqueta después
-# de la aprobación, podría desplegar una imagen que su staging no probó; con el digest despliega
-# exactamente la que construyó y publicó su corrida.
+# reejecución del deploy del mismo release, u otro release del mismo commit, reconstruye y vuelve
+# a publicar, y la imagen base (node:22-alpine) no garantiza los mismos bytes. Si producción
+# resolviera la etiqueta después de staging, podría desplegar una imagen que su staging no probó;
+# con el digest despliega exactamente la que construyó y publicó su corrida.
 #
-#   IMAGE=ghcr.io/<repo> SHA=<commit> deploy/fly/image-digest.sh
+#   IMAGE=ghcr.io/<repo> SHA=<commit> deploy/image-digest.sh
 #       Después de `docker push "$IMAGE:$SHA"`: escribe ref=<IMAGE>@sha256:<64 hex> en
 #       $GITHUB_OUTPUT (si está definido) y en stdout. Falla si no hay un digest de ese repo.
 #

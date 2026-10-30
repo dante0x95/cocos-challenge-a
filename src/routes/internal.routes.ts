@@ -57,8 +57,8 @@ export function internalRouter(token: string | undefined): Router {
   return r;
 }
 
-// GET /health — lo usan el healthcheck de docker compose y el deploy en Fly (D-29): el check de
-// las máquinas nuevas (bluegreen) y el workflow, que lee `release` antes y después de desplegar.
+// GET /health — lo usan el healthcheck de docker compose (también el del servidor, que da por
+// buena la API nueva) y el workflow de deploy (D-29), que exige `release` igual al commit desplegado.
 // `release` es el commit desplegado (RELEASE); va también en el 503, para saber qué atiende.
 export function healthRouter(release: string | undefined): Router {
   const r = Router();

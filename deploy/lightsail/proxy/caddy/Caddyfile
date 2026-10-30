@@ -1,0 +1,20 @@
+# HTTPS automático sin dominio propio (D-29): sslip.io resuelve <ip con guiones>.sslip.io a esa
+# IP, y Caddy pide el certificado de cada nombre (HTTP-01 y TLS-ALPN, por los puertos 80 y 443).
+# El HTTP plano redirige a HTTPS.
+#
+# lb_try_duration: mientras el deploy recrea el contenedor de la API (unos segundos), la
+# conexión falla; Caddy reintenta hasta 30 s en vez de responder 502 y la request espera.
+
+18-227-203-30.sslip.io {
+	reverse_proxy api-production:3000 {
+		lb_try_duration 30s
+		lb_try_interval 250ms
+	}
+}
+
+staging.18-227-203-30.sslip.io {
+	reverse_proxy api-staging:3000 {
+		lb_try_duration 30s
+		lb_try_interval 250ms
+	}
+}

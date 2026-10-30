@@ -4,7 +4,7 @@
 # job gate de .github/workflows/deploy.yml al publicarse un release; test/unit/deploy-workflow.test.ts
 # lo ejercita con `gh` y `sleep` simulados y un repositorio git temporal.
 #
-#   TAG=vX.Y.Z SHA=<commit> REPO=<owner/repo> deploy/fly/release-gate.sh
+#   TAG=vX.Y.Z SHA=<commit> REPO=<owner/repo> deploy/release-gate.sh
 #       Frena (sale con 1, con el motivo) si:
 #       - el tag no es vX.Y.Z: v seguida de tres números sin ceros a la izquierda, sin sufijos
 #         (v1.2.3 sí; 1.2.3, v1.2, v01.2.3 y v1.2.3-rc.1 no);

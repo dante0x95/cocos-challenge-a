@@ -19,8 +19,8 @@
 //    (app.cancel_unbacked, bajo el lock del usuario) y se informa.
 // Los cuatro pasos van en UNA transacción, con la barrera de despliegue en modo exclusivo
 // (D-24): un escritor nunca ve el esquema nuevo con las funciones anteriores, y si algo falla,
-// también la verificación del paso 4, no queda nada aplicado (es el release_command del deploy,
-// D-29: un release rechazado no puede dejar la base cambiada).
+// también la verificación del paso 4, no queda nada aplicado (el deploy lo corre antes de cambiar
+// de versión, D-29: un release rechazado no puede dejar la base cambiada).
 import { createHash } from 'node:crypto';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';

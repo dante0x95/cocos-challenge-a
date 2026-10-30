@@ -63,6 +63,8 @@ Un replay devuelve la respuesta del request original, no el estado actual de la 
 
 ### Errores
 
+**Regla general.** Cualquier `5xx`, y cualquier request que se quedó sin respuesta (timeout del cliente, corte de red), es **resultado desconocido**: la orden pudo grabarse. Se reintenta con la **misma** `Idempotency-Key`, nunca con una nueva: si la orden existe, el replay la devuelve con `Idempotent-Replay: true`; si no, se crea una sola vez ([D-19](../decisiones.md#d-19), [D-20](../decisiones.md#d-20)).
+
 | Código | `error` | Cuándo | ¿Se grabó? |
 |---|---|---|---|
 | `400` | `BAD_REQUEST` | falta la clave, JSON inválido, campos o combinaciones inválidas, usuario o instrumento inexistente, moneda como activo, monto que no alcanza para una acción o que da más de 2³¹ − 1 acciones | no |
@@ -70,6 +72,8 @@ Un replay devuelve la respuesta del request original, no el estado actual de la 
 | `422` | `IDEMPOTENCY_MISMATCH` | misma clave con otro body | no |
 | `422` | `LIMIT` | el resultado saldría de ±10¹⁵ ARS o 2⁶² acciones, o el importe de la orden (`size × price`) supera 10¹⁵ ARS ([D-14](../decisiones.md#d-14)) | no |
 | `503` | `LOCK_TIMEOUT` · `TIMEOUT` · `VERSION_MISMATCH` | el usuario tenía otra operación en curso, se venció el tiempo (de la escritura o de la espera por una conexión con la base), o hay un despliegue en curso | no, o resultado desconocido: **reintentar con la misma clave** ([D-20](../decisiones.md#d-20)) |
+| `503` | `CONNECTION_LOST` | la conexión con la base se cortó (reinicio de Postgres, failover, red), antes o después de enviar la escritura | resultado desconocido: **reintentar con la misma clave** |
+| `500` | `INTERNAL` | un error no previsto | resultado desconocido: **reintentar con la misma clave** |
 
 Todos los errores responden `{ "error": "...", "message": "..." }`.
 

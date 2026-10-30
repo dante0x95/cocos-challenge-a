@@ -53,8 +53,7 @@ describe('corte antes del commit', () => {
       expect(pid).toBeDefined();
       await admin.query('SELECT pg_terminate_backend($1)', [pid]);
       const r = await pending;
-      expect(r).toMatchObject({ status: 503, retryAfter: '1', body: { error: 'CONNECTION_LOST' } });
-      expect(r.body.message).toMatch(/misma Idempotency-Key/);
+      expect(r).toEqual({ status: 503, replay: null, retryAfter: '1', body: { error: 'CONNECTION_LOST', message: CONNECTION_LOST_MESSAGE } });
       await a.query('ROLLBACK');
     } finally { await a.end(); }
     expect(await ordersOf(u)).toBe(0);

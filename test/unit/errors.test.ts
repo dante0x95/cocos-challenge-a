@@ -7,6 +7,7 @@ import { connectionLostPhase, errorHandler, fromDbError } from '../../src/http/e
 // El contrato con el cliente, escrito acá y no importado del código: dice que el resultado es
 // desconocido y cómo resolverlo (D-20). Nunca que la orden no se grabó.
 const CONNECTION_LOST_MESSAGE = 'la conexión con la base se cortó; el resultado es desconocido: reintentar con la misma Idempotency-Key';
+const INTERNAL_MESSAGE = 'error interno; el resultado es desconocido: reintentar con la misma Idempotency-Key';
 
 describe('fromDbError: tiempos de conexión del pool (D-20)', () => {
   // pg-pool 3.x no les pone código: se reconocen por el mensaje.
@@ -80,8 +81,8 @@ describe('fromDbError: cortes de conexión (issue #7)', () => {
 
   it('un error cualquiera sigue siendo 500 INTERNAL, pero con la misma guía para el cliente', () => {
     const e = fromDbError(Object.assign(new Error('division by zero'), { code: '22012' }));
-    expect({ status: e.status, code: e.code }).toEqual({ status: 500, code: 'INTERNAL' });
-    expect(e.message).toMatch(/misma Idempotency-Key/);
+    expect({ status: e.status, code: e.code, message: e.message, retryAfter: e.retryAfter })
+      .toEqual({ status: 500, code: 'INTERNAL', message: INTERNAL_MESSAGE, retryAfter: undefined });
     expect(connectionLostPhase(new Error('division by zero'))).toBeNull();
   });
 
@@ -111,6 +112,7 @@ describe('fromDbError: cortes de conexión (issue #7)', () => {
       const r2 = res();
       errorHandler(new Error('boom'), { path: '/orders' } as never, r2 as never, () => undefined);
       expect(r2.statusCode).toBe(500);
+      expect(r2.body).toEqual({ error: 'INTERNAL', message: INTERNAL_MESSAGE });
       expect(JSON.parse(logs.error[0])).toMatchObject({ level: 'error', requestId: 'rid' });
       expect(logs.error[0]).toContain('    at ');
     } finally { console.warn = origWarn; console.error = origErr; }
@@ -120,8 +122,9 @@ describe('fromDbError: cortes de conexión (issue #7)', () => {
 describe('docs/api/orders.md documenta la recuperación', () => {
   it('la tabla de errores tiene 500 INTERNAL y 503 CONNECTION_LOST con "reintentar con la misma clave", y la regla general', () => {
     const md = readFileSync(resolve(import.meta.dirname, '../../docs/api/orders.md'), 'utf8');
-    expect(md).toMatch(/\| `503` \| `CONNECTION_LOST` \|.*reintentar con la misma clave/);
-    expect(md).toMatch(/\| `500` \| `INTERNAL` \|.*reintentar con la misma clave/);
-    expect(md).toMatch(/\*\*Regla general\.\*\* Cualquier `5xx`/);
+    // La última columna (¿se grabó?) de cada fila dice resultado desconocido, no "no".
+    expect(md).toMatch(/^\| `503` \| `CONNECTION_LOST` \| [^|]+ \| resultado desconocido: \*\*reintentar con la misma clave\*\* \|$/m);
+    expect(md).toMatch(/^\| `500` \| `INTERNAL` \| [^|]+ \| resultado desconocido: \*\*reintentar con la misma clave\*\* \|$/m);
+    expect(md).toMatch(/\*\*Regla general\.\*\* Cualquier `5xx`, y cualquier request que se quedó sin respuesta [^.]*, es \*\*resultado desconocido\*\*: la orden pudo grabarse\. Se reintenta con la \*\*misma\*\* `Idempotency-Key`, nunca con una nueva/);
   });
 });

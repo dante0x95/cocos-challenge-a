@@ -21,6 +21,19 @@
 --               posible en historia heredada), qty queda negativa y costo = 0.
 --   qty ≤ 0 → costo = 0.
 -- Unidades: cash en centavos, costo en micro-ARS (10^-6 ARS), todo entero en numeric.
+--
+-- La versión anterior de c_state y read_portfolio devolvía cost_total como bigint. CREATE OR
+-- REPLACE no puede cambiar el tipo de una columna de salida (42P13): se borran antes, dentro de
+-- la transacción del bootstrap, y 090_privileges.sql vuelve a dar los permisos.
+DO $$
+DECLARE f text;
+BEGIN
+  FOREACH f IN ARRAY ARRAY['app.read_portfolio(int)', 'app.c_state(int)'] LOOP
+    IF pg_get_function_result(to_regprocedure(f)) LIKE '%cost_total bigint%' THEN
+      EXECUTE format('DROP FUNCTION %s', f);
+    END IF;
+  END LOOP;
+END $$;
 CREATE OR REPLACE FUNCTION app.c_state(p_userid int)
 RETURNS TABLE (kind smallint, instrumentid int, qty bigint, cost_total numeric, inconsistent boolean,
                cash_cents bigint, last_seq bigint, filled_count int)

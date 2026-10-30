@@ -49,10 +49,11 @@ git switch main && git pull
 fly auth login
 deploy/fly/setup.sh                                              # producción: apps, volumen, secretos y primer deploy
 CONFIG=deploy/fly/staging.toml DB_CONFIG=deploy/fly/staging-db.toml deploy/fly/setup.sh   # staging, igual
-fly tokens create deploy -a cocos-challenge-a-api -a cocos-challenge-a-staging | gh secret set FLY_API_TOKEN
+fly tokens create deploy -a cocos-challenge-a-staging | gh secret set FLY_API_TOKEN --env staging
+fly tokens create deploy -a cocos-challenge-a-api | gh secret set FLY_API_TOKEN --env production
 ```
 
-Y dos cosas en GitHub, una sola vez: el paquete `cocos-challenge-a` de GHCR tiene que ser **público** (Packages → el paquete → Package settings → Change visibility) para que Fly pueda bajar la imagen con `--image`; y el environment `production` (Settings → Environments) con **required reviewers**, que es lo que convierte el job `production` en una aprobación manual. Sin eso, producción se despliega sola detrás de staging.
+Y dos cosas en GitHub, una sola vez: el paquete `cocos-challenge-a` de GHCR tiene que ser **público** (Packages → el paquete → Package settings → Change visibility) para que Fly pueda bajar la imagen con `--image`; y los environments `staging` y `production` (Settings → Environments) creados antes de los dos `gh secret set --env` de arriba, con **required reviewers** en `production`, que es lo que convierte el job `production` en una aprobación manual. Sin eso, producción se despliega sola detrás de staging.
 
 - **Un deploy en rojo.** `gh run list --workflow deploy` y `gh run view <id> --log`. Si frenó antes de `flyctl deploy`, el commit no desciende del release que atiende (un re-run del `ci` de un commit viejo, por ejemplo): no cambió nada. Si falló el `release_command`, el bootstrap no dejó nada aplicado y la versión anterior sigue; `fly logs -a cocos-challenge-a-api` tiene el error. Si falló el check de `/health`, las máquinas nuevas no recibieron tráfico.
 - **Re-desplegar** es volver a correr el workflow de ese commit (`gh run rerun <id>`). Re-corre la construcción de la imagen (misma etiqueta) y las dos etapas; la aprobación de producción se vuelve a pedir.

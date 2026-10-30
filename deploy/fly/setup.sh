@@ -15,7 +15,9 @@
 # interno después: fly ssh console -a cocos-challenge-a-api -C 'printenv INTERNAL_TOKEN'.
 #
 # Después de esto, cada merge a main despliega solo (.github/workflows/deploy.yml), con el
-# secreto FLY_API_TOKEN del repo (fly tokens create deploy -a cocos-challenge-a-api).
+# secreto FLY_API_TOKEN de cada environment de GitHub: un token de deploy por app, porque un
+# token de deploy de Fly se acota a una sola (fly tokens create deploy -a <app>, que con el
+# CONFIG de staging es cocos-challenge-a-staging, y gh secret set FLY_API_TOKEN --env <entorno>).
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 

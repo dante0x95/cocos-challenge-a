@@ -194,6 +194,24 @@ describe('workflow de deploy', () => {
   });
 });
 
+// Un token de deploy de Fly se acota a una sola app (`fly tokens create deploy -a <app>`; un
+// segundo -a no suma la otra). Cada environment de GitHub lleva el token de su app en su propio
+// secreto FLY_API_TOKEN, que es el que leen los jobs de ese environment.
+describe('tokens de deploy', () => {
+  const docs = ['README.md', 'docs/api/operacion.md'];
+  const tokenLines = (f: string) => readFileSync(join(ROOT, f), 'utf8').split('\n').filter((l) => l.includes('fly tokens create deploy'));
+
+  it.each(docs)('%s: un token por app, guardado en el secreto del environment de esa app', (f) => {
+    const lines = tokenLines(f);
+    expect(lines).toHaveLength(2);
+    const app = (cfg: string) => readFileSync(join(ROOT, cfg), 'utf8').match(/^app = "(.+)"$/m)?.[1];
+    expect(lines.map((l) => l.trim())).toEqual([
+      `fly tokens create deploy -a ${app('deploy/fly/staging.toml')} | gh secret set FLY_API_TOKEN --env staging`,
+      `fly tokens create deploy -a ${app('fly.toml')} | gh secret set FLY_API_TOKEN --env production`,
+    ]);
+  });
+});
+
 // La cola del grupo de concurrencia, como la documenta GitHub: con cancel-in-progress la
 // corrida nueva cancela la que corre; si no, espera. Con queue: single (el valor por defecto)
 // puede haber un solo pendiente y el nuevo cancela al que esperaba; con queue: max esperan

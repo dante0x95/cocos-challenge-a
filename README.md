@@ -52,7 +52,8 @@ La primera vez, parado en `main` y con [`flyctl`](https://fly.io/docs/flyctl/ins
 ```bash
 deploy/fly/setup.sh                                                                        # producción
 CONFIG=deploy/fly/staging.toml DB_CONFIG=deploy/fly/staging-db.toml deploy/fly/setup.sh   # staging
-fly tokens create deploy -a cocos-challenge-a-api -a cocos-challenge-a-staging | gh secret set FLY_API_TOKEN
+fly tokens create deploy -a cocos-challenge-a-staging | gh secret set FLY_API_TOKEN --env staging
+fly tokens create deploy -a cocos-challenge-a-api | gh secret set FLY_API_TOKEN --env production
 ```
 
 Los ensayos (un merge que llega a producción, un deploy roto: bootstrap que falla, `/health` caído, re-run del CI de un commit viejo; y los datos de Postgres después de redesplegar la base) se corren a mano con `deploy/fly/drills.sh`; no corren en el CI. Operación: [`docs/api/operacion.md`](docs/api/operacion.md#desplegar-en-flyio).

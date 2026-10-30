@@ -1,57 +1,81 @@
-# Deploy continuo a Fly.io (D-29): cada commit de main con el check "ci" en verde se despliega.
-# Tres etapas, en orden (issue #13):
-#   image       construye la imagen una sola vez, la publica en GHCR etiquetada con el SHA y
-#               entrega su digest (deploy/fly/image-digest.sh): la referencia inmutable.
-#   staging     despliega esa imagen, por digest, en la app de staging, con el gate y el check
-#               de /health.
+# Deploy a Fly.io por versión (D-29, issue #30): solo al publicar un GitHub Release con tag
+# vX.Y.Z (gh release create vX.Y.Z --target main --generate-notes). Un merge a main corre solo
+# el CI. Cuatro etapas, en orden:
+#   gate        el tag es vX.Y.Z, apunta al commit del release, ese commit está en main y su
+#               check "ci" terminó en verde (deploy/fly/release-gate.sh). Si no, el job queda en
+#               rojo con el motivo y no se construye ni se despliega nada.
+#   image       construye la imagen una sola vez, la publica en GHCR etiquetada con el SHA y con
+#               la versión, y entrega su digest (deploy/fly/image-digest.sh): la referencia
+#               inmutable.
+#   staging     despliega esa imagen, por digest, en la app de staging, con el gate de ancestría
+#               y el check de /health.
 #   production  la misma imagen, por el mismo digest, en la app de producción, detrás del
 #               environment `production` de GitHub, que exige aprobación manual (Settings →
 #               Environments → required reviewers; no se puede fijar en este archivo).
 # fly.toml y deploy/fly/staging.toml corren el bootstrap como release_command antes de cambiar
 # de versión, y la estrategia bluegreen pasa el tráfico solo si /health responde 2xx. Antes de
-# cada deploy, el commit tiene que descender del release que atiende (un re-run del CI de un
-# commit viejo dispara este workflow igual que un merge); después, /health tiene que atenderlo.
-# Las dos verificaciones: deploy/fly/release-check.sh. Si la de después falla una vez
-# desplegado, el entorno vuelve solo a la imagen y el release anteriores (deploy/fly/rollback.sh)
-# y el job queda en rojo. La primera vez: deploy/fly/setup.sh.
-# No hay deploy manual desde acá: un commit que no pasó por el CI no se despliega.
+# cada deploy, el commit del release tiene que descender del que atiende el entorno (RELEASE es
+# siempre un SHA, no el tag): un re-run del workflow de un release viejo, o la aprobación tardía
+# de su producción, no pisa uno más nuevo; volver a desplegar el mismo commit pasa. Después,
+# /health tiene que atenderlo. Las dos verificaciones: deploy/fly/release-check.sh. Si la de
+# después falla una vez desplegado, el entorno vuelve solo a la imagen y el release anteriores
+# (deploy/fly/rollback.sh) y el job queda en rojo. La primera vez: deploy/fly/setup.sh.
+# No hay deploy manual desde acá: un commit sin release, fuera de main o sin el CI en verde no
+# se despliega.
 name: deploy
 
 on:
-  workflow_run:
-    workflows: [ci]
-    types: [completed]
-    branches: [main]
+  release:
+    types: [published]
 
 permissions:
   contents: read
 
 # Concurrencia por entorno, en cada job de deploy (staging y production), no del workflow: un
 # grupo del workflow lo retendría la corrida entera, también mientras production espera la
-# aprobación, y el staging de los merges siguientes no correría hasta que alguien aprobara (o
+# aprobación, y el staging de los releases siguientes no correría hasta que alguien aprobara (o
 # rechazara) el anterior. En cada entorno, un deploy a la vez, sin cortar uno en curso: cortarlo
 # a mitad del bootstrap no rompe nada (es una transacción), pero deja un deploy fallido que hay
 # que mirar. queue: max deja esperar a todos los pendientes, en orden de llegada: con la cola
-# por defecto (single) cada pendiente nuevo cancela al anterior, y un re-run del CI de un commit
-# viejo que llega mientras otro deploy corre cancelaría el deploy pendiente de un merge más
-# nuevo; después el gate frena al viejo y ese merge queda sin desplegar.
+# por defecto (single) cada pendiente nuevo cancela al anterior, y un re-run del workflow de un
+# release viejo que llega mientras otro deploy corre cancelaría el deploy pendiente de un release
+# más nuevo; después el gate frena al viejo y ese release queda sin desplegar.
 
+# El commit del release (en un evento release, github.sha es el commit del tag; un re-run
+# conserva el del evento original) y su tag.
 env:
-  SHA: ${{ github.event.workflow_run.head_sha }}
+  SHA: ${{ github.sha }}
+  TAG: ${{ github.event.release.tag_name }}
   IMAGE: ghcr.io/${{ github.repository }}
 
 jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      checks: read
+    steps:
+      # Con la historia completa: el gate busca el tag y origin/main.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.SHA }}
+          fetch-depth: 0
+      - name: Versión de main con ci en verde
+        run: deploy/fly/release-gate.sh
+        env:
+          REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
   image:
-    # Solo commits que llegaron a main con el CI en verde (un PR desde una rama llamada main no
-    # cuenta: su evento es pull_request).
-    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'
+    needs: gate
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
       contents: read
       packages: write
     steps:
-      # El commit que pasó el CI, no el último de main.
+      # El commit del release, no el último de main.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.SHA }}
@@ -60,10 +84,13 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Construir la imagen
-        run: docker build -t "$IMAGE:$SHA" .
+        run: docker build -t "$IMAGE:$SHA" -t "$IMAGE:$TAG" .
       - name: Publicar la imagen
         run: docker push "$IMAGE:$SHA"
-      # La etiqueta se puede sobrescribir (otra corrida del mismo commit); el digest no.
+      - name: Publicar la etiqueta de la versión
+        run: docker push "$IMAGE:$TAG"
+      # Las etiquetas se pueden sobrescribir (otra corrida del mismo release, u otro release del
+      # mismo commit); el digest no.
       - name: Digest de la imagen publicada
         id: digest
         run: deploy/fly/image-digest.sh

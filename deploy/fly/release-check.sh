@@ -4,9 +4,10 @@
 # ejercita con un `curl` simulado.
 #
 #   SHA=<commit> URL=https://<app>.fly.dev deploy/fly/release-check.sh before
-#       El commit a desplegar desciende del release que atiende /health. Un re-run del CI de
-#       un commit viejo dispara el workflow igual que un merge; acá se frena. Volver a
-#       desplegar el mismo commit pasa. Sin release (app caída o sin crear) se frena: el
+#       El commit a desplegar desciende del release que atiende /health (los dos son SHA, no
+#       tags). Un re-run del workflow de un release viejo, o la aprobación tardía de su
+#       producción, puede llegar después de uno más nuevo; acá se frena. Volver a desplegar el
+#       mismo commit pasa (también otro tag sobre ese commit). Sin release (app caída o sin crear) se frena: el
 #       primer deploy es deploy/fly/setup.sh. Con $GITHUB_OUTPUT definido, escribe ahí
 #       previous=<release actual>: si después hay que volver atrás (rollback.sh restore), es el
 #       release que tiene que atender otra vez.
@@ -39,7 +40,7 @@ before() {
   git cat-file -e "$current^{commit}" 2>/dev/null \
     || fail "el release actual ($current) no está en la historia de este checkout"
   git merge-base --is-ancestor "$current" "$SHA" \
-    || fail "$SHA no desciende del release actual ($current): es un commit anterior (un re-run del CI de un commit viejo no despliega)"
+    || fail "$SHA no desciende del release actual ($current): es un commit anterior (un release viejo no pisa uno más nuevo)"
   echo "== $SHA desciende de $current: se despliega"
 }
 

@@ -1,13 +1,14 @@
-// El deploy a Fly (D-29, issue #12) despliega solo commits de main con el CI en verde, y
-// exactamente ese commit: lo frena si no desciende del release que atiende y, después,
-// exige que /health lo atienda. Dos partes, sin red:
+// El deploy a Fly (D-29, issues #12, #13 y #30) despliega solo un GitHub Release con tag
+// vX.Y.Z sobre un commit de main con el CI en verde, y exactamente ese commit: lo frena si no
+// desciende del release que atiende y, después, exige que /health lo atienda. Sin red:
 //
-// 1. .github/workflows/deploy.yml: su disparador y su condición real, con un evaluador mínimo
-//    de expresiones de GitHub Actions (solo lo que el workflow usa: contextos github.* y env.*,
-//    strings, true/false/null, ==, !=, !, &&, || y paréntesis; otra sintaxis hace fallar el
-//    test, así que cambiar la condición obliga a mirar este archivo), y el orden de sus pasos.
-// 2. deploy/fly/release-check.sh, el script que corren esos pasos, con un `curl` simulado que
-//    responde lo que cada caso necesita y un repositorio git temporal con tres commits.
+// 1. .github/workflows/deploy.yml: su disparador, sus jobs y el orden de sus pasos, con un
+//    evaluador mínimo de expresiones de GitHub Actions (solo lo que el workflow usa: contextos
+//    github.*, env.*, needs.* y steps.*, strings, true/false/null, ==, !=, !, &&, || y
+//    paréntesis; otra sintaxis hace fallar el test, así que cambiarla obliga a mirar este
+//    archivo).
+// 2. Los scripts que corren esos pasos (deploy/fly/*.sh), con `curl`, `gh`, `docker` y `flyctl`
+//    simulados y repositorios git temporales.
 import { spawnSync } from 'node:child_process';
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -17,6 +18,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 const ROOT = resolve(import.meta.dirname, '../..');
 const yml = readFileSync(join(ROOT, '.github/workflows/deploy.yml'), 'utf8');
 const SCRIPT = join(ROOT, 'deploy/fly/release-check.sh');
+const GATE = join(ROOT, 'deploy/fly/release-gate.sh');
 
 /** Valor de la primera clave `key:` del archivo, en una sola línea. */
 function valueOf(key: string): string {
@@ -85,10 +87,10 @@ const inner = (s: string) => {
 };
 
 const SHA = 'a'.repeat(40);
-const run = (conclusion: string, event: string) => ({
-  github: { event: { workflow_run: { conclusion, event, head_sha: SHA, head_branch: 'main' } } },
+/** El contexto de un release publicado: github.sha es el commit del tag. */
+const released = (tag: string, sha: string) => ({
+  github: { sha, ref: `refs/tags/${tag}`, repository: 'dante0x95/cocos-challenge-a', event: { action: 'published', release: { tag_name: tag } } },
 });
-const deploys = (conclusion: string, event: string) => Boolean(evaluate(valueOf('if'), run(conclusion, event)));
 
 /** Bloque YAML de un job (indentación de 2 espacios bajo `jobs:`). */
 const jobs = yml.slice(yml.indexOf('\njobs:\n') + 1);
@@ -117,64 +119,89 @@ describe('workflow de deploy', () => {
     expect(() => evaluate('1 == 1', {})).toThrow(/sintaxis no soportada/);
   });
 
-  it('el evaluador interpreta los literales: la condición con `|| true` desplegaría un CI fallido', () => {
-    const loose = `${valueOf('if')} || true`;
-    for (const conclusion of ['failure', 'cancelled']) {
-      expect(evaluate(loose, run(conclusion, 'push'))).toBe(true);
-    }
-    expect(evaluate(`${valueOf('if')} && false`, run('success', 'push'))).toBe(false);
-    expect(evaluate('github.event.workflow_run.head_sha != null', run('success', 'push'))).toBe(true);
+  it('el evaluador interpreta los literales y los contextos', () => {
+    const ctx = released('v1.2.3', SHA);
+    expect(evaluate("github.event.release.tag_name == 'v1.2.3' && true", ctx)).toBe(true);
+    expect(evaluate("github.event.release.tag_name == 'v1.2.4' || false", ctx)).toBe(false);
+    expect(evaluate("!(github.event.release.tag_name == null) && github.sha != ''", ctx)).toBe(true);
   });
 
-  it('solo lo dispara el CI de main al terminar', () => {
+  it('lo dispara solo publicar un release: ni workflow_run (el CI de main) ni push', () => {
     const on = yml.match(/^on:\n([\s\S]*?)\n(?=\S)/m)?.[1];
-    expect(on).toBe('  workflow_run:\n    workflows: [ci]\n    types: [completed]\n    branches: [main]\n');
+    expect(on).toBe('  release:\n    types: [published]\n');
+    expect(yml).not.toMatch(/^\s+(workflow_run|push|pull_request\w*|workflow_dispatch|schedule):/m);
+    expect(yml).not.toContain('github.event.workflow_run');
   });
 
-  it('despliega un push a main con el CI en verde', () => {
-    expect(deploys('success', 'push')).toBe(true);
-  });
-
-  it.each(['failure', 'cancelled', 'timed_out', 'skipped', 'action_required', 'neutral', 'stale'])(
-    'no despliega un push con el CI en %s', (conclusion) => {
-      expect(deploys(conclusion, 'push')).toBe(false);
-    });
-
-  it.each(['pull_request', 'pull_request_target', 'workflow_dispatch', 'schedule'])(
-    'no despliega un CI en verde disparado por %s', (event) => {
-      expect(deploys('success', event)).toBe(false);
-    });
-
-  it('despliega exactamente el commit que pasó el CI, con RELEASE igual a ese SHA, y la imagen lleva ese SHA', () => {
-    expect(evaluate(inner(valueOf('SHA')), run('success', 'push'))).toBe(SHA);
+  it('despliega el commit del tag, con RELEASE igual a ese SHA, y conoce la versión', () => {
+    const sha = 'c'.repeat(40);
+    expect(evaluate(inner(valueOf('SHA')), released('v2.0.1', sha))).toBe(sha);
+    expect(evaluate(inner(valueOf('TAG')), released('v2.0.1', sha))).toBe('v2.0.1');
     expect(valueOf('IMAGE')).toBe('ghcr.io/${{ github.repository }}');
-    expect(yml).toMatch(/^\s*run: docker build -t "\$IMAGE:\$SHA" \.$/m);
+    for (const name of ['staging', 'production']) {
+      expect(runsOf(job(name)).find((r) => r.startsWith('flyctl deploy'))).toContain('--env "RELEASE=$SHA"');
+    }
   });
 
   // Los scripts y la configuración de cada entorno salen del mismo commit que la imagen.
-  it.each(['image', 'staging', 'production'])('el job %s hace checkout del commit que pasó el CI', (name) => {
+  it.each(['gate', 'image', 'staging', 'production'])('el job %s hace checkout del commit del release', (name) => {
     const checkouts = stepsOf(job(name)).filter((st) => st.startsWith('uses: actions/checkout@'));
     expect(checkouts).toHaveLength(1);
     expect(keyIn(checkouts[0], 'ref')).toBe('${{ env.SHA }}');
   });
 
-  it('tres etapas en orden: la imagen una vez, staging con ella, producción con la misma y detrás de su environment', () => {
-    expect([...jobs.matchAll(/^  (\w+):\n/gm)].map((m) => m[1])).toEqual(['image', 'staging', 'production']);
+  it('antes de construir, el job gate corre release-gate.sh con la historia completa y permiso para leer los checks', () => {
+    const gate = job('gate');
+    expect(runsOf(gate)).toEqual(['deploy/fly/release-gate.sh']);
+    expect(keyIn(gate, 'fetch-depth')).toBe('0');
+    expect(keyIn(gate, 'checks')).toBe('read');
+    expect(keyIn(gate, 'GH_TOKEN')).toBe('${{ secrets.GITHUB_TOKEN }}');
+    expect(keyIn(gate, 'REPO')).toBe('${{ github.repository }}');
+    expect(gate).not.toMatch(/packages: write|FLY_API_TOKEN|docker /);
+    expect(statSync(GATE).mode & 0o111).not.toBe(0);
+  });
+
+  // Ningún job tiene `if`: con uno (always(), por ejemplo) correría aunque falle un job del que
+  // depende. Sin `if`, un gate en rojo deja sin correr todo lo que depende de él.
+  it('cuatro etapas en orden: el gate, la imagen una vez, staging con ella, producción con la misma y detrás de su environment', () => {
+    const names = [...jobs.matchAll(/^  (\w+):\n/gm)].map((m) => m[1]);
+    expect(names).toEqual(['gate', 'image', 'staging', 'production']);
+    expect(jobKey(job('gate'), 'needs')).toBeUndefined();
+    expect(jobKey(job('image'), 'needs')).toBe('gate');
     expect(jobKey(job('staging'), 'needs')).toBe('image');
     expect(jobKey(job('production'), 'needs')).toBe('[image, staging]');
     expect(keyIn(job('staging'), 'name')).toBe('staging');
     expect(keyIn(job('production'), 'name')).toBe('production');
-    // La condición del CI va en el primer job; los otros dependen de él.
-    expect(jobKey(job('image'), 'if')).toBeDefined();
-    expect(jobKey(job('staging'), 'if')).toBeUndefined();
-    expect(jobKey(job('production'), 'if')).toBeUndefined();
+    for (const name of names) expect(jobKey(job(name), 'if')).toBeUndefined();
+    // Todos los demás dependen del gate, directa o indirectamente: si falla, no corre ninguno.
+    const needs = (name: string) => (jobKey(job(name), 'needs') ?? '').replace(/[[\]]/g, '').split(',').map((n) => n.trim()).filter(Boolean);
+    const dependsOnGate = (name: string): boolean => needs(name).some((d) => d === 'gate' || dependsOnGate(d));
+    expect(names.filter((n) => n !== 'gate' && !dependsOnGate(n))).toEqual([]);
+  });
+
+  it('la imagen lleva la etiqueta del SHA y la de la versión, y se publica con las dos', () => {
+    const runs = runsOf(job('image'));
+    const build = runs.find((r) => r.startsWith('docker build'))!;
+    // Las etiquetas con el entorno de un release v1.4.0.
+    const ctx = released('v1.4.0', SHA);
+    const env: Record<string, string> = {
+      IMAGE: valueOf('IMAGE').replace('${{ github.repository }}', ctx.github.repository),
+      SHA: evaluate(inner(valueOf('SHA')), ctx) as string,
+      TAG: evaluate(inner(valueOf('TAG')), ctx) as string,
+    };
+    const expand = (t: string) => t.replace(/\$(\w+)/g, (_m, k: string) => env[k]);
+    const tags = [...build.matchAll(/-t "([^"]+)"/g)].map((m) => expand(m[1]));
+    expect(tags).toEqual([`ghcr.io/dante0x95/cocos-challenge-a:${SHA}`, 'ghcr.io/dante0x95/cocos-challenge-a:v1.4.0']);
+    const pushed = runs.filter((r) => r.startsWith('docker push')).map((r) => expand(r.match(/^docker push "(.+)"$/)![1]));
+    expect(pushed).toEqual(tags);
   });
 
   it('la imagen se construye y publica una sola vez en GHCR; staging y producción solo despliegan su digest', () => {
     expect(runsOf(job('image'))).toEqual([
       'echo "$GITHUB_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin',
-      'docker build -t "$IMAGE:$SHA" .',
+      'docker build -t "$IMAGE:$SHA" -t "$IMAGE:$TAG" .',
       'docker push "$IMAGE:$SHA"',
+      'docker push "$IMAGE:$TAG"',
       'deploy/fly/image-digest.sh',
     ]);
     expect(keyIn(job('image'), 'packages')).toBe('write');
@@ -314,7 +341,7 @@ describe('concurrencia del deploy', () => {
   });
 
   it.each(['staging', 'production'])(
-    'en %s, con A desplegándose y B pendiente, un re-run del CI de un commit viejo no cancela a B', (name) => {
+    'en %s, con A desplegándose y B pendiente, un re-run del deploy de un release viejo no cancela a B', (name) => {
       const c = concurrencyOf(jobBlock(name));
       expect(c?.group).toBe(`deploy-${name}`);
       // A no se corta, B llega a desplegarse, y el viejo corre después (y lo frena el gate).
@@ -323,7 +350,7 @@ describe('concurrencia del deploy', () => {
     });
 
   // Un grupo del workflow lo retiene la corrida entera, también mientras production espera la
-  // aprobación: el staging de los merges siguientes quedaría frenado detrás de esa aprobación.
+  // aprobación: el staging de los releases siguientes quedaría frenado detrás de esa aprobación.
   it('la concurrencia es por entorno: una aprobación pendiente de producción no frena el staging siguiente', () => {
     expect(yml).not.toMatch(/^concurrency:/m);
     expect(concurrencyOf(jobBlock('image'))).toBeUndefined();
@@ -477,7 +504,7 @@ describe('release-check.sh', () => {
       expect(calls()).toEqual(['-sS --max-time 10 https://x.fly.dev/health']);
     });
 
-    it('frena un commit anterior al release actual: un re-run del CI de un commit viejo no despliega', () => {
+    it('frena un commit anterior al release actual: un release viejo (un re-run, o una aprobación tardía) no pisa uno nuevo', () => {
       const { repo, shas } = repoWithThreeCommits();
       const { bin } = stubs([health(shas[2])]);
       const r = check('before', bin, { SHA: shas[0], URL: 'https://x.fly.dev' }, repo);
@@ -628,6 +655,172 @@ describe('image-digest.sh', () => {
     expect(r.status).toBe(1);
     expect(readFileSync(out, 'utf8')).toBe('');
     rmSync(f.dir, { recursive: true, force: true });
+  });
+});
+
+// deploy/fly/release-gate.sh en un repositorio temporal: main con tres commits (origin/main en el
+// último), una rama `otra` con un commit fuera de main y tags sobre ellos. `gh` responde, en
+// orden, cada línea de RESPONSES (la última se repite; `!<código>` falla con ese código) y anota
+// sus argumentos; `sleep` anota cuánto durmió y no espera.
+describe('release-gate.sh', () => {
+  const REPO = 'dante0x95/cocos-challenge-a';
+  const GIT = { GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_AUTHOR_NAME: 'prueba',
+    GIT_AUTHOR_EMAIL: 'prueba@example.com', GIT_COMMITTER_NAME: 'prueba', GIT_COMMITTER_EMAIL: 'prueba@example.com' };
+  const dirs: string[] = [];
+  afterEach(() => {
+    for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  });
+
+  /** shas: los tres de main y `other`, el de la rama. Tags: v1.0.0 → main[0], v1.1.0 (anotado) → main[2], v2.0.0 → other. */
+  const repo = () => {
+    const dir = mkdtempSync(join(tmpdir(), 'release-gate-repo-'));
+    dirs.push(dir);
+    const git = (...args: string[]) => {
+      const r = spawnSync('git', args, { cwd: dir, encoding: 'utf8', env: { ...process.env, ...GIT } });
+      if (r.status !== 0) throw new Error(`git ${args.join(' ')}: ${r.stderr}`);
+      return r.stdout.trim();
+    };
+    git('init', '-q', '-b', 'main');
+    const main: string[] = [];
+    for (const n of ['uno', 'dos', 'tres']) {
+      writeFileSync(join(dir, 'f'), n);
+      git('add', 'f');
+      git('commit', '-q', '--no-verify', '-m', n);
+      main.push(git('rev-parse', 'HEAD'));
+    }
+    git('checkout', '-q', '-b', 'otra', main[1]);
+    writeFileSync(join(dir, 'f'), 'otra');
+    git('commit', '-q', '--no-verify', '-am', 'otra');
+    const other = git('rev-parse', 'HEAD');
+    git('update-ref', 'refs/remotes/origin/main', main[2]);
+    git('tag', 'v1.0.0', main[0]);
+    git('tag', '-a', 'v1.1.0', '-m', 'v1.1.0', main[2]);
+    git('tag', 'v2.0.0', other);
+    return { dir, main, other };
+  };
+
+  const checkRun = (id: number, status: string, conclusion: string | null, app = 'github-actions') =>
+    ({ id, name: 'ci', status, conclusion, started_at: '2026-10-30T12:00:00Z', app: { slug: app } });
+  const checks = (...runs: ReturnType<typeof checkRun>[]) => JSON.stringify({ total_count: runs.length, check_runs: runs });
+  const green = checks(checkRun(1, 'completed', 'success'));
+
+  const gate = (env: Record<string, string>, responses: string[], cwd: string) => {
+    const f = fakeBin({
+      gh: [
+        'echo "gh $*" >> "$CALLS"',
+        'n=$(grep -c "^gh " "$CALLS")',
+        'total=$(wc -l < "$RESPONSES")',
+        '[ "$n" -le "$total" ] || n=$total',
+        'line=$(sed -n "${n}p" "$RESPONSES")',
+        'case "$line" in "!"*) echo "gh: simulado: falla" >&2; exit "${line#!}" ;; *) printf "%s" "$line" ;; esac',
+      ].join('\n'),
+      sleep: 'echo "sleep $1" >> "$CALLS"',
+    });
+    dirs.push(f.dir);
+    const responsesFile = join(f.dir, 'responses');
+    writeFileSync(responsesFile, responses.join('\n') + '\n');
+    const r = runScript('deploy/fly/release-gate.sh', [], f.bin,
+      { ...GIT, REPO, CALLS: f.log, RESPONSES: responsesFile, CI_ATTEMPTS: '4', CI_INTERVAL: '7', ...env }, cwd);
+    const calls = f.calls();
+    return { ...r, gh: calls.filter((c) => c.startsWith('gh ')), sleeps: calls.filter((c) => c.startsWith('sleep ')).map((c) => c.slice(6)) };
+  };
+  const apiCall = (sha: string) => `gh api repos/${REPO}/commits/${sha}/check-runs?check_name=ci&per_page=100`;
+
+  it('deja pasar un tag vX.Y.Z de main con el ci en verde, también anotado', () => {
+    const { dir, main } = repo();
+    for (const [tag, sha] of [['v1.0.0', main[0]], ['v1.1.0', main[2]]]) {
+      const r = gate({ TAG: tag, SHA: sha }, [green], dir);
+      expect(r.stderr).toBe('');
+      expect(r.status).toBe(0);
+      expect(r.stdout).toContain(`${tag} (${sha}): vX.Y.Z, en main y con ci en verde: se despliega`);
+      expect(r.gh).toEqual([apiCall(sha)]);
+    }
+  });
+
+  it.each(['1.1.0', 'v1.1', 'v1.1.0-rc.1', 'v1.1.0+build', 'v01.1.0', 'v1.1.0.0', 'V1.1.0', 'release-1', 'v1.1.0 ', ''])(
+    'frena el tag inválido "%s" sin mirar git ni el ci', (tag) => {
+      // Un directorio que no es un repositorio: el formato se mira antes que git.
+      const dir = mkdtempSync(join(tmpdir(), 'release-gate-empty-'));
+      dirs.push(dir);
+      const r = gate({ TAG: tag, SHA }, [green], dir);
+      expect(r.status).toBe(1);
+      expect(r.stderr).toMatch(tag === '' ? /falta TAG/ : /DEPLOY FRENADO: el tag '.*' no es vX\.Y\.Z/);
+      expect(r.gh).toEqual([]);
+    });
+
+  it('frena un tag sobre un commit que no está en main, sin mirar el ci', () => {
+    const { dir, other } = repo();
+    const r = gate({ TAG: 'v2.0.0', SHA: other }, [green], dir);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain(`DEPLOY FRENADO: v2.0.0 (${other}) no está en main`);
+    expect(r.gh).toEqual([]);
+  });
+
+  it('frena un tag que apunta a otro commit que el del release (se movió), o que no existe', () => {
+    const { dir, main } = repo();
+    const moved = gate({ TAG: 'v1.0.0', SHA: main[2] }, [green], dir);
+    expect(moved.status).toBe(1);
+    expect(moved.stderr).toContain(`el tag v1.0.0 apunta a ${main[0]} y el release se publicó sobre ${main[2]}`);
+    const missing = gate({ TAG: 'v9.9.9', SHA: main[2] }, [green], dir);
+    expect(missing.status).toBe(1);
+    expect(missing.stderr).toContain('el tag v9.9.9 no está en este checkout');
+    expect([...moved.gh, ...missing.gh]).toEqual([]);
+  });
+
+  it.each(['failure', 'cancelled', 'timed_out', 'action_required', 'neutral', 'skipped', 'stale'])(
+    'frena un commit con el ci en %s, sin esperar', (conclusion) => {
+      const { dir, main } = repo();
+      const r = gate({ TAG: 'v1.1.0', SHA: main[2] }, [checks(checkRun(1, 'completed', conclusion))], dir);
+      expect(r.status).toBe(1);
+      expect(r.stderr).toContain(`DEPLOY FRENADO: el ci de ${main[2]} terminó en ${conclusion}`);
+      expect(r.gh).toHaveLength(1);
+      expect(r.sleeps).toEqual([]);
+    });
+
+  it('vale el último ci (id mayor): un re-run en verde despliega, un re-run en rojo no', () => {
+    const { dir, main } = repo();
+    const fixed = gate({ TAG: 'v1.1.0', SHA: main[2] },
+      [checks(checkRun(9, 'completed', 'success'), checkRun(3, 'completed', 'failure'))], dir);
+    expect(fixed.status).toBe(0);
+    const broken = gate({ TAG: 'v1.1.0', SHA: main[2] },
+      [checks(checkRun(3, 'completed', 'success'), checkRun(9, 'completed', 'failure'))], dir);
+    expect(broken.status).toBe(1);
+  });
+
+  it('espera mientras el ci no empezó o corre, y despliega cuando termina en verde', () => {
+    const { dir, main } = repo();
+    const r = gate({ TAG: 'v1.1.0', SHA: main[2] },
+      [checks(), checks(checkRun(1, 'in_progress', null)), checks(checkRun(1, 'queued', null)), green], dir);
+    expect(r.status).toBe(0);
+    expect(r.stderr).toContain('intento 1 de 4: ci de');
+    expect(r.gh).toHaveLength(4);
+    expect(r.sleeps).toEqual(['7', '7', '7']);
+  });
+
+  it('frena un commit sin ci al llegar al límite; un check ci de otra app no cuenta', () => {
+    const { dir, main } = repo();
+    const r = gate({ TAG: 'v1.1.0', SHA: main[2] }, [checks(checkRun(1, 'completed', 'success', 'otra-app'))], dir);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain(`después de 4 intentos el ci de ${main[2]} no terminó en verde (sigue sin correr)`);
+    expect(r.gh).toHaveLength(4);
+    expect(r.sleeps).toEqual(['7', '7', '7']);    // no duerme después del último
+  });
+
+  it('por defecto espera 40 intentos cada 30 segundos', () => {
+    const { dir, main } = repo();
+    const r = gate({ TAG: 'v1.1.0', SHA: main[2], CI_ATTEMPTS: '', CI_INTERVAL: '' }, [checks(checkRun(1, 'in_progress', null))], dir);
+    expect(r.status).toBe(1);
+    expect(r.gh).toHaveLength(40);
+    expect(r.sleeps).toEqual(Array(39).fill('30'));
+  });
+
+  it('frena si no puede leer el ci, o sin SHA o REPO', () => {
+    const { dir, main } = repo();
+    const r = gate({ TAG: 'v1.1.0', SHA: main[2] }, ['!1'], dir);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain(`no se pudo leer el check ci de ${main[2]}`);
+    expect(gate({ TAG: 'v1.1.0' }, [green], dir).status).toBe(1);
+    expect(gate({ TAG: 'v1.1.0', SHA: main[2], REPO: '' }, [green], dir).gh).toEqual([]);
   });
 });
 
@@ -917,5 +1110,198 @@ describe('setup.sh', () => {
     expect(prod.DATABASE_URL).toContain('@cocos-challenge-a-db.internal:');
     expect(staging.DATABASE_URL).toContain('@cocos-challenge-a-staging-db.internal:');
     expect(staging.DATABASE_ADMIN_URL).not.toContain('@cocos-challenge-a-db.internal:');
+  });
+});
+
+// deploy/fly/drills.sh release y rerun (issue #30), sin Fly ni GitHub: un repositorio temporal
+// con origin en un repositorio bare local (main con dos commits y tags), `curl` que responde
+// /health con HEALTH, y un `gh` simulado que lee y escribe el estado de las corridas en STATE:
+// cada corrida con su tag (headBranch), su commit y sus intentos (conclusión y log).
+describe('drills.sh', () => {
+  const GIT = { GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_AUTHOR_NAME: 'prueba',
+    GIT_AUTHOR_EMAIL: 'prueba@example.com', GIT_COMMITTER_NAME: 'prueba', GIT_COMMITTER_EMAIL: 'prueba@example.com' };
+  const dirs: string[] = [];
+  afterEach(() => {
+    for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  });
+
+  type Attempt = { conclusion: string; log: string };
+  type Run = { databaseId: number; headBranch: string; headSha: string; attempts: Attempt[] };
+  type State = { latest: string; runs: Run[]; rerun?: Attempt };
+
+  const GH = `#!/usr/bin/env node
+const fs = require('fs');
+const { execFileSync } = require('child_process');
+const args = process.argv.slice(2);
+fs.appendFileSync(process.env.CALLS, 'gh ' + args.join(' ') + '\\n');
+const state = JSON.parse(fs.readFileSync(process.env.STATE, 'utf8'));
+const opt = (n) => { const i = args.indexOf(n); return i >= 0 ? args[i + 1] : undefined; };
+const out = (v) => {
+  const q = opt('--jq');
+  process.stdout.write(q ? execFileSync('jq', ['-r', q], { input: JSON.stringify(v), encoding: 'utf8' }) : JSON.stringify(v) + '\\n');
+};
+const run = () => state.runs.find((r) => String(r.databaseId) === args[2]);
+const cmd = args[0] + ' ' + args[1];
+if (cmd === 'auth status') process.exit(0);
+if (cmd === 'release view') { out({ tagName: state.latest }); process.exit(0); }
+if (cmd === 'run list') {
+  const runs = state.runs.filter((r) => (!opt('--branch') || r.headBranch === opt('--branch')) && (!opt('--commit') || r.headSha === opt('--commit')));
+  out(runs.slice(0, Number(opt('--limit') || 20)).map((r) => ({ databaseId: r.databaseId, headSha: r.headSha })));
+  process.exit(0);
+}
+if (cmd === 'run view') {
+  const r = run();
+  const a = r.attempts[(opt('--attempt') ? Number(opt('--attempt')) : r.attempts.length) - 1];
+  if (args.includes('--log')) { process.stdout.write(a.log + '\\n'); process.exit(0); }
+  out({ attempt: r.attempts.length, conclusion: a.conclusion });
+  process.exit(0);
+}
+if (cmd === 'run rerun') {
+  if (state.rerun) run().attempts.push(state.rerun);
+  fs.writeFileSync(process.env.STATE, JSON.stringify(state));
+  process.exit(0);
+}
+if (cmd === 'run watch') process.exit(run().attempts.at(-1).conclusion === 'success' ? 0 : 1);
+console.error('gh simulado: no soportado: ' + args.join(' '));
+process.exit(9);
+`;
+
+  /** main: dos commits; v1.0.0 → main[0]; v1.1.0 y v1.1.1 → main[1] (dos tags, el mismo commit). */
+  const setup = () => {
+    const f = fakeBin({ curl: 'printf "%s" "$HEALTH"', sleep: 'echo "sleep $1" >> "$CALLS"' });
+    dirs.push(f.dir);
+    writeFileSync(join(f.bin, 'gh'), GH);
+    chmodSync(join(f.bin, 'gh'), 0o755);
+    const repo = join(f.dir, 'repo');
+    const remote = join(f.dir, 'remote.git');
+    const git = (cwd: string, ...args: string[]) => {
+      const r = spawnSync('git', args, { cwd, encoding: 'utf8', env: { ...process.env, ...GIT } });
+      if (r.status !== 0) throw new Error(`git ${args.join(' ')}: ${r.stderr}`);
+      return r.stdout.trim();
+    };
+    mkdirSync(join(repo, 'deploy/fly'), { recursive: true });
+    for (const file of ['deploy/fly/drills.sh', 'fly.toml']) {
+      writeFileSync(join(repo, file), readFileSync(join(ROOT, file)));
+      chmodSync(join(repo, file), statSync(join(ROOT, file)).mode);
+    }
+    git(f.dir, 'init', '-q', '--bare', remote);
+    git(repo, 'init', '-q', '-b', 'main');
+    git(repo, 'add', '.');
+    git(repo, 'commit', '-q', '--no-verify', '-m', 'uno');
+    const main = [git(repo, 'rev-parse', 'HEAD')];
+    writeFileSync(join(repo, 'f'), 'dos');
+    git(repo, 'add', 'f');
+    git(repo, 'commit', '-q', '--no-verify', '-m', 'dos');
+    main.push(git(repo, 'rev-parse', 'HEAD'));
+    git(repo, 'tag', 'v1.0.0', main[0]);
+    git(repo, 'tag', 'v1.1.0', main[1]);
+    git(repo, 'tag', 'v1.1.1', main[1]);
+    git(repo, 'remote', 'add', 'origin', remote);
+    git(repo, 'push', '-q', 'origin', 'main', '--tags');
+    const stateFile = join(f.dir, 'state.json');
+    const drill = (args: string[], state: State, serving: string) => {
+      writeFileSync(stateFile, JSON.stringify(state));
+      writeFileSync(f.log, '');
+      const r = spawnSync('bash', [join(repo, 'deploy/fly/drills.sh'), ...args], {
+        cwd: repo, encoding: 'utf8',
+        env: { PATH: `${f.bin}:${process.env.PATH}`, HOME: process.env.HOME ?? '/', ...GIT, CALLS: f.log, STATE: stateFile,
+          HEALTH: JSON.stringify({ ok: true, db: 'up', release: serving }) },
+      });
+      return { ...r, calls: f.calls() };
+    };
+    return { main, drill };
+  };
+
+  const deployed = (tag: string, sha: string) =>
+    `gate\tVersión de main con ci en verde\t== ${tag} (${sha}): vX.Y.Z, en main y con ci en verde: se despliega\n` +
+    `production\t/health atiende el commit\t== atiende ${sha} con ok: true (intento 1 de 30)`;
+  const stopped = (sha: string, current: string) =>
+    `staging\tEl commit desciende del release actual\tDEPLOY FRENADO: ${sha} no desciende del release actual (${current})`;
+
+  describe('release', () => {
+    it('aprueba el release cuya corrida lo nombra, pasó y /health atiende su commit', () => {
+      const { main, drill } = setup();
+      const r = drill(['release', 'v1.1.1'], {
+        latest: 'v1.1.1',
+        runs: [{ databaseId: 12, headBranch: 'v1.1.1', headSha: main[1], attempts: [{ conclusion: 'success', log: deployed('v1.1.1', main[1]) }] }],
+      }, main[1]);
+      expect(r.stderr).toBe('');
+      expect(r.status).toBe(0);
+      expect(r.stdout).toContain(`v1.1.1 pasó por el deploy 12 y /health atiende ${main[1]}`);
+      expect(r.calls).toContain(`gh run list --workflow deploy --event release --branch v1.1.1 --commit ${main[1]} --json databaseId --limit 1 --jq .[0].databaseId // empty`);
+    });
+
+    it('sin tag, ensaya el último release publicado', () => {
+      const { main, drill } = setup();
+      const r = drill(['release'], {
+        latest: 'v1.1.1',
+        runs: [{ databaseId: 12, headBranch: 'v1.1.1', headSha: main[1], attempts: [{ conclusion: 'success', log: deployed('v1.1.1', main[1]) }] }],
+      }, main[1]);
+      expect(r.status).toBe(0);
+      expect(r.stdout).toContain('== release: v1.1.1');
+    });
+
+    // Dos tags sobre el mismo commit: la corrida del primero no prueba nada del segundo.
+    it('con dos tags sobre el mismo commit y solo la corrida del primero, el del segundo espera y falla', () => {
+      const { main, drill } = setup();
+      const r = drill(['release', 'v1.1.1'], {
+        latest: 'v1.1.1',
+        runs: [{ databaseId: 11, headBranch: 'v1.1.0', headSha: main[1], attempts: [{ conclusion: 'success', log: deployed('v1.1.0', main[1]) }] }],
+      }, main[1]);
+      expect(r.status).toBe(1);
+      expect(r.stderr).toContain('ENSAYO FALLIDO: release: v1.1.1 no disparó el workflow de deploy en 5 minutos');
+      expect(r.calls.filter((c) => c.startsWith('sleep '))).toHaveLength(30);
+      expect(r.calls.some((c) => c.startsWith('gh run watch'))).toBe(false);
+    });
+
+    it('falla si la corrida que encuentra no es la de ese tag (su gate nombra otro)', () => {
+      const { main, drill } = setup();
+      const r = drill(['release', 'v1.1.1'], {
+        latest: 'v1.1.1',
+        runs: [{ databaseId: 11, headBranch: 'v1.1.1', headSha: main[1], attempts: [{ conclusion: 'success', log: deployed('v1.1.0', main[1]) }] }],
+      }, main[1]);
+      expect(r.status).toBe(1);
+      expect(r.stderr).toContain('el deploy 11 no es el de v1.1.1');
+    });
+  });
+
+  describe('rerun', () => {
+    // El deploy de v1.0.0 ya se había frenado una vez: su intento 1 tiene el log del gate.
+    const old = (main: string[]): Run =>
+      ({ databaseId: 21, headBranch: 'v1.0.0', headSha: main[0], attempts: [{ conclusion: 'failure', log: stopped(main[0], main[1]) }] });
+
+    it('aprueba cuando el intento nuevo se frena en el gate de ancestría, mirando ese intento', () => {
+      const { main, drill } = setup();
+      const r = drill(['rerun'], { latest: 'v1.1.1', runs: [old(main)], rerun: { conclusion: 'failure', log: stopped(main[0], main[1]) } }, main[1]);
+      expect(r.stderr).toBe('');
+      expect(r.status).toBe(0);
+      expect(r.stdout).toContain('espera el intento 2 del deploy 21');
+      expect(r.calls).toContain('gh run rerun 21');
+      expect(r.calls).toContain('gh run view 21 --attempt 2 --json conclusion --jq .conclusion');
+      expect(r.calls).toContain('gh run view 21 --attempt 2 --log');
+    });
+
+    it('si el intento nuevo no empieza, falla al agotar el plazo sin usar el resultado del anterior', () => {
+      const { main, drill } = setup();
+      const r = drill(['rerun'], { latest: 'v1.1.1', runs: [old(main)] }, main[1]);
+      expect(r.status).toBe(1);
+      expect(r.stderr).toContain('ENSAYO FALLIDO: rerun: el intento nuevo del deploy 21 no empezó en 5 minutos (sigue en el 1)');
+      expect(r.calls.filter((c) => c.startsWith('sleep '))).toHaveLength(60);
+      expect(r.calls.some((c) => c.startsWith('gh run watch') || c.includes('--log'))).toBe(false);
+    });
+
+    it('falla si el intento nuevo falló por otro motivo, aunque el anterior se haya frenado en el gate', () => {
+      const { main, drill } = setup();
+      const r = drill(['rerun'], { latest: 'v1.1.1', runs: [old(main)], rerun: { conclusion: 'failure', log: 'image\tConstruir la imagen\terror' } }, main[1]);
+      expect(r.status).toBe(1);
+      expect(r.stderr).toContain('el intento 2 del deploy 21 falló por otro motivo');
+    });
+
+    it('falla si el intento nuevo terminó bien', () => {
+      const { main, drill } = setup();
+      const r = drill(['rerun'], { latest: 'v1.1.1', runs: [old(main)], rerun: { conclusion: 'success', log: deployed('v1.0.0', main[0]) } }, main[1]);
+      expect(r.status).toBe(1);
+      expect(r.stderr).toContain('el deploy del release viejo terminó bien');
+    });
   });
 });

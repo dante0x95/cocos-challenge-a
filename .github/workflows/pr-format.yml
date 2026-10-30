@@ -1,0 +1,36 @@
+# Formato obligatorio de commits y del PR (CONTRIBUTING.md). Separado de ci.yml para correr
+# también cuando se edita el título o la descripción, sin volver a correr los tests.
+name: pr-format
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  commit-messages:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # El head del PR, no el merge commit sintético de GitHub (lo rechazaría como merge).
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+      - name: Commits del PR
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: pnpm exec tsx scripts/commit-msg/check.ts --range "$BASE_SHA..HEAD"
+      # Con squash merge, título y descripción son el commit que queda en main.
+      - name: Título y descripción del PR
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: pnpm exec tsx scripts/commit-msg/check.ts --pr

@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.env
+.env.local
+coverage/
+
+# Solo pnpm: otros lockfiles y copias de respaldo no se versionan
+package-lock.json
+*.bak

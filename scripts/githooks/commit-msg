@@ -1,0 +1,4 @@
+#!/bin/sh
+# Valida el formato del mensaje antes de crear el commit (CONTRIBUTING.md).
+# Se activa con: pnpm hooks:install
+exec pnpm exec tsx scripts/commit-msg/check.ts --file "$1"

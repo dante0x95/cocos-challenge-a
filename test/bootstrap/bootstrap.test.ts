@@ -1,0 +1,371 @@
+// El bootstrap sobre una base vacía, dos veces: la primera deja los números de aceptación del
+// challenge; la segunda no cambia nada (idempotente). También: una migración ya aplicada que
+// cambia de contenido aborta, y una base que ya tiene las tablas del challenge no se re-siembra.
+import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { cpSync, mkdtempSync, readFileSync, rmSync, appendFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
+import pg from 'pg';
+import { bootstrap } from '../../src/db/bootstrap.js';
+import { recreateDatabase } from '../support/global-setup.js';
+import { dbUrl, SERVER_URL } from '../support/urls.js';
+import { requestHash } from '../../src/domain/orders.js';
+
+const DB = 'cocos_bootstrap_test';
+const url = dbUrl(DB);
+const quiet = { log: () => undefined };
+
+async function stateOf(u: string) {
+  const db = new pg.Pool({ connectionString: u });
+  try {
+    const q = async (sql: string, params: unknown[] = []) => (await db.query(sql, params)).rows;
+    return {
+      migrations: await q('SELECT name, mode FROM public.schema_migrations ORDER BY name'),
+      cash: (await q('SELECT qty::text, reserved::text, inconsistent FROM app.read_portfolio(1) WHERE kind = 0'))[0],
+      positions: await q('SELECT instrumentid, qty::text, cost_total::text, inconsistent FROM app.read_portfolio(1) WHERE kind = 1 ORDER BY instrumentid'),
+      seqs: await q("SELECT id, balance_seq::int FROM app.orders WHERE status = 'FILLED' ORDER BY id"),
+      cashOrders: await q("SELECT id, size, price::text FROM app.orders WHERE side LIKE 'CASH%' ORDER BY id"),
+      cancelled: await q("SELECT id, cancel_reason FROM app.orders WHERE status = 'CANCELLED' ORDER BY id"),
+      settings: (await q('SELECT price_max_age_days FROM app.settings'))[0],
+      apiCanWrite: (await q("SELECT has_table_privilege('api', 'app.orders', 'INSERT') AS ins, has_table_privilege('api', 'app.orders', 'UPDATE') AS upd"))[0],
+    };
+  } finally {
+    await db.end();
+  }
+}
+
+afterAll(async () => {
+  const c = new pg.Client({ connectionString: SERVER_URL });
+  await c.connect();
+  await c.query(`DROP DATABASE IF EXISTS ${DB} WITH (FORCE)`);
+  await c.end();
+});
+
+describe('bootstrap', () => {
+  let first: Awaited<ReturnType<typeof stateOf>>;
+
+  it('base vacía → seed + migraciones + funciones, con los números de aceptación', async () => {
+    await recreateDatabase(DB);
+    const r = await bootstrap({ adminUrl: url, apiPassword: 'api', ...quiet });
+    expect(r.applied).toEqual(['000_seed.sql', '001_app_schema.sql', '002_audit.sql', '003_orders_ledger.sql', '005_cancel_reason.sql']);
+    expect(r.ledger).toEqual([{ userid: 1, problem: 'short', detail: expect.stringContaining('instrumento 31 en -10') }]);
+
+    first = await stateOf(url);
+    expect(first.cash).toEqual({ qty: '75300000', reserved: '12550000', inconsistent: true });   // 753.000 / 125.500
+    expect(first.positions).toEqual([
+      { instrumentid: 31, qty: '-10', cost_total: '0', inconsistent: true },
+      { instrumentid: 47, qty: '40', cost_total: '37200000000', inconsistent: false },
+      { instrumentid: 54, qty: '500', cost_total: '125000000000', inconsistent: false },
+    ]);
+    // Secuencias por (datetime, id) sobre las 7 FILLED; cash en centavos a 0.01.
+    expect(first.seqs.map((s) => s.balance_seq)).toEqual([1, 2, 3, 4, 5, 6, 7]);
+    expect(first.cashOrders.every((o) => o.price === '0.01')).toBe(true);
+    expect(first.cashOrders.map((o) => o.size)).toEqual([100_000_000, 10_000_000]);
+    // La única cancelada del challenge (orden 3, una LIMIT del instrumento 47) la canceló el usuario: el executor no existía.
+    expect(first.cancelled).toEqual([{ id: 3, cancel_reason: 'USER' }]);
+    expect(first.settings).toEqual({ price_max_age_days: null });
+    expect(first.apiCanWrite).toEqual({ ins: false, upd: false });
+  }, 60_000);
+
+  it('segunda corrida: no aplica nada y la base queda idéntica', async () => {
+    const r = await bootstrap({ adminUrl: url, apiPassword: 'api', ...quiet });
+    expect(r.applied).toEqual([]);
+    expect(await stateOf(url)).toEqual(first);
+  }, 60_000);
+
+  it('una migración ya aplicada que cambió de contenido → aborta sin tocar nada', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cocos-db-'));
+    try {
+      cpSync(resolve('db'), dir, { recursive: true });
+      appendFileSync(join(dir, 'migrations', '003_orders_ledger.sql'), '\n-- editado\n');
+      await expect(bootstrap({ adminUrl: url, dbDir: dir, ...quiet })).rejects.toThrow(/003_orders_ledger.sql.*cambió/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  it('base que ya tiene las tablas del challenge: el seed se registra sin correr (baseline)', async () => {
+    await recreateDatabase(DB);
+    const c = new pg.Client({ connectionString: url });
+    await c.connect();
+    const { readFileSync } = await import('node:fs');
+    await c.query(readFileSync(resolve('db/migrations/000_seed.sql'), 'utf8'));
+    await c.end();
+    const r = await bootstrap({ adminUrl: url, ...quiet });
+    expect(r.baselined).toEqual(['000_seed.sql']);
+    expect(r.applied).not.toContain('000_seed.sql');
+    expect((await stateOf(url)).cash).toEqual(first.cash);
+  }, 60_000);
+
+  // Issue #4 (CR-8): el despliegue sobre una base con la firma anterior de place_order (9 argumentos).
+  it('actualización desde la firma anterior de place_order: queda solo la nueva, api la llama con 9 y 10 argumentos y la clave vieja da replay', async () => {
+    // La versión anterior de las funciones: las de esta rama sin el cambio del issue #4. Cada reemplazo
+    // tiene que aplicar; si el archivo cambia de forma, la prueba lo dice en vez de pasar en falso.
+    const revert = (s: string, from: string | RegExp, to: string) => {
+      const out = s.replace(from, to);
+      if (out === s) throw new Error(`no se pudo reconstruir la versión anterior: ${from}`);
+      return out;
+    };
+    const { readFileSync, writeFileSync } = await import('node:fs');
+    const dir = mkdtempSync(join(tmpdir(), 'cocos-db-old-'));
+    try {
+      cpSync(resolve('db'), dir, { recursive: true });
+      let f030 = readFileSync(resolve('db/functions/030_orders.sql'), 'utf8');
+      f030 = revert(f030, /--   p_legacy_hash:[^\n]*\n(--[^\n]*\n)*(DROP FUNCTION IF EXISTS app\.place_order\([^)]*\);\n)?/, '');
+      f030 = revert(f030, ' p_limit numeric,\n  p_legacy_hash text DEFAULT NULL)', ' p_limit numeric)');
+      f030 = revert(f030, ' AND prev.request_hash IS DISTINCT FROM p_legacy_hash THEN', ' THEN');
+      writeFileSync(join(dir, 'functions', '030_orders.sql'), f030);
+      const f090 = revert(readFileSync(resolve('db/functions/090_privileges.sql'), 'utf8'),
+        'app.place_order(int, text, text, text, text, int, int, numeric, numeric, text)',
+        'app.place_order(int, text, text, text, text, int, int, numeric, numeric)');
+      writeFileSync(join(dir, 'functions', '090_privileges.sql'), f090);
+
+      await recreateDatabase(DB);
+      await bootstrap({ adminUrl: url, apiPassword: 'api', dbDir: dir, ...quiet });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+
+    const adminDb = new pg.Pool({ connectionString: url });
+    const api = new pg.Pool({ connectionString: dbUrl(DB, { name: 'api', password: 'api' }) });
+    try {
+      const signatures = async () =>
+        (await adminDb.query<{ sig: string }>("SELECT oid::regprocedure::text AS sig FROM pg_proc WHERE proname = 'place_order'")).rows.map((r) => r.sig);
+      const old9 = 'app.place_order(integer,text,text,text,text,integer,integer,numeric,numeric)';
+      const new10 = 'app.place_order(integer,text,text,text,text,integer,integer,numeric,numeric,text)';
+      expect(await signatures()).toEqual([old9]);
+
+      // Antes del despliegue, la versión anterior graba una clave con el hash de amount "100" sin canonizar.
+      const ars = (await adminDb.query<{ id: number }>("SELECT id FROM app.instruments WHERE ticker = 'ARS'")).rows[0].id;
+      const legacyHash = requestHash({ userid: 1, side: 'CASH_IN', type: 'MARKET', amount: '100' });
+      const canonicalHash = requestHash({ userid: 1, side: 'CASH_IN', type: 'MARKET', amount: '100.00' });
+      const call9 = (k: string, hash: string) =>
+        api.query<{ r: any }>("SELECT app.place_order(1, $1, $2, 'CASH_IN', 'MARKET', $3, NULL, 100, NULL) AS r", [k, hash, ars]);
+      const original = (await call9('cr8-old', legacyHash)).rows[0].r;
+      expect(original).toMatchObject({ status: 201, replay: false });
+
+      // Despliegue de esta rama, dos veces (las funciones son repetibles).
+      await bootstrap({ adminUrl: url, apiPassword: 'api', ...quiet });
+      await bootstrap({ adminUrl: url, apiPassword: 'api', ...quiet });
+      expect(await signatures()).toEqual([new10]);
+      expect((await adminDb.query("SELECT has_function_privilege('api', $1::regprocedure, 'EXECUTE') AS ok", [new10])).rows[0].ok).toBe(true);
+
+      // api la llama con 10 argumentos: la clave vieja da replay con el hash canonizado + el anterior.
+      const replay = (await api.query<{ r: any }>(
+        "SELECT app.place_order(1, 'cr8-old', $1, 'CASH_IN', 'MARKET', $2, NULL, 100.00, NULL, $3) AS r", [canonicalHash, ars, legacyHash])).rows[0].r;
+      expect(replay).toEqual({ ...original, replay: true });
+      // Y con 9 (un llamador viejo): la misma clave con su hash original sigue dando replay; una clave nueva crea la orden.
+      expect((await call9('cr8-old', legacyHash)).rows[0].r).toEqual({ ...original, replay: true });
+      expect((await call9('cr8-new', canonicalHash)).rows[0].r).toMatchObject({ status: 201, replay: false });
+      expect((await adminDb.query("SELECT count(*)::int AS n FROM app.idempotency_keys WHERE userid = 1 AND key LIKE 'cr8-%'")).rows[0].n).toBe(2);
+    } finally {
+      await api.end();
+      await adminDb.end();
+    }
+  }, 120_000);
+
+  // Issue #18: el rol api ya no tiene SELECT sobre app.users. Una base desplegada antes lo tiene
+  // (el GRANT de la versión anterior de 090_privileges.sql) y lo pierde al volver a desplegar.
+  it('base con el SELECT anterior de api sobre app.users: después de dos bootstraps queda revocado y el portfolio sigue igual', async () => {
+    await recreateDatabase(DB);
+    await bootstrap({ adminUrl: url, apiPassword: 'api', ...quiet });
+
+    const adminDb = new pg.Pool({ connectionString: url });
+    const api = new pg.Pool({ connectionString: dbUrl(DB, { name: 'api', password: 'api' }) });
+    const privileges = async () => (await adminDb.query(
+      "SELECT has_table_privilege('api', 'app.users', 'SELECT') AS table_select, has_any_column_privilege('api', 'app.users', 'SELECT') AS column_select")).rows[0];
+    try {
+      // El estado que dejó la versión anterior: api lee app.users.
+      await adminDb.query('GRANT SELECT ON app.users TO api');
+      expect(await privileges()).toEqual({ table_select: true, column_select: true });
+      expect((await api.query('SELECT 1 FROM app.users')).rowCount).toBeGreaterThan(0);
+
+      // Despliegue de esta rama, dos veces (las funciones son repetibles).
+      await bootstrap({ adminUrl: url, apiPassword: 'api', ...quiet });
+      await bootstrap({ adminUrl: url, apiPassword: 'api', ...quiet });
+      expect(await privileges()).toEqual({ table_select: false, column_select: false });
+      await expect(api.query('SELECT 1 FROM app.users')).rejects.toMatchObject({ code: '42501' });
+
+      // read_portfolio (SECURITY DEFINER) sigue resolviendo el usuario para el rol api.
+      const cash = (await api.query('SELECT qty::text FROM app.read_portfolio(1) WHERE kind = 0')).rows[0];
+      expect(cash).toEqual({ qty: '75300000' });   // 753.000
+      await expect(api.query('SELECT * FROM app.read_portfolio($1)', [2_000_000_000]))
+        .rejects.toMatchObject({ code: 'APP06', message: 'usuario 2000000000 inexistente' });
+    } finally {
+      await api.end();
+      await adminDb.end();
+    }
+  }, 120_000);
+
+  // Issue #21: el despliegue sobre una base sin cancel_reason, con órdenes ya canceladas y la
+  // versión anterior de las funciones (cancel_order_outcome sin la columna en su RETURNS TABLE).
+  describe('actualización a cancel_reason', () => {
+    const revert = (s: string, from: string | RegExp, to: string) => {
+      const out = s.replace(from, to);
+      if (out === s) throw new Error(`no se pudo reconstruir la versión anterior: ${from}`);
+      return out;
+    };
+    /** La versión anterior: sin la migración 005 y con 030_orders.sql sin cancel_reason. */
+    const pre21 = (dir: string) => {
+      rmSync(join(dir, 'migrations', '005_cancel_reason.sql'));
+      let f030 = readFileSync(resolve('db/functions/030_orders.sql'), 'utf8');
+      f030 = revert(f030, /,\n    'cancel_reason', NULL\);[^\n]*/, ');');
+      f030 = revert(f030, ", cancel_reason = 'LIMIT'", '');
+      f030 = revert(f030, ", cancel_reason = 'USER'", '');
+      f030 = revert(f030, /DO \$\$\n[\s\S]*?END \$\$;\n(?=CREATE OR REPLACE FUNCTION app\.cancel_order_outcome)/, '');
+      f030 = revert(f030, ',\n               cancel_reason text)', ')');
+      f030 = revert(f030, '\n  cancel_reason := o.cancel_reason;', '');
+      writeFileSync(join(dir, 'functions', '030_orders.sql'), f030);
+    };
+    /** Esta rama más un archivo de funciones que corre después de las migraciones y antes de 030. */
+    const withExtraFunction = (name: string, sql: string) => (dir: string) => writeFileSync(join(dir, 'functions', name), sql);
+    /** Bootstrap desde una copia de db/ modificada por `edit`. */
+    const deployFrom = async (edit: (dir: string) => void) => {
+      const dir = mkdtempSync(join(tmpdir(), 'cocos-db-21-'));
+      try {
+        cpSync(resolve('db'), dir, { recursive: true });
+        edit(dir);
+        return await bootstrap({ adminUrl: url, apiPassword: 'api', dbDir: dir, ...quiet });
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+
+    let adminDb: pg.Pool;
+    let api: pg.Pool;
+    beforeEach(async () => {
+      await recreateDatabase(DB);
+      await deployFrom(pre21);
+      adminDb = new pg.Pool({ connectionString: url });
+      api = new pg.Pool({ connectionString: dbUrl(DB, { name: 'api', password: 'api' }) });
+    }, 60_000);
+    afterEach(async () => {
+      await api.end();
+      await adminDb.end();
+    });
+
+    const hasColumn = async () => (await adminDb.query(
+      "SELECT 1 FROM information_schema.columns WHERE table_schema = 'app' AND table_name = 'orders' AND column_name = 'cancel_reason'")).rowCount;
+    const migrations = async () =>
+      (await adminDb.query<{ name: string }>('SELECT name FROM public.schema_migrations ORDER BY name')).rows.map((r) => r.name);
+    const placeLimit = async (k: string) => (await api.query<{ r: any }>(
+      "SELECT app.place_order(1, $1, 'h', 'BUY', 'LIMIT', 47, 1, NULL, 1.00, NULL) AS r", [k])).rows[0].r;
+    const orderState = async (id: string) =>
+      (await adminDb.query('SELECT status, cancel_reason FROM app.orders WHERE id = $1', [id])).rows[0];
+    /** Espera hasta que alguna sesión que cumpla `where` esté bloqueada esperando un lock; devuelve cuál. */
+    const waitingOnLock = async (where: string, arg: unknown): Promise<string> => {
+      for (;;) {
+        const w = await adminDb.query<{ e: string }>(
+          `SELECT wait_event AS e FROM pg_stat_activity WHERE ${where} AND wait_event_type = 'Lock'`, [arg]);
+        if (w.rowCount) return w.rows[0].e;
+        await new Promise((r) => setTimeout(r, 5));
+      }
+    };
+
+    it('las ya canceladas quedan USER, cancel_order_outcome se reemplaza una sola vez, api la sigue llamando y el replay de una clave anterior es idéntico', async () => {
+      expect(await hasColumn()).toBe(0);
+      // Antes del despliegue: una LIMIT del usuario 1 cancelada con la versión anterior, y su respuesta completa.
+      const original = await placeLimit('pre21');
+      expect(original.body).not.toHaveProperty('cancel_reason');
+      const before = original.order_id as string;
+      expect((await api.query('SELECT outcome, status FROM app.cancel_order_outcome(1, $1)', [before])).rows[0])
+        .toEqual({ outcome: 'ok', status: 'CANCELLED' });
+
+      // Despliegue de esta rama, dos veces: la migración corre una vez y la función se reemplaza en el lugar.
+      const sig = 'app.cancel_order_outcome(integer,bigint)';
+      const oid = async () => (await adminDb.query<{ oid: number }>('SELECT $1::regprocedure::oid AS oid', [sig])).rows[0].oid;
+      const oldOid = await oid();
+      expect((await bootstrap({ adminUrl: url, apiPassword: 'api', ...quiet })).applied).toEqual(['005_cancel_reason.sql']);
+      const newOid = await oid();
+      expect(newOid).not.toBe(oldOid);
+      expect((await bootstrap({ adminUrl: url, apiPassword: 'api', ...quiet })).applied).toEqual([]);
+      expect(await oid()).toBe(newOid);
+      expect((await adminDb.query("SELECT has_function_privilege('api', $1::regprocedure, 'EXECUTE') AS ok", [sig])).rows[0].ok).toBe(true);
+
+      // Las ya canceladas (la del challenge y la de antes del despliegue) quedan USER; ninguna otra tiene motivo.
+      expect((await adminDb.query("SELECT id::text, cancel_reason FROM app.orders WHERE status = 'CANCELLED' ORDER BY orders.id")).rows)
+        .toEqual([{ id: '3', cancel_reason: 'USER' }, { id: before, cancel_reason: 'USER' }]);
+      expect((await adminDb.query("SELECT count(*)::int AS n FROM app.orders WHERE status <> 'CANCELLED' AND cancel_reason IS NOT NULL")).rows[0].n).toBe(0);
+
+      // R-3: la clave grabada antes devuelve exactamente su respuesta original (sin cancel_reason), sin otra orden.
+      const orders = async () => (await adminDb.query<{ n: number }>('SELECT count(*)::int AS n FROM app.orders')).rows[0].n;
+      const count = await orders();
+      expect(await placeLimit('pre21')).toEqual({ ...original, replay: true });
+      expect(await orders()).toBe(count);
+
+      // api llama la versión nueva y recibe el motivo.
+      const after = (await placeLimit('post21')).order_id;
+      expect((await api.query('SELECT outcome, status, cancel_reason FROM app.cancel_order_outcome(1, $1)', [after])).rows[0])
+        .toEqual({ outcome: 'ok', status: 'CANCELLED', cancel_reason: 'USER' });
+    }, 120_000);
+
+    it('un bootstrap que falla después de la migración no deja nada aplicado: ni la columna ni las funciones nuevas, y las anteriores siguen cancelando', async () => {
+      const lim = (await placeLimit('interrumpido')).order_id as string;
+      await expect(deployFrom(withExtraFunction('015_test_interrupcion.sql',
+        "DO $$ BEGIN RAISE EXCEPTION 'interrupción de prueba'; END $$;"))).rejects.toThrow(/interrupción de prueba/);
+      expect(await hasColumn()).toBe(0);
+      expect(await migrations()).not.toContain('005_cancel_reason.sql');
+      // La función instalada es la anterior y cancela con el esquema anterior.
+      const [row] = (await api.query('SELECT * FROM app.cancel_order_outcome(1, $1)', [lim])).rows;
+      expect(row).toMatchObject({ outcome: 'ok', status: 'CANCELLED' });
+      expect(row).not.toHaveProperty('cancel_reason');
+    }, 120_000);
+
+    it('con conexiones reales: a mitad del bootstrap nadie ve el esquema nuevo, y los escritores de la versión anterior que lo esperaban fallan con APP04 sin efectos', async () => {
+      const limHot = (await placeLimit('en-vuelo-1')).order_id as string;
+      const limCold = (await placeLimit('en-vuelo-2')).order_id as string;
+      const apiClient = async () => {
+        const c = new pg.Client({ connectionString: dbUrl(DB, { name: 'api', password: 'api' }) });
+        await c.connect();
+        const pid = (await c.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows[0].pid;
+        return { c, pid };
+      };
+      // `hot` ya ejecutó la función anterior en su sesión (cuerpo compilado): espera en la barrera de
+      // despliegue. `cold` la compila al llamarla: espera el lock de app.orders que tomó la migración.
+      const hot = await apiClient();
+      const cold = await apiClient();
+      expect((await hot.c.query('SELECT outcome FROM app.cancel_order_outcome(1, 2000000000)')).rows[0].outcome).toBe('not_found');
+      // Barrera: un archivo de funciones extra (después de 005, antes de 030) espera un lock que retiene la prueba.
+      const pause = await adminDb.connect();
+      try {
+        await pause.query('BEGIN');
+        await pause.query("SELECT pg_advisory_xact_lock(hashtext('test-pausa-bootstrap'))");
+        const deploying = deployFrom(withExtraFunction('015_test_pausa.sql', "SELECT pg_advisory_xact_lock(hashtext('test-pausa-bootstrap'));"));
+        deploying.catch(() => undefined);
+        expect(await waitingOnLock("datname = $1 AND application_name = 'cocos-bootstrap'", DB)).toBe('advisory');
+
+        // 005 ya corrió dentro de la transacción del bootstrap, pero no está confirmada: no se ve.
+        expect(await hasColumn()).toBe(0);
+        expect(await migrations()).not.toContain('005_cancel_reason.sql');
+
+        // Los dos escritores llaman la función anterior y quedan esperando al bootstrap.
+        const cancel = (w: { c: pg.Client }, id: string) => {
+          const p = w.c.query('SELECT * FROM app.cancel_order_outcome(1, $1)', [id]);
+          p.catch(() => undefined);
+          return p;
+        };
+        const hotCancel = cancel(hot, limHot);
+        expect(await waitingOnLock('pid = $1', hot.pid)).toBe('advisory');
+        const coldCancel = cancel(cold, limCold);
+        expect(await waitingOnLock('pid = $1', cold.pid)).toBe('relation');
+
+        await pause.query('COMMIT');
+        expect((await deploying).applied).toEqual(['005_cancel_reason.sql']);
+        // Siguieron con el cuerpo anterior (cancelar sin motivo): APP04, reintentable (503).
+        await expect(hotCancel).rejects.toMatchObject({ code: 'APP04' });
+        await expect(coldCancel).rejects.toMatchObject({ code: 'APP04' });
+      } finally {
+        await pause.query('ROLLBACK').catch(() => undefined);
+        pause.release();
+        await hot.c.end();
+        await cold.c.end();
+      }
+      for (const id of [limHot, limCold]) {
+        expect(await orderState(id)).toEqual({ status: 'NEW', cancel_reason: null });
+        // El reintento usa la función nueva.
+        expect((await api.query('SELECT outcome, status, cancel_reason FROM app.cancel_order_outcome(1, $1)', [id])).rows[0])
+          .toEqual({ outcome: 'ok', status: 'CANCELLED', cancel_reason: 'USER' });
+      }
+    }, 120_000);
+  });
+});

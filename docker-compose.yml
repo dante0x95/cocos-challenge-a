@@ -1,0 +1,55 @@
+# docker compose up --build
+#   db       Postgres 18 con un volumen.
+#   migrate  corre el bootstrap (seed del challenge, migraciones, funciones, verificación) y
+#            termina. Es idempotente: en cada `up` solo reaplica funciones.
+#   api      arranca recién cuando migrate terminó bien.
+name: cocos
+
+x-app: &app
+  build: .
+  image: cocos-api:local
+
+services:
+  db:
+    image: postgres:18
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: cocos
+    ports: ["${DB_PORT:-5432}:5432"]
+    volumes:
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d cocos"]
+      interval: 2s
+      retries: 30
+
+  migrate:
+    <<: *app
+    command: ["node", "dist/db/bootstrap.js"]
+    environment:
+      DATABASE_ADMIN_URL: postgresql://postgres:postgres@db:5432/cocos
+      API_DB_PASSWORD: ${API_DB_PASSWORD:-api}
+    depends_on:
+      db: { condition: service_healthy }
+    restart: "no"
+
+  api:
+    <<: *app
+    environment:
+      DATABASE_URL: postgresql://api:${API_DB_PASSWORD:-api}@db:5432/cocos
+      PORT: 3000
+      PG_POOL_MAX: 10
+      PG_CONNECT_TIMEOUT_MS: 2000
+      INTERNAL_TOKEN: ${INTERNAL_TOKEN:-dev-internal-token}
+      JOBS_ENABLED: "true"
+    ports: ["${API_PORT:-3000}:3000"]
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/health >/dev/null || exit 1"]
+      interval: 5s
+      retries: 10
+
+volumes:
+  pgdata:

@@ -1,0 +1,95 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "inspected_commit",
+    "issues",
+    "verdict",
+    "summary",
+    "previous_findings",
+    "findings",
+    "test_coverage",
+    "adversarial_justification",
+    "evidence"
+  ],
+  "properties": {
+    "inspected_commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "issues": {
+      "type": "array",
+      "items": { "type": "integer", "minimum": 1 },
+      "description": "Issues que el PR cita en Refs."
+    },
+    "verdict": { "type": "string", "enum": ["APPROVED", "CHANGES_REQUESTED"] },
+    "summary": { "type": "string", "description": "De dos a cinco oraciones, en español." },
+    "previous_findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "disposition", "note"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^CR-[0-9]+$" },
+          "disposition": {
+            "type": "string",
+            "enum": ["RESOLVED", "STILL_OPEN", "JUSTIFICATION_ACCEPTED", "JUSTIFICATION_REJECTED"]
+          },
+          "note": { "type": "string" }
+        }
+      }
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id", "category", "severity", "plan_item", "title", "path", "start_line", "end_line",
+          "rule", "observation", "impact", "requested_action"
+        ],
+        "properties": {
+          "id": { "type": "string", "pattern": "^CR-[0-9]+$" },
+          "category": {
+            "type": "string",
+            "enum": ["FUNCTIONAL", "MISSING_TEST", "WEAK_TEST", "ADVERSARIAL", "SCOPE", "SPEC", "SECURITY", "QUALITY", "LANGUAGE"]
+          },
+          "severity": { "type": "string", "enum": ["BLOCKING", "OPTIONAL"] },
+          "plan_item": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Entrada de test_coverage a la que se refiere (MISSING_TEST, WEAK_TEST); 0 en otro caso."
+          },
+          "title": { "type": "string" },
+          "path": { "type": "string", "description": "Ruta relativa al repositorio." },
+          "start_line": { "type": "integer", "minimum": 1 },
+          "end_line": { "type": "integer", "minimum": 1 },
+          "rule": { "type": "string", "description": "R-n, D-nn o el ítem del issue." },
+          "observation": { "type": "string" },
+          "impact": { "type": "string" },
+          "requested_action": { "type": "string" }
+        }
+      }
+    },
+    "test_coverage": {
+      "type": "array",
+      "description": "Una entrada por ítem del plan de pruebas del issue y por cada riesgo adicional del diff, numeradas desde 1.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["plan_item", "risk", "planted_defect", "tests", "fails_on_defect", "reasoning"],
+        "properties": {
+          "plan_item": { "type": "integer", "minimum": 1 },
+          "risk": { "type": "string" },
+          "planted_defect": { "type": "string", "description": "Cambio concreto de código que realiza el riesgo." },
+          "tests": { "type": "array", "items": { "type": "string" }, "description": "Tests con ruta:línea; vacío si no hay." },
+          "fails_on_defect": { "type": "string", "enum": ["YES", "NO", "UNKNOWN"] },
+          "reasoning": { "type": "string" }
+        }
+      }
+    },
+    "adversarial_justification": {
+      "type": "string",
+      "description": "Iteración 1: por qué hay menos de dos hallazgos ADVERSARIAL, o \"n/a\"."
+    },
+    "evidence": { "type": "string" }
+  }
+}

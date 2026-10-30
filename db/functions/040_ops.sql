@@ -1,0 +1,54 @@
+-- 040 — Operación: limpieza de idempotencia, verificación de la historia, salud. Repetible.
+
+-- Limpieza de claves de idempotencia de más de 24 h (D-19). El job pide los usuarios con
+-- claves vencidas y limpia cada uno en su propia transacción, con try-lock: nunca borra una
+-- clave en medio de un replay en curso (el replay corre bajo el mismo lock) y nunca hace
+-- esperar a un escritor.
+CREATE OR REPLACE FUNCTION app.cleanup_candidates()
+RETURNS TABLE (userid int)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, app, pg_temp AS $$
+  SELECT DISTINCT k.userid FROM app.idempotency_keys k WHERE k.created_at < now() - interval '24 hours'
+$$;
+
+CREATE OR REPLACE FUNCTION app.cleanup_idempotency(p_userid int) RETURNS int
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, app, pg_temp AS $$
+DECLARE n int;
+BEGIN
+  IF NOT app.try_lock_user(p_userid) THEN RETURN 0; END IF;   -- escritura en curso: próxima pasada
+  DELETE FROM app.idempotency_keys
+   WHERE userid = p_userid AND created_at < now() - interval '24 hours';
+  GET DIAGNOSTICS n = ROW_COUNT;
+  RETURN n;
+END $$;
+
+-- Verificación de la historia, la corre el bootstrap después de migrar. Compara, por usuario,
+-- el cash del fold con una suma directa de importes (cálculo independiente del fold), y lista
+-- las posiciones que quedan en corto (historia heredada, D-01).
+CREATE OR REPLACE FUNCTION app.verify_ledger()
+RETURNS TABLE (userid int, problem text, detail text)
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, app, pg_temp AS $$
+DECLARE u int; fold_cash bigint; sum_cash bigint; r record;
+BEGIN
+  FOR u IN SELECT DISTINCT o.userid FROM app.orders o WHERE o.status = 'FILLED' ORDER BY 1 LOOP
+    SELECT s.cash_cents INTO fold_cash FROM app.c_state(u) s WHERE s.kind = 0;
+    SELECT COALESCE(sum(CASE o.side WHEN 'CASH_IN' THEN 1 WHEN 'SELL' THEN 1 ELSE -1 END
+                        * (o.size::numeric * o.price * 100)), 0)::bigint
+      INTO sum_cash FROM app.orders o WHERE o.userid = u AND o.status = 'FILLED';
+    IF fold_cash IS DISTINCT FROM sum_cash THEN
+      userid := u; problem := 'cash'; detail := format('fold %s ≠ suma %s (centavos)', fold_cash, sum_cash);
+      RETURN NEXT;
+    END IF;
+    FOR r IN SELECT s.instrumentid, s.qty FROM app.c_state(u) s WHERE s.kind = 1 AND s.qty < 0 LOOP
+      userid := u; problem := 'short';
+      detail := format('instrumento %s en %s: historia con venta sin tenencia (se tolera y se señala, D-01)', r.instrumentid, r.qty);
+      RETURN NEXT;
+    END LOOP;
+  END LOOP;
+END $$;
+
+-- Estado para GET /health.
+CREATE OR REPLACE FUNCTION app.health()
+RETURNS TABLE (users bigint)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, app, pg_temp AS $$
+  SELECT (SELECT count(*) FROM app.users)
+$$;

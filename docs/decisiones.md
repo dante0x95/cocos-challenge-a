@@ -1,0 +1,305 @@
+# Decisiones y suposiciones
+
+Registro de todo lo que no se desprende directamente del enunciado y que cambia lo que el sistema hace o devuelve. Cada entrada dice qué se decidió, por qué, qué se descartó y qué cuesta.
+
+Índice:
+
+- **Datos recibidos:** [D-01](#d-01) venta en corto heredada · [D-02](#d-02) dónde se señala · [D-03](#d-03) cubrir un corto · [D-04](#d-04) orden de la historia heredada · [D-05](#d-05) cash en centavos · [D-06](#d-06) antigüedad de una cotización · [D-07](#d-07) cotizaciones duplicadas
+- **Dominio:** [D-08](#d-08) qué mueve saldo y qué reserva · [D-09](#d-09) costo de una posición · [D-10](#d-10) rendimiento · [D-11](#d-11) orden por monto · [D-12](#d-12) ejecución de MARKET y LIMIT · [D-13](#d-13) números en la entrada y la salida · [D-14](#d-14) límites · [D-15](#d-15) valor total de la cuenta
+- **Arquitectura:** [D-16](#d-16) cómo se calcula el balance · [D-17](#d-17) protocolo de escritura · [D-18](#d-18) orden de ejecución · [D-19](#d-19) idempotencia · [D-20](#d-20) tiempos máximos · [D-21](#d-21) acceso a datos · [D-22](#d-22) lógica en la base · [D-23](#d-23) barrera de despliegue · [D-24](#d-24) migraciones
+- **API:** [D-25](#d-25) búsqueda · [D-26](#d-26) consulta y cancelación de una orden · [D-27](#d-27) autenticación · [D-28](#d-28) executor de LIMIT
+- [Fuera de alcance y límites conocidos](#fuera-de-alcance)
+
+---
+
+## Datos recibidos
+
+<a id="d-01"></a>
+### D-01 — Venta en corto en la historia recibida: se tolera y se señala
+
+**Hallazgo.** En `database.sql`, el usuario 1 compra 20 BMA (orden 9, `FILLED`) y después vende 30 (orden 11, `FILLED`). Queda con −10 acciones. El enunciado dice que una venta sin acciones suficientes debe quedar `REJECTED`, así que esa orden no debería existir. El cash no se ve afectado (753.000 / 125.500 / 627.500), porque suma importes sin mirar tenencias.
+
+**Alternativas.**
+1. **Tolerar y señalar.** La posición se muestra con su cantidad real (−10), costo 0, sin costo unitario ni rendimiento, y marcada. El resto del portfolio se calcula normalmente.
+2. **Cuarentena.** `GET /portfolio/1` responde `422` hasta que alguien corrija la historia a mano.
+
+**Decisión: 1.** El usuario 1 es el único con órdenes en los datos provistos. Con la opción 2, el endpoint principal no devolvería nada útil sobre esos datos. La opción 1 muestra todo, hace visible el problema y no oculta ni inventa nada. Se consultó con los autores del challenge: confirmaron que la interpretación y la opción 1 son correctas.
+
+**Lo que no cambia.** Una venta nueva sin tenencia suficiente siempre queda `REJECTED`. El corto solo puede venir de la historia recibida, nunca de la API. Al migrar, el bootstrap lo informa (`historia: usuario 1 — short`) en vez de abortar.
+
+<a id="d-02"></a>
+### D-02 — La historia inconsistente se señala en dos niveles
+
+- **Por posición:** `inconsistent: true` significa que la posición **está en corto ahora** (`qty < 0`).
+- **Por portfolio:** `has_inconsistent_history: true` significa que la historia del usuario tuvo alguna venta sin tenencia, aunque hoy ninguna posición esté en corto.
+
+**Por qué dos.** El flag de posición señala la fila exacta y deja usable el resto. El global sirve a quien consume solo el total. Además conserva la marca cuando el corto ya se cubrió ([D-03](#d-03)).
+
+**Descartado:** excluir la posición del portfolio o forzarla a 0. Ocultar el dato es peor que mostrarlo marcado.
+
+<a id="d-03"></a>
+### D-03 — Comprar sobre un corto heredado: las acciones que lo cubren no llevan costo
+
+**Problema.** Si el usuario 1 compra 15 BMA a 100 partiendo de −10, la regla ingenua (sumar el costo de la compra) deja `qty 5` con costo 1.500: un costo unitario de 300 cuando pagó 100 por cada acción que tiene, y un rendimiento de −66,7 % cuando es 0 %. Comprar exactamente 10 dejaba `qty 0` con costo 1.000.
+
+**Regla.** Al comprar `s` acciones con `qty < 0`, las primeras `−qty` cubren el corto **sin costo**. Solo el excedente `max(s + qty, 0)` abre posición, al precio de la compra. Si `qty` queda en 0 o menos, el costo es 0. La posición deja de estar marcada en cuanto `qty ≥ 0`; la marca histórica queda en `has_inconsistent_history`.
+
+**Por qué.** Esas acciones no se compraron para tenerlas: devolvieron las que faltaban. El costo de la posición debe ser el de las acciones que el usuario efectivamente tiene.
+
+**Cómo se verifica.** Hay casos fijos (compra 15, 10, 5; cubrir, cerrar y reabrir) en `test/db/ledger.test.ts`. Además, la prueba de propiedad siembra cortos heredados en el 20 % de los usuarios: si la base se aparta del oráculo en esta regla, falla.
+
+<a id="d-04"></a>
+### D-04 — Orden de la historia recibida: `(datetime, id)`
+
+Las órdenes `FILLED` recibidas no traen orden de ejecución. Se numeran por usuario en orden `(datetime, id)` en la columna `balance_seq` ([D-18](#d-18)). Es una **aproximación declarada**: `datetime` es la creación, no la ejecución. Para los datos provistos no hay ambigüedad (las 7 `FILLED` del usuario 1 tienen horas distintas). Las órdenes nuevas no dependen de esta regla: su secuencia se asigna al ejecutarlas.
+
+<a id="d-05"></a>
+### D-05 — Movimientos de cash en centavos
+
+**Antes:** `CASH_IN` de 100,50 ARS no se podía representar, porque `size` es entero y `price` era 1.
+**Después:** `size` = centavos y `price` = 0.01. 100,50 ARS → `size 10050`. El importe `size × price` de las órdenes existentes no cambia: la migración multiplica `size` por 100 y lo verifica.
+
+**Por qué así y no una columna `amount`.** Así se mantiene una sola fórmula para todas las órdenes: importe = `size × price`, exacto con enteros y dos decimales. Las sumas de cash quedan como una sola agregación sobre `orders`, como pide el enunciado.
+
+**Costo.** Como `size` es `integer`, el máximo por movimiento de cash es 21.474.836,47 ARS. Se rechaza con `400` por encima. Es un límite por operación, no del saldo.
+
+<a id="d-06"></a>
+### D-06 — Cotización válida y su antigüedad máxima, configurable
+
+Una cotización es válida si su fecha es ≤ hoy (zona `America/Argentina/Buenos_Aires`). Si `settings.price_max_age_days` no es `NULL`, además no puede ser más vieja que esa cantidad de días.
+
+**Valor por defecto: `NULL` (sin límite).** Las cotizaciones de `database.sql` son de julio de 2023. Con un límite de 7 días, ninguna posición se valuaría y toda MARKET terminaría en `NO_PRICE`: el sistema "no funcionaría" sobre los datos provistos. En producción, la configuración recomendada es 7 días (`UPDATE app.settings SET price_max_age_days = 7`). Los tests prueban los dos modos. Las fechas futuras se ignoran siempre.
+
+**Descartado:** mover las fechas de `marketdata` para que parezcan recientes. Altera datos provistos y esconde el problema.
+
+<a id="d-07"></a>
+### D-07 — Cotizaciones duplicadas por (instrumento, día): se conserva la de mayor id
+
+La migración impone una cotización por instrumento y día (`UNIQUE (instrumentid, date)`). Si hay duplicados, conserva la de mayor `id`, que es la última cargada. Los datos provistos no tienen duplicados; la regla existe para no fallar con otros datos.
+
+---
+
+## Dominio
+
+<a id="d-08"></a>
+### D-08 — Qué mueve saldo, qué reserva, qué se rechaza
+
+- Solo `FILLED` mueve cash y tenencias, como pide el enunciado.
+- `NEW` **reserva**: una compra LIMIT reserva `size × límite` en pesos; una venta LIMIT reserva `size` acciones. Lo reservado no se puede volver a usar. Sin esto, dos LIMIT podrían comprometer el mismo dinero.
+- `REJECTED` y `CANCELLED` no cuentan.
+- **Pesos disponibles** = cash neto − cash reservado. **Acciones disponibles** = tenencia − acciones reservadas.
+- Una orden que no alcanza **se persiste** como `REJECTED` y responde `201`: el enunciado pide grabarla. `CASH_OUT` por más del disponible también queda `REJECTED`.
+
+<a id="d-09"></a>
+### D-09 — Costo de una posición: promedio móvil en orden de ejecución, con enteros
+
+- Por instrumento, en orden de `balance_seq`. Una compra suma su importe al costo. Una venta deja `costo × (qty − s) / qty`, redondeado **half-even**. Al cerrar la posición, el costo vuelve a 0.
+- El costo se lleva en **micro-ARS** enteros (10⁻⁶ ARS) y el cash en centavos. Así nunca hay coma flotante, y el redondeo ocurre en un solo lugar, después de cada venta.
+- Lo que se afirma es **determinismo**: el mismo resultado siempre, para cualquier historia. No se afirma exactitud de la fracción infinita (100 / 3 no tiene representación finita).
+- Hay una sola implementación en el sistema (`app.c_state`) y un oráculo independiente en los tests ([D-22](#d-22)).
+
+<a id="d-10"></a>
+### D-10 — "Rendimiento total": no realizado, sobre el costo de la posición abierta
+
+- `rendimiento_pct` = (valor − costo) / costo × 100, con 2 decimales. Ejemplo: costo 100, valor 110 → `"10.00"`.
+- `resultado` = valor − costo, en pesos. Mismo dato en `$`: el enunciado pide la posición en `$` y el rendimiento en `%`, y los brokers suelen mostrar los dos.
+- `retorno_diario_pct` = (`close` − `previousClose`) / `previousClose` × 100, como indica el enunciado.
+- Son `null` cuando no hay precio, cuando la posición no es larga o cuando no tiene costo (por ejemplo, un corto heredado).
+
+**Interpretación declarada.** "Rendimiento total" se toma como resultado **no realizado** de lo que el usuario tiene hoy, contra su precio promedio de compra. El resultado **realizado** de ventas pasadas no se calcula (ver [fuera de alcance](#fuera-de-alcance)).
+
+<a id="d-11"></a>
+### D-11 — Orden por monto en pesos
+
+`POST /orders` acepta `size` **o** `amount`, nunca los dos. Con `amount`, la cantidad es `floor(amount / precio)`: el máximo entero, sin fracciones, como pide el enunciado. El precio es el `close` vigente para MARKET y el límite para LIMIT. Se calcula dentro de la función que decide, **bajo el lock** y con el mismo precio con que se ejecuta. Si da 0, responde `400` y no se graba orden. La orden se guarda con el `size` calculado. Para cash solo se acepta `amount`.
+
+<a id="d-12"></a>
+### D-12 — Ejecución de MARKET y LIMIT
+
+- **MARKET:** se ejecuta enseguida al último `close` válido ([D-06](#d-06)). Sin cotización válida responde `422 NO_PRICE` y **no se graba orden**: no hay un precio que registrar.
+- **LIMIT:** queda `NEW` y reserva ([D-08](#d-08)). El enunciado no pide simular el mercado. Hay un executor que ejecuta una LIMIT cuando el `close` vigente la cruza (compra: `close ≤ límite`; venta: `close ≥ límite`), **a su precio límite** ([D-28](#d-28)). Como el precio no cambia, lo reservado es exactamente lo ejecutado y no hace falta revalidar saldo. Sí se revalidan los límites de [D-14](#d-14): si ejecutarla los violaría, se cancela.
+- Sin ejecuciones parciales ni comisiones.
+
+<a id="d-13"></a>
+### D-13 — Números: se rechaza la escala de más; todo sale como string
+
+- **Entrada:** precios y montos con a lo sumo 2 decimales, como string o como entero JSON. `1.005` responde `400`: **se rechaza, no se redondea**. Un número JSON con decimales también se rechaza, porque un float no garantiza la escala. Lo aceptado se canoniza a 2 decimales (`100` → `"100.00"`) antes de seguir, también para el hash de idempotencia ([D-19](#d-19)).
+- **Salida:** importes, precios, costos, porcentajes, cantidades e ids viajan como **string** con escala fija. Un entero mayor que 2⁵³ no sobrevive a `JSON.parse` como número.
+- **En la API:** `BigInt` para todo dinero. node-postgres entrega `numeric` e `int8` como string y no se registra ningún parser que los convierta a `Number`. Un test lo verifica.
+
+<a id="d-14"></a>
+### D-14 — Límites de dominio
+
+Ningún movimiento se confirma si deja el cash fuera de ±10¹⁵ ARS (1.000.000.000.000.000,00) o una posición por encima de 2⁶² acciones. El cash tiene además el límite por movimiento de [D-05](#d-05).
+
+**Por qué existe el tope.** El cash sale del fold como `bigint` en centavos (`cash_cents`): su máximo es 92.233.720.368.547.758,07 ARS. Un cash por encima no se puede leer ni autorizar. El tope de 10¹⁵ deja margen sobre lo representable y es una cifra que se explica. Para las posiciones, 2⁶² deja margen dentro de `bigint`.
+
+**Dónde se valida.** Siempre bajo el lock, con el estado del momento en que el movimiento se confirma:
+
+- **MARKET y cash** (`place_order`): responden `422 LIMIT` y no se graba orden.
+- **LIMIT al ejecutarse** (`execute_limit`): una venta valida cash + importe ≤ 10¹⁵ ARS; una compra, posición + `size` ≤ 2⁶². Si se violaría, la orden pasa a `CANCELLED` con `cancel_reason = 'LIMIT'`: sale del executor, libera su reserva y el reporte del executor la lista aparte ([D-28](#d-28)). El usuario ve el motivo en `GET /orders/:id`. Ejemplo: cash 999.999.999.999.000,00 ARS y una venta LIMIT de 1.000 a 5.000 que la cotización cruza. Ejecutarla dejaría el cash en 1.000.000.004.999.000,00, así que se cancela y el cash no cambia. Si en cambio el cash fuera 999.999.995.000.000,00, quedaría exactamente en 10¹⁵ y se ejecuta.
+
+**Por qué al ejecutar y no al crear la `NEW`.** El cash puede crecer entre la creación y la ejecución, así que validar al crear no alcanza; validar al ejecutar cubre los dos casos. Antes, una LIMIT así se confirmaba fuera del tope o, si superaba `numeric(18,2)`, fallaba en cada corrida del executor y ocupaba un lugar del lote para siempre.
+
+**El motivo queda en la orden** (issue #21). `orders.cancel_reason` es `USER` (la canceló su dueño) o `LIMIT` (la canceló el executor por este tope), y `NULL` en cualquier otro estado. Lo escriben `cancel_order_outcome` y `execute_limit_outcome` en el mismo `UPDATE` que la cancela, bajo el lock. Un `CHECK` exige que esté si y solo si la orden está `CANCELLED`, y el trigger `orders_guard` aplica la misma regla en cada transición: el motivo se escribe al cancelar y después no cambia. Una cancelación sin motivo es lo que hacían las funciones anteriores, así que el trigger la rechaza con `APP04` (`503`, reintentable) y no con un `500` ([D-24](#d-24)). Las órdenes canceladas antes de la columna quedaron `USER` (migración `005`): no se guarda cuándo se canceló una orden ni el reporte del executor, y recalcular el tope con el cash de hoy no dice nada del cash de ese momento. Solo pueden ser `LIMIT` las que canceló el executor entre el PR del issue #2 y esta migración.
+
+<a id="d-15"></a>
+### D-15 — Valor total de la cuenta
+
+`valor_total` = cash neto + Σ (cantidad × último precio) de las posiciones con precio. **No resta el cash reservado**: reservar no cambia lo que el usuario tiene, solo lo que puede usar, y eso es `cash.disponible`. Si alguna posición no tiene precio, no suma al total y `valuation_complete` es `false`. Una posición en corto heredada suma con valor negativo: es lo que se debe.
+
+---
+
+## Arquitectura
+
+<a id="d-16"></a>
+### D-16 — El balance se calcula, no se guarda
+
+`orders` es la única fuente de verdad. El balance de un usuario es el resultado de recorrer sus órdenes `FILLED` en orden de ejecución ([D-18](#d-18)), como pide el enunciado. Cada lectura y cada autorización lo recalculan desde `orders`; no hay ninguna tabla de saldos que mantener en sincronía.
+
+- Lo que lo hace viable es un **índice parcial por usuario sobre las órdenes ejecutadas**: una lectura toca solo la historia de ese usuario, no la tabla. Medido en un benchmark de 22 millones de órdenes: 3 ms por lectura de un usuario típico, p99 ≤ 26 ms a 400 requests por segundo.
+- El costo de cada request crece con la historia del usuario. El mismo benchmark midió dónde deja de alcanzar (usuarios con más de 100.000 órdenes ejecutadas, consultados más de 2 veces por segundo) y qué lo resuelve (una caché del balance regenerable). Ese perfil de usuario no existe en el dataset del challenge, así que la caché queda medida y diferida: [`decision-snapshot.md`](decision-snapshot.md).
+
+**Descartado: una tabla de balances actualizada en cada orden.** Exige mantener en sincronía dos verdades en cada escritura, y un bug ahí se vuelve permanente.
+
+<a id="d-17"></a>
+### D-17 — La base impone el protocolo de escritura
+
+Toda escritura de órdenes pasa por una función de Postgres (`place_order`, `execute_limit`, `cancel_order`) que, en una transacción:
+
+1. toma un **lock por usuario** (advisory lock),
+2. lee el estado (órdenes ejecutadas + reservas),
+3. decide,
+4. escribe.
+
+El rol con que se conecta la API **no tiene INSERT, UPDATE ni DELETE** sobre ninguna tabla, solo `EXECUTE` sobre esas funciones. Por eso es imposible saltearse el orden lock → leer → decidir → escribir.
+
+**Por qué importa el orden.** Dos compras simultáneas que leen el saldo antes de tomar el lock ven el mismo disponible y se aprueban las dos: doble gasto. El trigger y los CHECKs no lo detectan, porque las dos filas son válidas por separado. `test/concurrency` lo demuestra en las dos direcciones: con la función oficial, una de las dos compras sale `REJECTED`; con una función de prueba que lee antes del lock, las dos salen `FILLED` y el cash queda negativo.
+
+**Por qué advisory lock y no `SELECT … FOR UPDATE` ni `SERIALIZABLE`.** No hay una fila de "cuenta" que bloquear, y `FOR UPDATE` sobre las órdenes escribe en cada una. `SERIALIZABLE` detecta el conflicto y aborta, lo que obliga a reintentar. El advisory lock previene en lugar de detectar, no toca el heap y se libera solo al terminar la transacción. Es cooperativo, por eso las funciones son la única vía de escritura.
+
+**Costo.** Todas las escrituras de un mismo usuario se serializan, incluidos los créditos. Entre usuarios distintos no hay espera.
+
+<a id="d-18"></a>
+### D-18 — Orden de ejecución: `balance_seq`, asignada al ejecutar
+
+El orden por `id` es el de creación, no el de ejecución. Ejemplo: comprar 10 a 100 (id 1); dejar una LIMIT de compra de 10 a 50 (id 2, `NEW`); vender 10 (id 3); ejecutar la id 2. Ordenando por `id`, el costo final sería 75; el real es 50.
+
+`balance_seq` se asigna cuando una orden pasa a `FILLED`, bajo el lock, como máximo + 1 del usuario. Invariantes en la base: existe si y solo si la orden está `FILLED`, es positiva, es única por usuario y es consecutiva (lo controla el trigger). `test/db/ledger.test.ts` reproduce el ejemplo.
+
+<a id="d-19"></a>
+### D-19 — Idempotencia de `POST /orders`
+
+- La cabecera `Idempotency-Key` es obligatoria, con alcance por usuario.
+- Misma clave y mismo body (comparado por hash SHA-256 del body validado, con claves ordenadas y `amount`/`price` canonizados a 2 decimales: `100`, `"100"`, `"100.0"` y `"100.00"` son el mismo body): devuelve **exactamente** la respuesta original con `Idempotent-Replay: true`, sin crear otra orden y sin reevaluar saldo ni precio.
+- Misma clave con otro body: `422 IDEMPOTENCY_MISMATCH`.
+- La clave se reclama dentro de la misma transacción y bajo el mismo lock que la orden, así que no puede haber orden sin clave ni dos órdenes con la misma clave.
+- Un `REJECTED` es una respuesta válida y se conserva. `NO_PRICE` no consume la clave, porque la transacción se revierte entera.
+- **Ventana de 24 h.** Pasado ese tiempo, la clave se puede reusar. Esto deduplica reintentos HTTP; no es una referencia única de depósito. La limpieza corre por usuario con try-lock, así que nunca borra una clave en medio de un replay.
+
+**Por qué obligatoria.** Una orden es dinero. Sin clave, un reintento por timeout puede ejecutar dos veces.
+
+**Transición de la canonización (issue #4).** Antes, `amount` y `price` entraban al hash tal como llegaban (`100` → `"100"`). Una clave grabada así guarda ese hash. La API le pasa a `app.place_order` también el hash que calculaba la versión anterior para ese mismo request (`p_legacy_hash`), y la función lo acepta **solo para reconocer una clave que ya existe**, en la misma sentencia, bajo el mismo lock y con el mismo tiempo máximo: el reintento que antes daba replay lo sigue dando, y un monto distinto sigue siendo `422`. Una clave nueva guarda siempre el hash canonizado. Como las claves duran 24 h, `legacyRequestHash` y `p_legacy_hash` se pueden quitar 24 h después del despliegue. No se borra ni se reescribe ninguna clave vigente.
+
+<a id="d-20"></a>
+### D-20 — Tiempos máximos y resultado desconocido
+
+- Cada escritura (`place_order`, `execute_limit_outcome`, `cancel_order_outcome`) es **una sola sentencia** de la API, `SELECT app.<función>(...)`, que es también su transacción. El presupuesto lo hace cumplir la base:
+  - `statement_timeout` de 5 s, fijado en el rol `api`: es el tiempo total de la escritura. Al vencer, Postgres cancela la sentencia y revierte todo, también el reclamo de la clave de idempotencia: `503 TIMEOUT`.
+  - `lock_timeout` de 2 s, como cláusula `SET` de cada función que espera el lock de usuario: rige con cualquier conexión y el llamador no lo puede ampliar. Al vencer: `503 LOCK_TIMEOUT`.
+- La espera por una conexión libre del pool, que la base no ve, la acota `PG_CONNECT_TIMEOUT_MS` (2 s por defecto): al vencer, `503 TIMEOUT` sin haber ejecutado nada.
+- Las lecturas tienen el mismo `statement_timeout` del rol `api`.
+- Todo `503` lleva `Retry-After`. Si la conexión se corta después de enviar la escritura, el resultado es **desconocido**, no "sin orden". El cliente debe reintentar con la misma `Idempotency-Key` para saber qué pasó: si la orden existe, el replay la devuelve.
+
+**Descartado: un deadline en la API que cancela la sentencia desde otra conexión (`pg_cancel_backend`).** Fue la primera versión (issue #1) y tenía dos defectos. El cancel pedía una conexión al mismo pool: con el pool lleno quedaba en cola y el deadline dejaba de funcionar justo cuando hacía falta. Y como `pg_cancel_backend` cancela lo que esté corriendo en un proceso, un cancel que llegaba tarde alcanzaba al request siguiente que había tomado esa conexión (`test/concurrency/timeouts.test.ts` lo reproduce). Con una sola sentencia por escritura, el `statement_timeout` es el deadline y no hay nada que cancelar desde afuera. De paso, `POST /orders` bajó de hasta 7 viajes a la base a 1, y la cancelación de 2 sentencias a 1: `cancel_order_outcome` devuelve el motivo (`ok`, `not_found`, `not_new`) junto con la orden.
+
+<a id="d-21"></a>
+### D-21 — Acceso a datos: `pg` y SQL directo, sin ORM. Express
+
+- **Por qué sin ORM.** La API hace dos tipos de llamada: `SELECT app.place_order(...)` y `SELECT * FROM app.read_portfolio(...)`. Un ORM no aporta nada ahí. Además suele mapear `numeric` a `number` (justo lo que [D-13](#d-13) evita) e intenta escribir tablas que el rol `api` tiene prohibidas a propósito.
+- **Por qué Express.** Lo nombra el enunciado, alcanza para lo que hace falta (rutas y JSON) y no decide nada por la aplicación.
+- **Validación con zod en el borde.** Forma del request en la API; reglas de estado en la base.
+
+<a id="d-22"></a>
+### D-22 — Lógica en la base: dónde se puso y por qué
+
+Poner lógica de negocio en Postgres tiene costos reales: herramientas de debug y test más pobres, despliegue acoplado a la base, la CPU de la base es lo más caro de escalar, y aparece un segundo lenguaje.
+
+**Qué hay en la base y por qué:**
+- **Lock, lectura, decisión y escritura** ([D-17](#d-17)). Es la única forma de que el protocolo no se pueda saltear: si viviera en TypeScript, bastaría una consulta en la conexión equivocada para el doble gasto, sin ningún error.
+- **El fold del balance** (`app.c_state`). Lo necesita la autorización, que corre bajo el lock dentro de la función. Llevar el fold a la aplicación obligaría a abrir la transacción, tomar el lock, traer las filas, decidir en Node y volver a escribir, con la API sosteniendo el lock durante todo el viaje de red.
+
+**Cómo se acota el costo:**
+- **Una sola implementación del fold** en todo el sistema. La lectura, la autorización y la verificación de la migración usan la misma función.
+- **Un oráculo independiente en TypeScript** (`test/oracle/fold.ts`), sin imports de `src/` ni de `db/`, contra el que se compara la base en historias aleatorias. No es duplicación sino lo que hace creíble a la primera implementación. Un error compartido entre la API y la base no pasaría esta prueba.
+- **Las funciones son idempotentes** (`CREATE OR REPLACE`) y se reaplican en cada bootstrap. Desplegar un cambio es correr el bootstrap.
+
+<a id="d-23"></a>
+### D-23 — Barrera de despliegue
+
+- Toda escritura toma un **lock compartido de despliegue** antes del lock de usuario. El bootstrap toma ese lock en modo exclusivo mientras aplica migraciones y funciones ([D-24](#d-24)): espera a que terminen las escrituras en curso y bloquea las nuevas hasta confirmar.
+- Un escritor que ya había entrado a una función anterior y quedó esperando sigue con ese cuerpo después del `COMMIT`. Si eso choca con el esquema nuevo, la migración lo hace fallar con `APP04` (`503 VERSION_MISMATCH`), reintentable: el reintento usa la función nueva.
+- Así desplegar es correr el bootstrap con la API viva, sin ventana en la que un escritor vea el esquema nuevo con las funciones viejas.
+
+<a id="d-24"></a>
+### D-24 — Migraciones: runner propio, versionadas más repetibles
+
+- `db/migrations/*.sql` corren **una vez**, en orden. `public.schema_migrations` guarda el nombre y el checksum de cada una. Si un archivo ya aplicado cambió, el bootstrap **aborta**: se corrige con una migración nueva, no editando la vieja.
+- `db/functions/*.sql` corren **siempre** (`CREATE OR REPLACE`).
+- **Migraciones pendientes y funciones van en una sola transacción**, con la barrera de despliegue de [D-23](#d-23) en modo exclusivo: espera a las escrituras en curso y frena las nuevas hasta el `COMMIT`. Ningún escritor ve un esquema nuevo con funciones viejas, y un bootstrap que falla a mitad de camino no deja nada aplicado. Un escritor que ya había entrado a una función anterior y quedó esperando sigue con ese cuerpo después del `COMMIT`: si eso choca con el esquema nuevo, la migración lo hace fallar con un error reintentable (en `005`, una cancelación sin motivo da `APP04` → `503`; issue #21).
+- `000_seed.sql` es el `database.sql` del challenge **sin modificar**. Si la base ya tiene las tablas del challenge (datos propios), se registra como aplicado sin correrlo.
+- La migración de datos ([D-04](#d-04), [D-05](#d-05)) se **audita antes** (`002_audit.sql` aborta con el detalle si algún dato viola una regla nueva) y se **verifica después**: el cash que da el fold tiene que coincidir con una suma directa de importes.
+- **Por qué no una herramienta de migraciones.** El runner tiene 150 líneas y hace exactamente esto. Una herramienta como `node-pg-migrate` serviría igual con el mismo SQL; no hace falta para este alcance.
+
+---
+
+## API
+
+<a id="d-25"></a>
+### D-25 — Búsqueda de activos
+
+- `GET /instruments?q=` busca por ticker **y** por nombre, sin distinguir mayúsculas, por coincidencia parcial. Los comodines `%` y `_` se buscan literalmente.
+- Orden: ticker exacto, ticker que empieza con `q`, nombre que empieza con `q`, el resto; después por ticker. Así, buscar `pamp` devuelve PAMP primero.
+- La moneda (ARS, tipo `MONEDA`) se excluye por defecto, porque no es un activo que se pueda comprar. Se incluye con `include_cash=true`.
+- **Sin índice, a propósito.** `instruments` tiene 66 filas: recorrerla entera es más rápido que cualquier índice, y Postgres no usaría uno. Si el catálogo creciera a decenas de miles, lo indicado sería un índice GIN `pg_trgm` sobre `ticker` y `name`, que sirve para `ILIKE '%q%'`.
+
+<a id="d-26"></a>
+### D-26 — Consulta y cancelación de una orden: siempre con el `userid` del dueño
+
+- `GET /orders/:id?userid=…` y `POST /orders/:id/cancel` con `{ "userid": … }`: el `userid` es obligatorio en los dos. Sin él, o inválido, `400`.
+- Una orden de otro usuario responde `404` con **el mismo cuerpo** que una inexistente (`orden <id> inexistente para el usuario <userid>`). Un `403` confirmaría que el id existe, y como los ids son incrementales se podrían enumerar todas las órdenes.
+- El filtro va en la misma consulta (`WHERE id = $1 AND userid = $2`): una orden ajena no se lee para compararla después.
+- La cancelación es una transición de estado (`NEW` → `CANCELLED`), no un borrado. Por eso es `POST` sobre una acción y no `DELETE`.
+- Una orden que ya no está `NEW` responde `409 NOT_CANCELLABLE` con su estado actual.
+- Una orden `CANCELLED` dice por qué: `cancel_reason` es `USER` si la canceló su dueño y `LIMIT` si la canceló el executor por [D-14](#d-14). En cualquier otro estado es `null`. Va en `GET /orders/:id`, en el `200` de la cancelación y en la orden del `409`. `POST /orders` también lo incluye (siempre `null`: una orden nueva no está cancelada), así la orden tiene la misma forma en los tres endpoints.
+- La cancelación corre bajo el mismo lock que el executor, así que una cancelación y una ejecución simultáneas no pueden ganar las dos (`test/concurrency`).
+
+<a id="d-27"></a>
+### D-27 — Sin autenticación
+
+No la pide el enunciado. El `userid` viaja en el path, la query o el body. Aun sin autenticación, la API no expone los datos de un usuario a quien pregunta por otro: cada recurso se pide junto con el `userid` de su dueño, y uno ajeno responde igual que uno inexistente ([D-26](#d-26)). En producción, el `userid` saldría del token y nunca del request; el contrato de cada endpoint no cambiaría, solo el origen del `userid`.
+
+<a id="d-28"></a>
+### D-28 — Executor de LIMIT: interno y manual
+
+`POST /internal/execute-limits` busca las LIMIT que el `close` vigente cruza y llama `execute_limit_outcome` para cada una, en su propia transacción. La decisión final la toma la función, bajo el lock y con la cotización releída: ejecutarla, no tocarla (ya no está `NEW` o no cruza) o cancelarla porque violaría [D-14](#d-14). `execute_limit` es la misma función con resultado booleano. El reporte lista las canceladas por el tope aparte de las ejecutadas, y la orden queda con `cancel_reason = 'LIMIT'` ([D-14](#d-14)), así no se confunde con una cancelación del usuario.
+
+**No corre solo.** El enunciado dice que no hace falta simular el mercado, y ejecutar órdenes sin que nadie lo pida cambiaría los datos que el evaluador mira. Existe para que el ciclo completo se pueda demostrar.
+
+Los endpoints `/internal/*` exigen la cabecera `X-Internal-Token`. Si `INTERNAL_TOKEN` no está configurado, no existen.
+
+---
+
+<a id="fuera-de-alcance"></a>
+## Fuera de alcance y límites conocidos
+
+| Qué | Estado |
+|---|---|
+| Resultado **realizado** de ventas pasadas | No se calcula. La función que vende conoce el costo promedio vigente; registrar `(orden, costo, ingreso)` en cada venta lo habilitaría sin tocar el resto. |
+| Liquidación (T+0 / T+1) | No se distingue: el disponible es inmediato. |
+| Ejecuciones parciales, comisiones, impuestos | No existen en este modelo. |
+| Vencimiento de órdenes `NEW` | Una LIMIT queda `NEW` hasta que se ejecuta o se cancela. |
+| Historia larga | El costo de cada lectura y autorización crece con las órdenes `FILLED` del usuario. Medido: alcanza hasta cientos de miles de órdenes por usuario a baja frecuencia; por encima, la caché medida en [`decision-snapshot.md`](decision-snapshot.md). Las `NEW` tampoco están acotadas: 5 usuarios con 2.000 cada uno no movieron la latencia. |
+| Serie temporal del portfolio | No se guarda ningún balance. Una fila por día daría la evolución del valor de la cuenta. |
+| Autenticación | Ver [D-27](#d-27). |
+| Calendario hábil | La antigüedad de una cotización se mide en días corridos. |

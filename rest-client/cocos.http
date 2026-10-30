@@ -1,0 +1,116 @@
+# Colección para la extensión REST Client de VS Code (humao.rest-client).
+# Con `docker compose up` corriendo. Cada request se ejecuta con "Send Request".
+@base = http://localhost:3000
+@internal = dev-internal-token
+
+### Salud
+GET {{base}}/health
+
+### Portfolio del usuario 1 (datos del challenge)
+GET {{base}}/portfolio/1
+
+### Portfolio: usuario inexistente → 404
+GET {{base}}/portfolio/999999
+
+### Buscar activos por ticker
+GET {{base}}/instruments?q=PAMP
+
+### Buscar activos por nombre (parcial, sin distinguir mayúsculas)
+GET {{base}}/instruments?q=patagonia
+
+### Buscar incluyendo la moneda
+GET {{base}}/instruments?q=ars&include_cash=true
+
+### Depositar pesos (CASH_IN) al usuario 2
+POST {{base}}/orders
+Content-Type: application/json
+Idempotency-Key: demo-cash-in-1
+
+{ "userid": 2, "side": "CASH_IN", "amount": "100000.00" }
+
+### Repetir el mismo request: mismo resultado, sin segunda orden (Idempotent-Replay: true)
+POST {{base}}/orders
+Content-Type: application/json
+Idempotency-Key: demo-cash-in-1
+
+{ "userid": 2, "side": "CASH_IN", "amount": "100000.00" }
+
+### Comprar MARKET por cantidad de acciones (se ejecuta al último close → FILLED)
+POST {{base}}/orders
+Content-Type: application/json
+Idempotency-Key: demo-buy-size-1
+
+{ "userid": 2, "side": "BUY", "type": "MARKET", "instrumentid": 47, "size": 10 }
+
+### Comprar MARKET por monto en pesos (size = máximo entero que alcanza)
+POST {{base}}/orders
+Content-Type: application/json
+Idempotency-Key: demo-buy-amount-1
+
+{ "userid": 2, "side": "BUY", "type": "MARKET", "instrumentid": 54, "amount": "5000.00" }
+
+### Comprar LIMIT (queda NEW y reserva pesos)
+# @name limit
+POST {{base}}/orders
+Content-Type: application/json
+Idempotency-Key: demo-buy-limit-1
+
+{ "userid": 2, "side": "BUY", "type": "LIMIT", "instrumentid": 47, "size": 5, "price": "900.00" }
+
+### Consultar la orden LIMIT (userid obligatorio)
+GET {{base}}/orders/{{limit.response.body.id}}?userid=2
+
+### Consultar la orden LIMIT como otro usuario → 404, igual que una orden inexistente
+GET {{base}}/orders/{{limit.response.body.id}}?userid=1
+
+### Consultar una orden sin userid → 400
+GET {{base}}/orders/{{limit.response.body.id}}
+
+### Cancelar la orden LIMIT (solo NEW)
+POST {{base}}/orders/{{limit.response.body.id}}/cancel
+Content-Type: application/json
+
+{ "userid": 2 }
+
+### Vender MARKET
+POST {{base}}/orders
+Content-Type: application/json
+Idempotency-Key: demo-sell-1
+
+{ "userid": 2, "side": "SELL", "type": "MARKET", "instrumentid": 47, "size": 3 }
+
+### Vender más de lo que tiene → 201 con status REJECTED
+POST {{base}}/orders
+Content-Type: application/json
+Idempotency-Key: demo-sell-too-much-1
+
+{ "userid": 2, "side": "SELL", "type": "MARKET", "instrumentid": 47, "size": 100000 }
+
+### Retirar pesos (CASH_OUT)
+POST {{base}}/orders
+Content-Type: application/json
+Idempotency-Key: demo-cash-out-1
+
+{ "userid": 2, "side": "CASH_OUT", "amount": "100.00" }
+
+### Error: MARKET con precio → 400
+POST {{base}}/orders
+Content-Type: application/json
+Idempotency-Key: demo-error-1
+
+{ "userid": 2, "side": "BUY", "type": "MARKET", "instrumentid": 47, "size": 1, "price": "10.00" }
+
+### Error: misma clave con otro body → 422 IDEMPOTENCY_MISMATCH
+POST {{base}}/orders
+Content-Type: application/json
+Idempotency-Key: demo-cash-in-1
+
+{ "userid": 2, "side": "CASH_IN", "amount": "1.00" }
+
+### Portfolio del usuario 2 después de operar
+GET {{base}}/portfolio/2
+
+### (interno) Ejecutar las LIMIT que la cotización vigente cruza
+POST {{base}}/internal/execute-limits
+X-Internal-Token: {{internal}}
+

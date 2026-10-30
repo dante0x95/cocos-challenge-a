@@ -1,0 +1,6 @@
+# esbuild (lo usan tsx y vitest) necesita su script de instalación para bajar el binario.
+# pnpm 10 usa onlyBuiltDependencies; versiones más nuevas, allowBuilds.
+onlyBuiltDependencies:
+  - esbuild
+allowBuilds:
+  esbuild: true

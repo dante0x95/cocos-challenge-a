@@ -21,12 +21,16 @@ Toda la decisión (saldo, tenencia, precio, estado) la toma `app.place_order` en
 
 | Campo | Reglas |
 |---|---|
-| `userid` | entero > 0 |
+| `userid` | entero > 0, hasta 2³¹ − 1 |
 | `side` | `BUY` · `SELL` · `CASH_IN` · `CASH_OUT` |
 | `type` | `MARKET` (por defecto) · `LIMIT` |
-| `instrumentid` | obligatorio en `BUY`/`SELL`; prohibido en cash (se usa ARS) |
-| `size` **o** `amount` | exactamente uno. `size`: acciones, entero > 0. `amount`: pesos, string > 0 con hasta 2 decimales; para `BUY`/`SELL` se compra o vende el máximo entero de acciones que alcanza: `size` = división entera de `amount` por el precio, en centavos, con el `close` en MARKET y el límite en LIMIT ([D-11](../decisiones.md#d-11)). La orden se graba con ese `size` y su `amount` es `size × precio`, no el monto pedido; si no alcanza para una acción, `400`. Para cash, solo `amount` (máximo 21474836.47). |
+| `instrumentid` | obligatorio en `BUY`/`SELL`; prohibido en cash (se usa ARS). Entero > 0, hasta 2³¹ − 1 |
+| `size` **o** `amount` | exactamente uno. `size`: acciones, entero > 0, hasta 2³¹ − 1. `amount`: pesos, string > 0 con hasta 2 decimales; para `BUY`/`SELL` se compra o vende el máximo entero de acciones que alcanza: `size` = división entera de `amount` por el precio, en centavos, con el `close` en MARKET y el límite en LIMIT ([D-11](../decisiones.md#d-11)). La orden se graba con ese `size` y su `amount` es `size × precio`, no el monto pedido; si no alcanza para una acción, `400`. Para cash, solo `amount` (máximo 21474836.47). |
 | `price` | obligatorio en `LIMIT`, prohibido en `MARKET`. String > 0 con hasta 2 decimales: se rechaza, no se redondea. |
+
+`amount` y `price` también se aceptan como número JSON, pero solo si es un entero dentro de ±2⁵³ (`9007199254740991` como máximo), el rango que `JSON.parse` representa exacto; uno mayor responde `400` con `entero fuera del rango exacto de JSON (±2^53); enviarlo como string`. Cualquier magnitud mayor, y todo valor con decimales, va como string ([D-13](../decisiones.md#d-13)). `100` y `"100.00"` cuentan como el mismo body para la idempotencia.
+
+El string preserva la precisión, pero no quita los límites: el importe de la orden (`size × price`) no puede superar 10¹⁵ ARS ([D-14](../decisiones.md#d-14)) y la cantidad, 2³¹ − 1. Un `price` como `"9007199254740993"` llega exacto a la base y responde `422 LIMIT`; un `amount` como `"12345678901234567890"` no puede dar una orden (con `size` hasta 2³¹ − 1 y el importe hasta 10¹⁵, ningún precio lo usa) y responde `422 LIMIT` o `400` según el precio, sin orden y con la clave libre.
 
 No se aceptan campos de más.
 
@@ -100,6 +104,8 @@ Devuelve la orden con la misma forma que `POST /orders`, con su estado actual, s
 ```json
 { "userid": 2 }
 ```
+
+`userid`: entero > 0, hasta 2³¹ − 1. Sin más campos.
 
 | Código | Cuándo |
 |---|---|

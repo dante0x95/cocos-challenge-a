@@ -395,7 +395,131 @@ describe('POST /orders — BUY y SELL MARKET por HTTP', () => {
   });
 });
 
-// Issue #1: cada escritura es una sola sentencia; su statement_timeout es el presupuesto (D-20).
+// Issue #8: un entero JSON fuera de ±2⁵³ llega redondeado desde JSON.parse; se rechaza como número y
+// se acepta exacto como string. Los ids del body tienen el tope de int4, como parseId: antes llegaban
+// a Postgres y respondían 500 (22003).
+describe('POST /orders — enteros JSON fuera de ±2⁵³ y topes de los ids (issue #8)', () => {
+  const RANGE = 'entero fuera del rango exacto de JSON (±2^53); enviarlo como string';
+  /** Usuario con `shares` acciones del instrumento de prueba, compradas al close. */
+  async function holder(tag: string, shares: number) {
+    const u = await newUser(tag);
+    expect((await order({ userid: u, side: 'CASH_IN', amount: fmt(q.closeCents * BigInt(shares)) })).body.status).toBe('FILLED');
+    expect((await order({ userid: u, side: 'BUY', type: 'MARKET', instrumentid: q.instrumentid, size: shares })).body.status).toBe('FILLED');
+    return u;
+  }
+  const sellLimit = (userid: number, price: unknown, k = key()) =>
+    order({ userid, side: 'SELL', type: 'LIMIT', instrumentid: q.instrumentid, size: 1, price }, k);
+  /** El request no llega a la base: 400 BAD_REQUEST con `message`, y ni un pool.query. */
+  async function rejected(req: () => Promise<Awaited<ReturnType<typeof post>>>, message: string | RegExp) {
+    const spy = vi.spyOn(pool, 'query');
+    try {
+      const r = await req();
+      expect(r.status).toBe(400);
+      expect(r.body.error).toBe('BAD_REQUEST');
+      expect(r.body.message).toMatch(message);
+      expect(spy).not.toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+    }
+  }
+
+  it('price 9007199254740993 y amount 12345678901234567890 como número → 400 con el mensaje de rango, sin tocar la base', async () => {
+    await rejected(() => sellLimit(1, 9007199254740993), `price: ${RANGE}`);
+    await rejected(() => order({ userid: 1, side: 'CASH_IN', amount: 12345678901234567890 }), `amount: ${RANGE}`);
+  });
+
+  // Como string llega exacto a place_order, que decide el tope por orden de D-14 (importe ≤ 10¹⁵ ARS):
+  // 9007199254740993 lo supera (422 LIMIT, no 400 de rango). La exactitud se ve debajo del tope, con
+  // 17 dígitos que Number redondea hacia abajo (999999999999999.93 → 999999999999999.875, "999999999999999.9"):
+  // convertido, el monto ya no alcanza para una acción a ese precio y el precio grabado sería otro.
+  it('price "9007199254740993" como string → llega exacto a place_order (422 LIMIT, no 400); "999999999999999.93" → 201 exacto', async () => {
+    const u = await holder('big-string', 1);
+    const over = await sellLimit(u, '9007199254740993');
+    expect(over.status).toBe(422);
+    expect(over.body.error).toBe('LIMIT');
+    const r = await sellLimit(u, '999999999999999.93');
+    expect(r.status).toBe(201);
+    expect(r.body).toMatchObject({ status: 'NEW', size: '1', price: '999999999999999.93', amount: '999999999999999.93' });
+    expect((await get(r.headers.get('location')!)).body).toEqual(r.body);
+  });
+
+  it('price 9007199254740991 (2⁵³ − 1) pasa la validación (422 LIMIT del tope, no 400); 9007199254740992 (2⁵³) → 400; 999999999999999 → 201 exacto', async () => {
+    const u = await holder('safe-max', 1);
+    const atMax = await sellLimit(u, 9007199254740991);
+    expect(atMax.status).toBe(422);
+    expect(atMax.body.error).toBe('LIMIT');
+    await rejected(() => sellLimit(u, 9007199254740992), `price: ${RANGE}`);
+    const r = await sellLimit(u, 999999999999999);
+    expect(r.status).toBe(201);
+    expect(r.body).toMatchObject({ status: 'NEW', price: '999999999999999.00' });
+  });
+
+  it('userid 2147483648 en POST /orders y en el cancel, e instrumentid 2147483648 → 400 en español sin tocar la base', async () => {
+    await rejected(() => order({ userid: 2_147_483_648, side: 'CASH_IN', amount: '1' }), /^userid: debe ser ≤ 2147483647$/);
+    await rejected(() => post('/orders/1/cancel', { userid: 2_147_483_648 }), /^userid: debe ser ≤ 2147483647$/);
+    await rejected(() => order({ userid: 1, side: 'BUY', type: 'MARKET', instrumentid: 2_147_483_648, size: 1 }), /^instrumentid: debe ser ≤ 2147483647$/);
+  });
+
+  it('price 1e3 → 201 con "1000.00"; price 1e21 → 400 con el mensaje de rango, no el de formato', async () => {
+    const u = await holder('exp', 1);
+    const r = await sellLimit(u, 1e3);
+    expect(r.status).toBe(201);
+    expect(r.body).toMatchObject({ status: 'NEW', price: '1000.00' });
+    await rejected(() => sellLimit(u, 1e21), `price: ${RANGE}`);
+  });
+
+  it('size 1e9 → 201 (REJECTED por falta de cash, pero la orden se grabó); size 1e10 → 400 por el tope, no 22003', async () => {
+    const u = await newUser('size-exp');
+    const r = await order({ userid: u, side: 'BUY', type: 'MARKET', instrumentid: q.instrumentid, size: 1e9 });
+    expect(r.status).toBe(201);
+    expect(r.body).toMatchObject({ status: 'REJECTED', size: '1000000000' });
+    await rejected(() => order({ userid: u, side: 'BUY', type: 'MARKET', instrumentid: q.instrumentid, size: 1e10 }), /^size: debe ser ≤ 2147483647$/);
+  });
+
+  it('idempotencia: price 100 y "100.00", y 999999999999999 y "999999999999999", son el mismo request', async () => {
+    const u = await holder('same-hash', 2);
+    for (const [asNumber, asString] of [[100, '100.00'], [999999999999999, '999999999999999']] as const) {
+      const k = key();
+      const first = await sellLimit(u, asNumber, k);
+      expect(first.status, String(asNumber)).toBe(201);
+      expect(first.headers.get('idempotent-replay')).toBe('false');
+      const replay = await sellLimit(u, asString, k);
+      expect(replay.status, asString).toBe(201);
+      expect(replay.headers.get('idempotent-replay')).toBe('true');
+      expect(replay.body).toEqual(first.body);
+    }
+    expect((await admin.query('SELECT count(*)::int AS n FROM app.orders WHERE userid = $1 AND side = $2', [u, 'SELL'])).rows[0].n).toBe(2);
+  });
+
+  const keysOf = async (u: number, k: string) =>
+    (await admin.query('SELECT count(*)::int AS n FROM app.idempotency_keys WHERE userid = $1 AND key = $2', [u, k])).rows[0].n;
+  const ordersOf = async (u: number) =>
+    (await admin.query("SELECT count(*)::int AS n FROM app.orders WHERE userid = $1 AND side <> 'CASH_IN'", [u])).rows[0].n;
+
+  // Con Number en el camino, amount llegaría como 999999999999999.9 < price: size 0 → 400 "no alcanza".
+  it('amount "999999999999999.93" como string → 201 exacto por HTTP (size = floor(amount / price), sin pasar por Number)', async () => {
+    const u = await newUser('big-amount');
+    const r = await order({ userid: u, side: 'BUY', type: 'LIMIT', instrumentid: q.instrumentid, amount: '999999999999999.93', price: '999999999999999.93' });
+    expect(r.status).toBe(201);
+    expect(r.body).toMatchObject({ status: 'REJECTED', size: '1', price: '999999999999999.93', amount: '999999999999999.93' });
+    expect((await get(r.headers.get('location')!)).body).toEqual(r.body);
+  });
+
+  // Ninguna orden puede usar este monto: size ≤ 2³¹ − 1 y size × price ≤ 10¹⁵ (D-14). Llega exacto a
+  // place_order, que responde con el motivo; nada queda grabado y la clave sigue libre.
+  it('amount "12345678901234567890" como string → llega a place_order: 422 LIMIT a 9007199254740993, 400 por cantidad a 1,00; sin orden ni clave', async () => {
+    const u = await newUser('amount-over');
+    for (const [price, status, message] of [['9007199254740993', 422, /10\^15 ARS/], ['1.00', 400, /cantidad supera el máximo/]] as const) {
+      const k = key();
+      const r = await order({ userid: u, side: 'BUY', type: 'LIMIT', instrumentid: q.instrumentid, amount: '12345678901234567890', price }, k);
+      expect(r.status, price).toBe(status);
+      expect(r.body.message, price).toMatch(message);
+      expect(await keysOf(u, k), price).toBe(0);
+    }
+    expect(await ordersOf(u)).toBe(0);
+  });
+});
+
 describe('una escritura = una sola llamada a la base', () => {
   afterEach(() => { vi.restoreAllMocks(); });
 

@@ -18,7 +18,7 @@ Requieren la cabecera `X-Internal-Token` con el valor de `INTERNAL_TOKEN` (`401`
 | Ruta | Qué hace |
 |---|---|
 | `/internal/execute-limits` | Ejecuta las LIMIT `NEW` que la cotización vigente cruza, a su precio límite. Cada una en su transacción; la decisión final la toma `app.execute_limit_outcome`, bajo el lock ([D-28](../decisiones.md#d-28)). Responde `{ candidates, executed, not_crossed, cancelled, errors }`. `cancelled` lista `{ order_id, reason: "LIMIT" }` de las que se cancelaron porque ejecutarlas violaría los límites de [D-14](../decisiones.md#d-14); esas órdenes quedan con `cancel_reason: "LIMIT"`. |
-| `/internal/cleanup-idempotency` | Borra las claves de idempotencia vencidas (más viejas que `settings.idempotency_ttl`, 24 h). Solo recupera espacio: el vencimiento lo decide `app.place_order` al reclamar la clave, con el mismo plazo, así que una clave vencida que el job todavía no borró ya no da replay ni `422` ([D-19](../decisiones.md#d-19)). |
+| `/internal/cleanup-idempotency` | Borra las claves de idempotencia vencidas hace más de un minuto (más viejas que `settings.idempotency_ttl`, 24 h, más un minuto de margen para los requests en curso). Solo recupera espacio: el vencimiento lo decide `app.place_order` al reclamar la clave, con el mismo plazo, así que una clave vencida que el job todavía no borró ya no da replay ni `422` ([D-19](../decisiones.md#d-19)). |
 
 ## Cuando la base se reinicia
 
@@ -65,7 +65,7 @@ UPDATE app.settings SET idempotency_ttl = '12 hours';  -- por defecto: 24 h (D-1
 UPDATE app.settings SET idempotency_ttl = DEFAULT;
 ```
 
-Es la única fuente del plazo (`app.idempotency_ttl()`): la usan `app.place_order` para decidir si una clave venció y la limpieza para borrarla. Cambiarlo rige para la próxima transacción, también sobre las claves ya grabadas.
+Es la única fuente del plazo (`app.idempotency_ttl()`): la usan `app.place_order` para decidir si una clave venció y la limpieza para borrarla (un minuto después de que vence). Cambiarlo rige para la próxima transacción, también sobre las claves ya grabadas.
 
 ## Antigüedad máxima de una cotización
 

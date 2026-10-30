@@ -2,7 +2,7 @@
 // app.place_order al reclamar la clave, con created_at y app.idempotency_ttl(); la limpieza solo
 // recupera espacio. Plan de pruebas del issue, puntos 1 a 7 y 9; el 8 (la limpieza en cola antes o
 // después del request) está en orders.api.test.ts, con la clave de la transición del hash.
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import type { Server } from 'node:http';
 import { createApp } from '../../src/app.js';
 import { config } from '../../src/config.js';
@@ -153,21 +153,25 @@ describe('el vencimiento lo decide place_order con created_at y app.idempotency_
     expect(await ordersOf(u)).toBe(2);
   });
 
-  it('3. settings.idempotency_ttl es la única fuente del plazo: a 1 minuto, una clave de 2 min la reusa place_order y la borra la limpieza; a 24 h, ninguno la toca', async () => {
+  it('3. settings.idempotency_ttl es la única fuente del plazo: a 1 minuto, una clave de 3 min la reusa place_order y la borra la limpieza; a 24 h, ninguno la toca', async () => {
     const u = await newUser('ttl-1min');
     const w = await newUser('ttl-1min-limpieza');
+    const v = await newUser('ttl-1min-margen');
     const k = key();
     const first = await order(cashIn(u), k);
     expect(first.status).toBe(201);
     expect((await order(cashIn(w), k)).status).toBe(201);
+    expect((await order(cashIn(v), k)).status).toBe(201);
     expect(await ttl()).toBe('24:00:00');
 
     let reused: Awaited<ReturnType<typeof order>>;
     try {
       await admin.query("UPDATE app.settings SET idempotency_ttl = '1 minute'");
       expect(await ttl()).toBe('00:01:00');
-      await age(u, k, '2 minutes');
-      await age(w, k, '2 minutes');
+      await age(u, k, '3 minutes');
+      await age(w, k, '3 minutes');
+      // Vencida hace 30 s: la limpieza todavía no la borra (la borra un minuto después de vencer).
+      await age(v, k, '90 seconds');
       // place_order la reusa…
       reused = await order(cashIn(u), k);
       expect(reused).toMatchObject({ status: 201, replay: 'false' });
@@ -176,20 +180,62 @@ describe('el vencimiento lo decide place_order con created_at y app.idempotency_
       const c = await candidates();
       expect(c).toContain(w);
       expect(c).not.toContain(u);
+      expect(c).not.toContain(v);
       expect(await cleanup(w)).toBe(1);
       expect(await rows(w, k)).toBe(0);
+      expect(await cleanup(v)).toBe(0);
+      expect(await rows(v, k)).toBe(1);
     } finally {
       await admin.query('UPDATE app.settings SET idempotency_ttl = DEFAULT');
     }
     expect(await ttl()).toBe('24:00:00');
 
-    // De vuelta a 24 h, la misma clave de 2 min está viva para los dos.
-    await age(u, k, '2 minutes');
+    // De vuelta a 24 h, la misma clave de 3 min está viva para los dos.
+    await age(u, k, '3 minutes');
     expect(await order(cashIn(u), k)).toMatchObject({ status: 201, replay: 'true', body: reused.body });
     expect(await candidates()).not.toContain(u);
     expect(await cleanup(u)).toBe(0);
     expect(await rows(u, k)).toBe(1);
     expect(await ordersOf(u)).toBe(2);
+  });
+
+  // CR-1 de la revisión: la limpieza corre con su propio now(), posterior. Si borrara la clave apenas
+  // vence, un request que empezó con la clave viva y espera la barrera de despliegue (D-23) la
+  // encontraría borrada al llegar al lock y crearía otra orden.
+  it('2b. la clave vence mientras el request espera la barrera de despliegue y la limpieza corre en ese rato → no la borra: el request da replay y no hay otra orden', async () => {
+    const u = await newUser('ttl-barrera');
+    const k = key();
+    const first = await order(cashIn(u), k);
+    expect(first).toMatchObject({ status: 201, replay: 'false' });
+
+    const d = await admin.connect();
+    try {
+      await d.query('BEGIN');
+      await d.query("SELECT pg_advisory_xact_lock(hashtext('deploy'))");   // lo que toma el bootstrap (D-24)
+      const dpid = (await d.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows[0].pid;
+      const pending = order(cashIn(u), k);
+      pending.catch(() => undefined);
+      for (;;) {   // el request ya fijó su now() y espera la barrera
+        const w = await admin.query('SELECT 1 FROM pg_stat_activity WHERE $1 = ANY (pg_blocking_pids(pid))', [dpid]);
+        if (w.rowCount) break;
+        await new Promise((r) => setTimeout(r, 5));
+      }
+      // Viva para el now() del request; vencida por reloj 1 s después.
+      await admin.query("UPDATE app.idempotency_keys SET created_at = now() - app.idempotency_ttl() + interval '1 second' WHERE userid = $1 AND key = $2", [u, k]);
+      await admin.query('SELECT pg_sleep(1.5)');
+      expect((await admin.query<{ expired: boolean }>(
+        'SELECT now() > created_at + app.idempotency_ttl() AS expired FROM app.idempotency_keys WHERE userid = $1 AND key = $2', [u, k])).rows[0].expired).toBe(true);
+      // La limpieza corre mientras el request espera: el lock de usuario está libre, pero no la borra.
+      expect(await candidates()).not.toContain(u);
+      expect(await cleanup(u)).toBe(0);
+      await d.query('COMMIT');
+      expect(await pending).toMatchObject({ status: 201, replay: 'true', body: first.body });
+    } finally {
+      await d.query('ROLLBACK').catch(() => undefined);
+      d.release();
+    }
+    expect(await ordersOf(u)).toBe(1);
+    expect(await rows(u, k)).toBe(1);
   });
 
   it('4. clave vencida con otro body → 201 nueva; la orden vieja sigue; la fila tiene hash, order_id, http_status, response_body y created_at nuevos, y es una sola', async () => {
@@ -280,6 +326,33 @@ describe('el vencimiento lo decide place_order con created_at y app.idempotency_
 
 // Dos requests reales con la misma clave vencida, con el lock del usuario como barrera: los dos
 // llegan a decidir bajo el lock, uno detrás del otro (nunca setTimeout para coordinar).
+// El plazo es configurable, pero no a cualquier valor: sin plazo (NULL) las claves no vencerían, y
+// con 0 o negativo no deduplicarían nada.
+describe('settings.idempotency_ttl solo acepta un intervalo positivo', () => {
+  // Si una regresión dejara pasar el valor, que no arrastre a las pruebas siguientes.
+  afterEach(async () => { await admin.query('UPDATE app.settings SET idempotency_ttl = DEFAULT'); });
+
+  it.each([
+    ['NULL', null, '23502'],
+    ['0', '0 seconds', '23514'],
+    ['negativo', '-1 hour', '23514'],
+  ])('%s → rechazado, y el plazo sigue en 24 h', async (_n, value, code) => {
+    await expect(admin.query('UPDATE app.settings SET idempotency_ttl = $1::interval', [value])).rejects.toMatchObject({ code });
+    expect(await ttl()).toBe('24:00:00');
+  });
+
+  it('un intervalo positivo se acepta (en una transacción que se revierte)', async () => {
+    const c = await admin.connect();
+    try {
+      await c.query('BEGIN');
+      await c.query("UPDATE app.settings SET idempotency_ttl = '1 microsecond'");
+      expect((await c.query<{ ttl: string }>('SELECT app.idempotency_ttl()::text AS ttl')).rows[0].ttl).toBe('00:00:00.000001');
+      await c.query('ROLLBACK');
+    } finally { c.release(); }
+    expect(await ttl()).toBe('24:00:00');
+  });
+});
+
 describe('7. dos requests a la vez sobre la misma clave vencida', () => {
   /** Envía los dos requests mientras el lock está tomado y lo suelta cuando los dos lo esperan. */
   async function race(u: number, k: string, bodies: [unknown, unknown]) {

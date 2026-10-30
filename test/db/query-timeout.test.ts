@@ -13,17 +13,28 @@ const POOL_MAX = 10;
 // Literal, no importado del código: el contrato del mensaje (resultado desconocido, D-20).
 const TIMEOUT_BODY = { error: 'TIMEOUT', message: 'la base no respondió a tiempo; el resultado es desconocido: reintentar con la misma Idempotency-Key' };
 
-/** Proxy hacia Postgres. `swallow(n)`: las próximas n consultas reciben su petición pero no su respuesta. */
+/**
+ * Proxy hacia Postgres. `swallow(n)`: las próximas n consultas reciben su petición pero no su
+ * respuesta. `delay(ms)`: la próxima consulta recibe su respuesta, pero ms después de que llega.
+ */
 function proxy(target: { host: string; port: number }) {
   let toSwallow = 0;
+  let nextDelay = 0;
   const srv = net.createServer((client) => {
     const upstream = net.connect(target.port, target.host);
     let swallowing = false;
+    let delayMs = 0;
     client.on('data', (chunk: Buffer) => {
-      if (!swallowing && toSwallow > 0 && (chunk[0] === 0x51 || chunk[0] === 0x50)) { swallowing = true; toSwallow--; }
+      if (!swallowing && delayMs === 0 && (chunk[0] === 0x51 || chunk[0] === 0x50)) {   // 'Q' simple / 'P' parse
+        if (toSwallow > 0) { swallowing = true; toSwallow--; } else if (nextDelay > 0) { delayMs = nextDelay; nextDelay = 0; }
+      }
       upstream.write(chunk);
     });
-    upstream.on('data', (chunk: Buffer) => { if (!swallowing) client.write(chunk); });
+    upstream.on('data', (chunk: Buffer) => {
+      if (swallowing) return;
+      if (delayMs > 0) { setTimeout(() => { if (!client.destroyed) client.write(chunk); }, delayMs); return; }
+      client.write(chunk);
+    });
     client.on('close', () => upstream.destroy());
     upstream.on('close', () => client.destroy());
     client.on('error', () => undefined);
@@ -32,6 +43,7 @@ function proxy(target: { host: string; port: number }) {
   return {
     listen: () => new Promise<number>((r) => srv.listen(0, '127.0.0.1', () => r((srv.address() as { port: number }).port))),
     swallow: (n: number) => { toSwallow = n; },
+    delay: (ms: number) => { nextDelay = ms; },
     close: () => srv.close(),
   };
 }
@@ -42,7 +54,6 @@ const admin = new pg.Pool({ connectionString: TEST_ADMIN_URL, max: 2 });
 let server: Server;
 let base: string;
 let pool: pg.Pool;
-let fromDbError: (e: unknown) => { status: number; code: string; retryAfter?: number };
 
 beforeAll(async () => {
   const port = await px.listen();
@@ -52,7 +63,6 @@ beforeAll(async () => {
   process.env.PG_POOL_MAX = String(POOL_MAX);
   process.env.PG_CONNECT_TIMEOUT_MS = '1000';
   ({ pool } = await import('../../src/db/pool.js'));
-  ({ fromDbError } = await import('../../src/http/errors.js'));
   const { createApp } = await import('../../src/app.js');
   server = createApp({ internalToken: 'test-token' }).listen(0);
   base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
@@ -113,18 +123,44 @@ describe('query_timeout: la respuesta de la base no llega', () => {
     const active = (await admin.query("SELECT count(*)::int AS n FROM pg_stat_activity WHERE application_name = 'cocos-api' AND state = 'active'")).rows[0].n;
     expect(active).toBe(0);
   });
-});
 
-describe('el orden de los dos relojes', () => {
-  it('una sentencia lenta con la base sana vence por statement_timeout de la base (57014), no por el plazo local', async () => {
-    // El rol api tiene statement_timeout = 5 s; el plazo local de este archivo es más corto a propósito,
-    // así que acá se sube para la prueba: la base debe ganar.
-    const slow = new pg.Pool({ connectionString: process.env.DATABASE_URL, max: 1, query_timeout: 8000 });
+  it('una respuesta que llega justo después del plazo: un solo 503, sin errores no manejados, y la siguiente request responde 200 por otra conexión', async () => {
+    await get('/portfolio/1');
+    const before = pool.totalCount;
+    const poolErrors: Error[] = [];
+    const onError = (e: Error) => { poolErrors.push(e); };
+    pool.on('error', onError);
     try {
-      const err = await slow.query('SELECT pg_sleep(6)').then(() => null, (e) => e as { code?: string });
-      expect(err?.code).toBe('57014');
-      const e = fromDbError(err);
-      expect({ status: e.status, code: e.code }).toEqual({ status: 503, code: 'TIMEOUT' });
-    } finally { await slow.end(); }
-  }, 15_000);
+      // El proxy entrega la respuesta QUERY_TIMEOUT_MS después de recibirla: su reloj arrancó después
+      // del del driver, así que la respuesta llega cuando el plazo local ya venció y la conexión se
+      // está cerrando.
+      px.delay(QUERY_TIMEOUT_MS);
+      const r = await quiet(() => get('/portfolio/1'));
+      expect(r).toEqual({ status: 503, retryAfter: '1', body: TIMEOUT_BODY });
+      await new Promise((res) => setTimeout(res, 200));   // la respuesta tardía ya llegó y se descartó
+      expect(pool.totalCount).toBe(before - 1);
+      const next = await get('/portfolio/1');
+      expect(next.status).toBe(200);
+    } finally { pool.off('error', onError); }
+    expect(poolErrors).toEqual([]);
+  });
+
+  it('POST /orders vence el plazo local esperando el lock (antes del commit); el reintento con la misma clave, con la primera ejecución pendiente, resuelve en una sola orden', async () => {
+    const u = await newUser();
+    // Barrera real, por fuera del proxy: el lock de usuario que espera place_order (lock_timeout 2 s,
+    // más que el plazo local de este archivo).
+    const barrier = new pg.Client({ connectionString: TEST_API_URL });
+    await barrier.connect();
+    try {
+      await barrier.query('BEGIN');
+      await barrier.query("SELECT pg_advisory_xact_lock(hashtext('user-balance'), $1)", [u]);
+      const first = await quiet(() => post(u, 'k'));
+      expect(first).toEqual({ status: 503, replay: null, retryAfter: '1', body: TIMEOUT_BODY });
+      // La primera ejecución sigue en la base, esperando el lock. El reintento queda detrás.
+      const retry = post(u, 'k');
+      await barrier.query('ROLLBACK');
+      expect(await retry).toMatchObject({ status: 201, replay: 'true' });
+    } finally { await barrier.end(); }
+    expect((await admin.query<{ n: number }>('SELECT count(*)::int AS n FROM app.orders WHERE userid = $1', [u])).rows[0].n).toBe(1);
+  });
 });

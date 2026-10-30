@@ -13,7 +13,8 @@
 // 2. db/functions/*.sql, en orden, SIEMPRE (CREATE OR REPLACE): así se despliega un cambio.
 // 3. Contraseña del rol api desde API_DB_PASSWORD.
 // 4. Si se aplicó alguna migración: verifica la historia (app.verify_ledger) y aborta si el
-//    cash del fold no coincide con la suma directa de importes.
+//    cash del fold no coincide con la suma directa de importes. Un corto heredado (D-01) o una
+//    historia fuera de lo representable (D-14) se informan y no abortan.
 // Los cuatro pasos van en UNA transacción, con la barrera de despliegue en modo exclusivo
 // (D-24): un escritor nunca ve el esquema nuevo con las funciones anteriores, y si algo falla,
 // también la verificación del paso 4, no queda nada aplicado (es el release_command del deploy,
@@ -117,7 +118,8 @@ async function run(db: pg.Pool, dbDir: string, opts: BootstrapOptions, log: (m: 
       if (result.applied.length > 0) {
         result.ledger = (await client.query('SELECT userid, problem, detail FROM app.verify_ledger()')).rows;
         for (const p of result.ledger) log(`  historia: usuario ${p.userid} — ${p.problem}: ${p.detail}`);
-        const broken = result.ledger.filter((p) => p.problem !== 'short');
+        // 'short' (D-01) y 'overflow' (historia fuera de los tipos, D-14) se toleran y se informan.
+        const broken = result.ledger.filter((p) => p.problem !== 'short' && p.problem !== 'overflow');
         if (broken.length) throw new Error(`verificación de la historia falló para ${broken.length} usuario(s)`);
       }
       await client.query('COMMIT');

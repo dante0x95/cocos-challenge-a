@@ -10,7 +10,8 @@
 -- Devuelve:
 --   kind 0, una fila: cash_cents, last_seq (máxima secuencia vista), filled_count,
 --           inconsistent = la historia tuvo alguna venta sin tenencia.
---   kind 1, una fila por instrumento con qty <> 0: qty, cost_total (micro-ARS),
+--   kind 1, una fila por instrumento con qty <> 0: qty, cost_total (micro-ARS, numeric sin
+--           decimales: en bigint desbordaría 100× por debajo del tope de D-14),
 --           inconsistent = la posición está en corto ahora (qty < 0).
 --
 -- Reglas del fold, por instrumento y en orden de balance_seq (D-09, D-03):
@@ -21,7 +22,7 @@
 --   qty ≤ 0 → costo = 0.
 -- Unidades: cash en centavos, costo en micro-ARS (10^-6 ARS), todo entero en numeric.
 CREATE OR REPLACE FUNCTION app.c_state(p_userid int)
-RETURNS TABLE (kind smallint, instrumentid int, qty bigint, cost_total bigint, inconsistent boolean,
+RETURNS TABLE (kind smallint, instrumentid int, qty bigint, cost_total numeric, inconsistent boolean,
                cash_cents bigint, last_seq bigint, filled_count int)
 LANGUAGE plpgsql STABLE SET search_path = pg_catalog, app, pg_temp AS $$
 DECLARE
@@ -50,7 +51,7 @@ BEGIN
 
     IF cur_i IS DISTINCT FROM r.instrumentid THEN
       IF cur_i IS NOT NULL AND q <> 0 THEN
-        kind := 1; instrumentid := cur_i; qty := q; cost_total := c; inconsistent := bad;
+        kind := 1; instrumentid := cur_i; qty := q; cost_total := c::numeric(24,0); inconsistent := bad;
         cash_cents := NULL; last_seq := NULL; filled_count := NULL;
         RETURN NEXT;
       END IF;
@@ -75,7 +76,7 @@ BEGIN
     bad := q < 0;
   END LOOP;
   IF cur_i IS NOT NULL AND q <> 0 THEN
-    kind := 1; instrumentid := cur_i; qty := q; cost_total := c; inconsistent := bad;
+    kind := 1; instrumentid := cur_i; qty := q; cost_total := c::numeric(24,0); inconsistent := bad;
     cash_cents := NULL; last_seq := NULL; filled_count := NULL;
     RETURN NEXT;
   END IF;
@@ -96,7 +97,7 @@ END $$;
 -- no existe; sin este chequeo, la API necesitaría otra consulta para responder 404 (issue #5).
 CREATE OR REPLACE FUNCTION app.read_portfolio(p_userid int)
 RETURNS TABLE (kind smallint, instrumentid int, ticker text, name text,
-               qty bigint, cost_total bigint, inconsistent boolean,
+               qty bigint, cost_total numeric, inconsistent boolean,
                reserved bigint, close numeric, previousclose numeric, price_date date)
 LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = pg_catalog, app, pg_temp AS $$
 #variable_conflict use_column
@@ -114,7 +115,7 @@ BEGIN
           WHERE o.userid = p_userid AND o.status = 'NEW'
           GROUP BY o.instrumentid)
   SELECT 0::smallint, NULL::int, NULL::text, NULL::text,
-         f.cash_cents, 0::bigint, f.inconsistent,
+         f.cash_cents, 0::numeric, f.inconsistent,
          COALESCE((SELECT sum(cash_cents) FROM res), 0)::bigint, NULL::numeric, NULL::numeric, NULL::date
     FROM f WHERE f.kind = 0
   UNION ALL

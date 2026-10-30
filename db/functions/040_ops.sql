@@ -23,14 +23,30 @@ END $$;
 
 -- Verificación de la historia, la corre el bootstrap después de migrar. Compara, por usuario,
 -- el cash del fold con una suma directa de importes (cálculo independiente del fold), y lista
--- las posiciones que quedan en corto (historia heredada, D-01).
+-- las posiciones que quedan en corto (historia heredada, D-01). Una sola pasada del fold por
+-- usuario. Una historia fuera de lo representable (22003 en el fold: importe o cash por encima
+-- de los tipos, D-14) se informa como 'overflow' en vez de abortar el bootstrap entero: ese
+-- usuario no puede operar hasta que se corrija su historia; los demás, sí.
 CREATE OR REPLACE FUNCTION app.verify_ledger()
 RETURNS TABLE (userid int, problem text, detail text)
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, app, pg_temp AS $$
-DECLARE u int; fold_cash bigint; sum_cash bigint; r record;
+DECLARE u int; fold_cash bigint; sum_cash bigint; r record; shorts text[];
 BEGIN
   FOR u IN SELECT DISTINCT o.userid FROM app.orders o WHERE o.status = 'FILLED' ORDER BY 1 LOOP
-    SELECT s.cash_cents INTO fold_cash FROM app.c_state(u) s WHERE s.kind = 0;
+    fold_cash := NULL; shorts := '{}';
+    BEGIN
+      FOR r IN SELECT s.kind, s.instrumentid, s.qty, s.cash_cents FROM app.c_state(u) s LOOP
+        IF r.kind = 0 THEN
+          fold_cash := r.cash_cents;
+        ELSIF r.qty < 0 THEN
+          shorts := shorts || format('instrumento %s en %s: historia con venta sin tenencia (se tolera y se señala, D-01)', r.instrumentid, r.qty);
+        END IF;
+      END LOOP;
+    EXCEPTION WHEN numeric_value_out_of_range THEN
+      userid := u; problem := 'overflow'; detail := SQLERRM;
+      RETURN NEXT;
+      CONTINUE;
+    END;
     SELECT COALESCE(sum(CASE o.side WHEN 'CASH_IN' THEN 1 WHEN 'SELL' THEN 1 ELSE -1 END
                         * (o.size::numeric * o.price * 100)), 0)::bigint
       INTO sum_cash FROM app.orders o WHERE o.userid = u AND o.status = 'FILLED';
@@ -38,9 +54,8 @@ BEGIN
       userid := u; problem := 'cash'; detail := format('fold %s ≠ suma %s (centavos)', fold_cash, sum_cash);
       RETURN NEXT;
     END IF;
-    FOR r IN SELECT s.instrumentid, s.qty FROM app.c_state(u) s WHERE s.kind = 1 AND s.qty < 0 LOOP
+    FOREACH detail IN ARRAY shorts LOOP
       userid := u; problem := 'short';
-      detail := format('instrumento %s en %s: historia con venta sin tenencia (se tolera y se señala, D-01)', r.instrumentid, r.qty);
       RETURN NEXT;
     END LOOP;
   END LOOP;

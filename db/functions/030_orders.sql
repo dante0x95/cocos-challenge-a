@@ -40,6 +40,7 @@ DECLARE
   v_cash      bigint;
   v_last_seq  bigint;
   pos_qty     bigint;
+  pos_cost    numeric;             -- costo de la posición en micro-ARS
   res         record;
   new_status  text;
   new_seq     bigint;
@@ -87,6 +88,11 @@ BEGIN
   IF is_cash THEN
     IF p_type <> 'MARKET' OR p_limit IS NOT NULL OR p_instrumentid <> k_ars OR p_size IS NOT NULL THEN
       RAISE EXCEPTION 'un movimiento de cash es MARKET, sobre ARS, por amount y sin precio' USING ERRCODE = 'APP02';
+    END IF;
+    -- D-05: el máximo por movimiento, antes del cast a bigint de (p_amount * 100), que con
+    -- un monto de 10^17 desbordaría (22003) antes de llegar a la comprobación de size.
+    IF p_amount > 21474836.47 THEN
+      RAISE EXCEPTION 'la cantidad supera el máximo por orden (2147483647)' USING ERRCODE = 'APP02';
     END IF;
     price := 0.01;
   ELSE
@@ -171,8 +177,9 @@ BEGIN
   -- Estado bajo el lock: una pasada del fold y las reservas.
   SELECT max(s.cash_cents) FILTER (WHERE s.kind = 0),
          max(s.last_seq)   FILTER (WHERE s.kind = 0),
-         COALESCE(max(s.qty) FILTER (WHERE s.kind = 1 AND s.instrumentid = p_instrumentid), 0)
-    INTO v_cash, v_last_seq, pos_qty
+         COALESCE(max(s.qty) FILTER (WHERE s.kind = 1 AND s.instrumentid = p_instrumentid), 0),
+         COALESCE(max(s.cost_total) FILTER (WHERE s.kind = 1 AND s.instrumentid = p_instrumentid), 0)
+    INTO v_cash, v_last_seq, pos_qty, pos_cost
     FROM app.c_state(p_userid) s;
   SELECT COALESCE(sum(CASE WHEN o.side = 'BUY' THEN o.size::numeric * o.price * 100 END), 0)             AS cash,
          COALESCE(sum(CASE WHEN o.side = 'SELL' AND o.instrumentid = p_instrumentid THEN o.size END), 0) AS shares
@@ -201,6 +208,11 @@ BEGIN
     END IF;
     IF p_side = 'BUY' AND pos_qty + v_size > 4611686018427387904 THEN
       RAISE EXCEPTION 'la posición superaría 2^62 acciones' USING ERRCODE = 'APP05';
+    END IF;
+    -- El costo de una posición no lo acota el cash (se puede depositar y comprar muchas veces):
+    -- tope propio de 10^17 ARS = 10^23 micro-ARS, con margen 10× sobre numeric(24,0).
+    IF p_side = 'BUY' AND pos_cost + imp * 10000 > 1e23 THEN
+      RAISE EXCEPTION 'el costo de la posición superaría 10^17 ARS' USING ERRCODE = 'APP05';
     END IF;
     new_seq := v_last_seq + 1;
   END IF;
@@ -234,14 +246,15 @@ END $$;
 --   'FILLED'   la ejecutó;
 --   'SKIPPED'  no la tocó: ya no estaba NEW o la cotización no la cruza;
 --   'LIMIT'    ejecutarla violaría D-14 (SELL: cash + importe > 10^15 ARS; BUY: posición +
---              size > 2^62 acciones): la canceló con cancel_reason = 'LIMIT', así sale del
---              executor, libera su reserva y el motivo queda en la orden (issue #21).
+--              size > 2^62 acciones o costo + importe > 10^17 ARS): la canceló con
+--              cancel_reason = 'LIMIT', así sale del executor, libera su reserva y el motivo
+--              queda en la orden.
 -- No revalida saldo: lo reservado al crearla es exactamente lo que se ejecuta. Por lo mismo,
 -- una BUY no puede dejar el cash negativo ni una SELL la posición: de D-14 solo quedan por
 -- validar el cash de una SELL y la posición de una BUY.
 CREATE OR REPLACE FUNCTION app.execute_limit_outcome(p_order_id bigint) RETURNS text
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, app, pg_temp SET lock_timeout = '2s' AS $$
-DECLARE o record; vc record; v_cash bigint; pos_qty bigint; nxt bigint; n int;
+DECLARE o record; vc record; v_cash bigint; pos_qty bigint; pos_cost numeric; nxt bigint; n int;
 BEGIN
   PERFORM app.deploy_barrier();
   -- El userid sale de la DB, no del llamador; solo sirve para elegir el lock.
@@ -265,11 +278,13 @@ BEGIN
   -- Límites de dominio (D-14), con el estado leído bajo el lock. El cash puede haber crecido
   -- desde que se creó la orden, así que no alcanza con validar al crearla.
   SELECT max(s.cash_cents) FILTER (WHERE s.kind = 0),
-         COALESCE(max(s.qty) FILTER (WHERE s.kind = 1 AND s.instrumentid = o.instrumentid), 0)
-    INTO v_cash, pos_qty
+         COALESCE(max(s.qty) FILTER (WHERE s.kind = 1 AND s.instrumentid = o.instrumentid), 0),
+         COALESCE(max(s.cost_total) FILTER (WHERE s.kind = 1 AND s.instrumentid = o.instrumentid), 0)
+    INTO v_cash, pos_qty, pos_cost
     FROM app.c_state(o.userid) s;
   IF o.side = 'SELL' AND v_cash + o.size::numeric * o.price * 100 > 1e17
-     OR o.side = 'BUY' AND pos_qty::numeric + o.size > 4611686018427387904 THEN
+     OR o.side = 'BUY' AND (pos_qty::numeric + o.size > 4611686018427387904
+                            OR pos_cost + o.size::numeric * o.price * 1000000 > 1e23) THEN
     UPDATE app.orders SET status = 'CANCELLED', cancel_reason = 'LIMIT'
      WHERE id = p_order_id AND userid = o.userid AND status = 'NEW';
     RETURN 'LIMIT';

@@ -45,13 +45,15 @@ El CI las corre en cada PR contra Postgres 18. Flujo de trabajo, formato de comm
 
 ## Desplegar
 
-Cada commit de `main` con el CI en verde se despliega en Fly.io: la API y Postgres 18 en dos apps, el bootstrap antes de cambiar de versión, el tráfico a la versión nueva solo si `/health` responde, y un gate que no deja desplegar un commit anterior al que atiende ([D-29](docs/decisiones.md#d-29)).
+Cada commit de `main` con el CI en verde se despliega en Fly.io: una imagen publicada en GHCR con el SHA, primero en `staging` y después, con aprobación manual, en producción; en cada entorno la API y Postgres 18 en dos apps, el bootstrap antes de cambiar de versión, el tráfico a la versión nueva solo si `/health` responde, y un gate que no deja desplegar un commit anterior al que atiende ([D-29](docs/decisiones.md#d-29)).
 
 La primera vez, parado en `main` y con [`flyctl`](https://fly.io/docs/flyctl/install/) autenticado:
 
 ```bash
-deploy/fly/setup.sh                                              # apps, volumen, secretos y primer deploy
-fly tokens create deploy -a cocos-challenge-a-api | gh secret set FLY_API_TOKEN
+deploy/fly/setup.sh                                                                        # producción
+CONFIG=deploy/fly/staging.toml DB_CONFIG=deploy/fly/staging-db.toml deploy/fly/setup.sh   # staging
+fly tokens create deploy -a cocos-challenge-a-staging | gh secret set FLY_API_TOKEN --env staging
+fly tokens create deploy -a cocos-challenge-a-api | gh secret set FLY_API_TOKEN --env production
 ```
 
 Los ensayos (un merge que llega a producción, un deploy roto: bootstrap que falla, `/health` caído, re-run del CI de un commit viejo; y los datos de Postgres después de redesplegar la base) se corren a mano con `deploy/fly/drills.sh`; no corren en el CI. Operación: [`docs/api/operacion.md`](docs/api/operacion.md#desplegar-en-flyio).

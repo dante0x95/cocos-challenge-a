@@ -11,18 +11,23 @@
 
 ALTER SCHEMA app OWNER TO app_owner;
 
+-- Solo lo que no es de app_owner (lo que crea una migración nueva). ALTER ... OWNER TO toma
+-- AccessExclusiveLock aunque el dueño ya sea el mismo: sobre todas las tablas, en cada
+-- bootstrap, chocaba con las lecturas de la API en curso durante un deploy (una lectura con
+-- AccessShareLock sobre app.users esperando app.orders, que tenía la migración) y terminaba en
+-- deadlock: 503 para la lectura o, si la víctima era el bootstrap, un deploy fallido (issue #13).
 DO $$
 DECLARE r record;
 BEGIN
-  FOR r IN SELECT tablename FROM pg_tables WHERE schemaname = 'app' LOOP
+  FOR r IN SELECT tablename FROM pg_tables WHERE schemaname = 'app' AND tableowner <> 'app_owner' LOOP
     EXECUTE format('ALTER TABLE app.%I OWNER TO app_owner', r.tablename);
   END LOOP;
-  FOR r IN SELECT sequencename FROM pg_sequences WHERE schemaname = 'app' LOOP
+  FOR r IN SELECT sequencename FROM pg_sequences WHERE schemaname = 'app' AND sequenceowner <> 'app_owner' LOOP
     EXECUTE format('ALTER SEQUENCE app.%I OWNER TO app_owner', r.sequencename);
   END LOOP;
   FOR r IN SELECT p.oid::regprocedure AS sig
              FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
-            WHERE n.nspname = 'app' LOOP
+            WHERE n.nspname = 'app' AND p.proowner <> 'app_owner'::regrole LOOP
     EXECUTE format('ALTER FUNCTION %s OWNER TO app_owner', r.sig);
   END LOOP;
 END $$;

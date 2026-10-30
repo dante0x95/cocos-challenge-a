@@ -2,7 +2,9 @@
 // challenge; la segunda no cambia nada (idempotente). También: una migración ya aplicada que
 // cambia de contenido aborta, y una base que ya tiene las tablas del challenge no se re-siembra.
 import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
+import { once } from 'node:events';
+import { createServer } from 'node:net';
 import { cpSync, mkdtempSync, readFileSync, rmSync, appendFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -544,4 +546,142 @@ describe('actualización a cost_total numeric', () => {
       await adminDb.end();
     }
   }, 120_000);
+});
+
+// Issue #13, plan de pruebas 2: un deploy con una migración nueva no deja requests en 500. La
+// API real (src/server.ts) atiende sobre la base mientras el bootstrap migra: una migración que
+// toma app.orders en modo exclusivo y un archivo de funciones que espera un lock que retiene la
+// prueba. Las requests que llegan en ese momento esperan la barrera de despliegue o el lock de
+// la tabla. Si el bootstrap termina pronto, todas terminan bien; si tarda más que el lock_timeout
+// de las funciones (2 s), las escrituras responden 503 LOCK_TIMEOUT con Retry-After, ninguna
+// 500, y el reintento con la misma clave deja una sola orden por clave. Una lectura en curso
+// tampoco choca con el bootstrap: antes, 090_privileges.sql tomaba AccessExclusiveLock sobre
+// todas las tablas (ALTER OWNER sin cambios) y la lectura terminaba en deadlock (503 DEADLOCK) o
+// el bootstrap, víctima del deadlock, fallaba.
+describe('deploy con la API atendiendo (issue #13)', () => {
+  let adminDb: pg.Pool;
+  let proc: ReturnType<typeof spawn> | undefined;
+  let base: string;
+
+  beforeEach(async () => {
+    await recreateDatabase(DB);
+    await bootstrap({ adminUrl: url, apiPassword: 'api', ...quiet });
+    adminDb = new pg.Pool({ connectionString: url });
+    const free = createServer().listen(0);
+    await once(free, 'listening');
+    const port = (free.address() as { port: number }).port;
+    await new Promise((r) => free.close(r));
+    proc = spawn(resolve('node_modules/.bin/tsx'), [resolve('src/server.ts')], {
+      env: { ...process.env, PORT: String(port), DATABASE_URL: dbUrl(DB, { name: 'api', password: 'api' }),
+        JOBS_ENABLED: 'false', LOG_REQUESTS: 'false' },
+      stdio: ['ignore', 'pipe', 'inherit'],
+    });
+    let out = '';
+    await new Promise<void>((ok, fail) => {
+      proc!.stdout!.on('data', (d: Buffer) => { out += d; if (out.includes('escuchando')) ok(); });
+      proc!.on('exit', (code) => fail(new Error(`src/server.ts salió con ${code}: ${out}`)));
+    });
+    base = `http://127.0.0.1:${port}`;
+  }, 60_000);
+  afterEach(async () => {
+    if (proc && proc.exitCode === null) {
+      proc.kill('SIGTERM');
+      await once(proc, 'exit');
+    }
+    await adminDb.end();
+  });
+
+  const cashIn = async (key: string) => {
+    const r = await fetch(`${base}/orders`, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'Idempotency-Key': key },
+      body: JSON.stringify({ userid: 1, side: 'CASH_IN', amount: '1' }),
+    });
+    return { status: r.status, retryAfter: r.headers.get('retry-after'), replay: r.headers.get('idempotent-replay'),
+      body: (await r.json()) as Record<string, unknown> };
+  };
+  const portfolio = async () => {
+    const r = await fetch(`${base}/portfolio/1`);
+    return { status: r.status, retryAfter: r.headers.get('retry-after'), body: (await r.json()) as Record<string, unknown> };
+  };
+  const cashInOrders = async () => (await adminDb.query<{ n: number }>(
+    "SELECT count(*)::int AS n FROM app.orders WHERE userid = 1 AND side = 'CASH_IN'")).rows[0].n;
+  /** Espera a que n conexiones de la API estén esperando un lock en esta base. */
+  const apiWaiting = async (n: number) => {
+    for (let i = 0; i < 200; i++) {
+      const { w } = (await adminDb.query<{ w: number }>(
+        "SELECT count(*)::int AS w FROM pg_stat_activity WHERE datname = $1 AND application_name = 'cocos-api' AND wait_event_type = 'Lock'",
+        [DB])).rows[0];
+      if (w >= n) return;
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    throw new Error(`no hay ${n} conexiones de la API esperando un lock`);
+  };
+
+  /** Bootstrap con una migración nueva, pausado después de migrar hasta que `release` vuelve. */
+  async function deployDuring(release: (inFlight: Promise<unknown>[]) => Promise<unknown>, requests: () => Promise<unknown>[]) {
+    const dir = mkdtempSync(join(tmpdir(), 'cocos-db-live-'));
+    cpSync(resolve('db'), dir, { recursive: true });
+    writeFileSync(join(dir, 'migrations', '999_test_live.sql'), 'ALTER TABLE app.orders ADD COLUMN test_live int; CREATE TABLE app.test_live_new (x int);');
+    writeFileSync(join(dir, 'functions', '015_test_pause.sql'), "SELECT pg_advisory_xact_lock(hashtext('test-live-deploy'));");
+    const pause = await adminDb.connect();
+    try {
+      await pause.query('BEGIN');
+      await pause.query("SELECT pg_advisory_xact_lock(hashtext('test-live-deploy'))");
+      const deploying = bootstrap({ adminUrl: url, apiPassword: 'api', dbDir: dir, ...quiet });
+      deploying.catch(() => undefined);
+      // El bootstrap ya migró (tiene app.orders y la barrera) y espera en el archivo de funciones.
+      for (let i = 0; ; i++) {
+        const { n } = (await adminDb.query<{ n: number }>(
+          "SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = $1 AND application_name = 'cocos-bootstrap' AND wait_event = 'advisory'",
+          [DB])).rows[0];
+        if (n > 0) break;
+        if (i > 200) throw new Error('el bootstrap no llegó a la pausa');
+        await new Promise((r) => setTimeout(r, 25));
+      }
+      const inFlight = requests();
+      await apiWaiting(inFlight.length);
+      await release(inFlight);
+      await pause.query('COMMIT');
+      expect((await deploying).applied).toEqual(['999_test_live.sql']);
+      return await Promise.all(inFlight);
+    } finally {
+      await pause.query('ROLLBACK').catch(() => undefined);
+      pause.release();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it('las requests que llegan durante la migración esperan y terminan bien si el bootstrap termina pronto', async () => {
+    const before = await cashInOrders();
+    const keys = ['vivo-1', 'vivo-2', 'vivo-3'];
+    const results = await deployDuring(async () => undefined, () => [...keys.map(cashIn), portfolio()]) as Awaited<ReturnType<typeof cashIn>>[];
+    expect(results.map((r) => [r.status, r.body.error ?? null])).toEqual([[201, null], [201, null], [201, null], [200, null]]);
+    expect(await cashInOrders()).toBe(before + keys.length);
+    // 090 sigue pasando a app_owner lo que crea una migración, y api no puede escribirlo.
+    expect((await adminDb.query("SELECT tableowner FROM pg_tables WHERE schemaname = 'app' AND tablename = 'test_live_new'")).rows)
+      .toEqual([{ tableowner: 'app_owner' }]);
+    expect((await adminDb.query("SELECT has_table_privilege('api', 'app.test_live_new', 'INSERT') AS ins")).rows[0].ins).toBe(false);
+  }, 60_000);
+
+  it('si el bootstrap tarda más que el lock_timeout: 503 reintentables y nunca 500, y el reintento deja una orden por clave', async () => {
+    const before = await cashInOrders();
+    const keys = ['lento-1', 'lento-2', 'lento-3'];
+    // La barrera sigue tomada hasta que las tres escrituras respondieron: su lock_timeout (2 s)
+    // vence con el bootstrap todavía en curso. Recién entonces termina el bootstrap y responde la
+    // lectura, que esperaba app.orders.
+    const results = await deployDuring((inFlight) => Promise.all(inFlight.slice(0, keys.length)),
+      () => [...keys.map(cashIn), portfolio()]) as Awaited<ReturnType<typeof cashIn>>[];
+    for (const r of results) {
+      expect(r.status, JSON.stringify(r.body)).not.toBe(500);
+      expect([200, 201, 503]).toContain(r.status);
+      if (r.status === 503) expect(r.retryAfter).toBe('1');
+    }
+    const writes = results.slice(0, keys.length);
+    expect(writes.map((r) => r.body.error)).toEqual(['LOCK_TIMEOUT', 'LOCK_TIMEOUT', 'LOCK_TIMEOUT']);
+    // Ninguna escritura que respondió 503 dejó una orden; el reintento con la misma clave, sí, una.
+    expect(await cashInOrders()).toBe(before);
+    for (const key of keys) expect(await cashIn(key)).toMatchObject({ status: 201, replay: 'false' });
+    for (const key of keys) expect(await cashIn(key)).toMatchObject({ status: 201, replay: 'true' });
+    expect(await cashInOrders()).toBe(before + keys.length);
+  }, 60_000);
 });

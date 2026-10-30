@@ -35,6 +35,19 @@ describe('fromDbError: tiempos de conexión del pool (D-20)', () => {
   });
 });
 
+// Durante un deploy (D-24, issue #13): un escritor que siguió con el cuerpo anterior de una
+// función y choca con el esquema nuevo falla con APP04, y uno que espera la barrera más que el
+// lock_timeout, con 55P03. Los dos son reintentables con la misma clave: 503 con Retry-After, no 500.
+describe('fromDbError: errores de un deploy en curso', () => {
+  it.each([
+    ['APP04', 'VERSION_MISMATCH'],
+    ['55P03', 'LOCK_TIMEOUT'],
+  ])('%s → 503 %s con Retry-After 1', (code, expected) => {
+    const e = fromDbError(Object.assign(new Error('x'), { code }));
+    expect({ status: e.status, code: e.code, retryAfter: e.retryAfter }).toEqual({ status: 503, code: expected, retryAfter: 1 });
+  });
+});
+
 describe('fromDbError: cortes de conexión (issue #7)', () => {
   const lost = { status: 503, code: 'CONNECTION_LOST', retryAfter: 1 };
   // Toda la clase 08 de SQLSTATE (connection_exception) y los códigos de corte de la clase 57.

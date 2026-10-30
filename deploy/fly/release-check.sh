@@ -7,7 +7,9 @@
 #       El commit a desplegar desciende del release que atiende /health. Un re-run del CI de
 #       un commit viejo dispara el workflow igual que un merge; acá se frena. Volver a
 #       desplegar el mismo commit pasa. Sin release (app caída o sin crear) se frena: el
-#       primer deploy es deploy/fly/setup.sh.
+#       primer deploy es deploy/fly/setup.sh. Con $GITHUB_OUTPUT definido, escribe ahí
+#       previous=<release actual>: si después hay que volver atrás (rollback.sh restore), es el
+#       release que tiene que atender otra vez.
 #
 #   SHA=<commit> URL=https://<app>.fly.dev deploy/fly/release-check.sh after
 #       /health responde ok: true con release igual al SHA. Reintenta mientras release sea el
@@ -29,6 +31,7 @@ before() {
   body="$(health)" || fail "no responde $URL/health. Si es el primer deploy: deploy/fly/setup.sh"
   current="$(jq -r '.release // empty' <<<"$body" 2>/dev/null)" || fail "/health no devolvió JSON: $body"
   [ -n "$current" ] || fail "/health no informa release: $body. Si es el primer deploy: deploy/fly/setup.sh"
+  if [ -n "${GITHUB_OUTPUT:-}" ]; then echo "previous=$current" >> "$GITHUB_OUTPUT"; fi
   if [ "$current" = "$SHA" ]; then
     echo "== atiende $SHA: se vuelve a desplegar el mismo commit"
     return 0

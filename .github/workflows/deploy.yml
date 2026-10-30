@@ -1,9 +1,19 @@
 # Deploy continuo a Fly.io (D-29): cada commit de main con el check "ci" en verde se despliega.
-# fly.toml corre el bootstrap como release_command antes de cambiar de versión, y la estrategia
-# bluegreen pasa el tráfico solo si /health responde 2xx. Antes de desplegar, el commit tiene
-# que descender del release que atiende (un re-run del CI de un commit viejo dispara este
-# workflow igual que un merge); después, /health tiene que atenderlo. Las dos verificaciones:
-# deploy/fly/release-check.sh. La primera vez: deploy/fly/setup.sh.
+# Tres etapas, en orden (issue #13):
+#   image       construye la imagen una sola vez, la publica en GHCR etiquetada con el SHA y
+#               entrega su digest (deploy/fly/image-digest.sh): la referencia inmutable.
+#   staging     despliega esa imagen, por digest, en la app de staging, con el gate y el check
+#               de /health.
+#   production  la misma imagen, por el mismo digest, en la app de producción, detrás del
+#               environment `production` de GitHub, que exige aprobación manual (Settings →
+#               Environments → required reviewers; no se puede fijar en este archivo).
+# fly.toml y deploy/fly/staging.toml corren el bootstrap como release_command antes de cambiar
+# de versión, y la estrategia bluegreen pasa el tráfico solo si /health responde 2xx. Antes de
+# cada deploy, el commit tiene que descender del release que atiende (un re-run del CI de un
+# commit viejo dispara este workflow igual que un merge); después, /health tiene que atenderlo.
+# Las dos verificaciones: deploy/fly/release-check.sh. Si la de después falla una vez
+# desplegado, el entorno vuelve solo a la imagen y el release anteriores (deploy/fly/rollback.sh)
+# y el job queda en rojo. La primera vez: deploy/fly/setup.sh.
 # No hay deploy manual desde acá: un commit que no pasó por el CI no se despliega.
 name: deploy
 
@@ -16,45 +26,145 @@ on:
 permissions:
   contents: read
 
-# Un deploy a la vez, sin cortar uno en curso: cortarlo a mitad del bootstrap no rompe nada
-# (es una transacción), pero deja un deploy fallido que hay que mirar. queue: max deja esperar
-# a todos los pendientes, en orden de llegada: con la cola por defecto (single) cada pendiente
-# nuevo cancela al anterior, y un re-run del CI de un commit viejo que llega mientras otro
-# deploy corre cancelaría el deploy pendiente de un merge más nuevo; después el gate frena al
-# viejo y ese merge queda sin desplegar.
-concurrency:
-  group: deploy
-  cancel-in-progress: false
-  queue: max
+# Concurrencia por entorno, en cada job de deploy (staging y production), no del workflow: un
+# grupo del workflow lo retendría la corrida entera, también mientras production espera la
+# aprobación, y el staging de los merges siguientes no correría hasta que alguien aprobara (o
+# rechazara) el anterior. En cada entorno, un deploy a la vez, sin cortar uno en curso: cortarlo
+# a mitad del bootstrap no rompe nada (es una transacción), pero deja un deploy fallido que hay
+# que mirar. queue: max deja esperar a todos los pendientes, en orden de llegada: con la cola
+# por defecto (single) cada pendiente nuevo cancela al anterior, y un re-run del CI de un commit
+# viejo que llega mientras otro deploy corre cancelaría el deploy pendiente de un merge más
+# nuevo; después el gate frena al viejo y ese merge queda sin desplegar.
+
+env:
+  SHA: ${{ github.event.workflow_run.head_sha }}
+  IMAGE: ghcr.io/${{ github.repository }}
 
 jobs:
-  deploy:
+  image:
     # Solo commits que llegaron a main con el CI en verde (un PR desde una rama llamada main no
     # cuenta: su evento es pull_request).
     if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      # El commit que pasó el CI, no el último de main.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.SHA }}
+      - name: Login en GHCR
+        run: echo "$GITHUB_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Construir la imagen
+        run: docker build -t "$IMAGE:$SHA" .
+      - name: Publicar la imagen
+        run: docker push "$IMAGE:$SHA"
+      # La etiqueta se puede sobrescribir (otra corrida del mismo commit); el digest no.
+      - name: Digest de la imagen publicada
+        id: digest
+        run: deploy/fly/image-digest.sh
+    outputs:
+      ref: ${{ steps.digest.outputs.ref }}
+
+  staging:
+    needs: image
+    runs-on: ubuntu-latest
+    concurrency:
+      group: deploy-staging
+      cancel-in-progress: false
+      queue: max
     timeout-minutes: 20
     environment:
-      name: production
-      url: https://cocos-challenge-a-api.fly.dev
+      name: staging
+      url: https://cocos-challenge-a-staging.fly.dev
     env:
-      SHA: ${{ github.event.workflow_run.head_sha }}
-      URL: https://cocos-challenge-a-api.fly.dev
+      URL: https://cocos-challenge-a-staging.fly.dev
+      CONFIG: deploy/fly/staging.toml
+      IMAGE_REF: ${{ needs.image.outputs.ref }}
     steps:
-      # El commit que pasó el CI, no el último de main. Con la historia completa: el gate
-      # compara ese commit con el release que atiende.
+      # Con la historia completa: el gate compara el commit con el release que atiende.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.SHA }}
           fetch-depth: 0
       - name: El commit desciende del release actual
+        id: gate
         run: deploy/fly/release-check.sh before
       - uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1 # 1.6
-      - name: Deploy
-        run: flyctl deploy --remote-only --image-label "$SHA" --env "RELEASE=$SHA"
+      - name: Imagen que atiende
+        id: serving
+        run: deploy/fly/rollback.sh record
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-      # Desde afuera, por el dominio público: atiende este commit con ok: true. Si el deploy no
-      # hubiera cambiado nada, release sería el commit anterior; reintenta mientras lo sea.
+      - name: Deploy
+        id: deploy
+        run: flyctl deploy --config deploy/fly/staging.toml --image "$IMAGE_REF" --env "RELEASE=$SHA"
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
       - name: /health atiende el commit
         run: deploy/fly/release-check.sh after
+      # Si algo falló desde que empezó el deploy: la verificación de después, o el deploy mismo,
+      # que puede fallar después de conmutar (bluegreen habilita las máquinas nuevas antes de
+      # retirar las anteriores, y la retirada puede fallar). rollback.sh mira las máquinas: si el
+      # deploy falló antes de conmutar, todas siguen en la imagen anterior y no toca ninguna.
+      # Con el gate o record en rojo, el deploy no corrió (skipped) y no hay nada que volver.
+      - name: Volver a la imagen anterior
+        if: failure() && steps.deploy.outcome != 'skipped'
+        run: deploy/fly/rollback.sh restore
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          PREVIOUS_IMAGE: ${{ steps.serving.outputs.image }}
+          PREVIOUS_RELEASE: ${{ steps.gate.outputs.previous }}
+
+  production:
+    needs: [image, staging]
+    runs-on: ubuntu-latest
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
+      queue: max
+    timeout-minutes: 20
+    environment:
+      name: production
+      url: https://cocos-challenge-a-api.fly.dev
+    env:
+      URL: https://cocos-challenge-a-api.fly.dev
+      CONFIG: fly.toml
+      IMAGE_REF: ${{ needs.image.outputs.ref }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.SHA }}
+          fetch-depth: 0
+      - name: El commit desciende del release actual
+        id: gate
+        run: deploy/fly/release-check.sh before
+      - uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1 # 1.6
+      - name: Imagen que atiende
+        id: serving
+        run: deploy/fly/rollback.sh record
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+      - name: Deploy
+        id: deploy
+        run: flyctl deploy --config fly.toml --image "$IMAGE_REF" --env "RELEASE=$SHA"
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+      - name: /health atiende el commit
+        run: deploy/fly/release-check.sh after
+      # Si algo falló desde que empezó el deploy: la verificación de después, o el deploy mismo,
+      # que puede fallar después de conmutar (bluegreen habilita las máquinas nuevas antes de
+      # retirar las anteriores, y la retirada puede fallar). rollback.sh mira las máquinas: si el
+      # deploy falló antes de conmutar, todas siguen en la imagen anterior y no toca ninguna.
+      # Con el gate o record en rojo, el deploy no corrió (skipped) y no hay nada que volver.
+      - name: Volver a la imagen anterior
+        if: failure() && steps.deploy.outcome != 'skipped'
+        run: deploy/fly/rollback.sh restore
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          PREVIOUS_IMAGE: ${{ steps.serving.outputs.image }}
+          PREVIOUS_RELEASE: ${{ steps.gate.outputs.previous }}

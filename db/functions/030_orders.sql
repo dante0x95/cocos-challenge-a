@@ -244,29 +244,53 @@ BEGIN
   RETURN jsonb_build_object('status', 201, 'body', body, 'replay', false, 'order_id', new_id::text);
 END $$;
 
+-- ¿Tiene respaldo una LIMIT NEW con `p_cash` de cash y `p_qty` acciones de su instrumento? Se
+-- llama bajo el lock. Una venta necesita esas acciones; una compra, ese cash (size × price). Lo
+-- que la propia orden reserva no cuenta en contra: es lo que está por ejecutar (una SELL por toda
+-- la tenencia tiene respaldo). Una orden sobre una MONEDA nunca lo tiene: BUY/SELL no aplica sobre
+-- una moneda, y el CHECK orders_cash_shape no lo impide para una compra.
+-- El executor pasa el cash y la tenencia tal cual: el respaldo se evalúa al ejecutar y la que
+-- cruza primero se lleva lo que hay. El bootstrap descuenta lo que reservan las NEW que conserva
+-- (cancel_unbacked). En régimen siempre da true: place_order no deja una NEW sin respaldo y
+-- ninguna escritura posterior gasta lo reservado. Da false solo con una NEW heredada (D-24,
+-- D-12), insertada en orders sin pasar por place_order (issue #6).
+CREATE OR REPLACE FUNCTION app.limit_backed(p_order app.orders, p_cash numeric, p_qty numeric) RETURNS boolean
+LANGUAGE sql STABLE SET search_path = pg_catalog, app, pg_temp AS $$
+  SELECT NOT EXISTS (SELECT 1 FROM app.instruments i WHERE i.id = p_order.instrumentid AND i.type = 'MONEDA')
+     AND CASE p_order.side
+           WHEN 'SELL' THEN p_qty >= p_order.size
+           WHEN 'BUY'  THEN p_cash >= p_order.size::numeric * p_order.price * 100
+           ELSE false
+         END
+$$;
+
 -- Ejecuta una LIMIT pendiente si la cotización vigente la cruza (BUY: close ≤ límite;
 -- SELL: close ≥ límite), a su precio límite (D-12). Devuelve:
 --   'FILLED'   la ejecutó;
 --   'SKIPPED'  no la tocó: ya no estaba NEW o la cotización no la cruza;
+--   'UNBACKED' no tiene respaldo (limit_backed: SELL sin esas acciones, BUY sin ese cash, o sobre
+--              una MONEDA): la canceló con cancel_reason = 'UNBACKED'. Solo pasa con una NEW
+--              heredada, insertada en orders sin pasar por place_order; en régimen lo reservado
+--              al crearla es exactamente lo que se ejecuta (issue #6).
 --   'LIMIT'    ejecutarla violaría D-14 (SELL: cash + importe > 10^15 ARS; BUY: posición +
 --              size > 2^62 acciones o costo + importe > 10^17 ARS): la canceló con
---              cancel_reason = 'LIMIT', así sale del executor, libera su reserva y el motivo
---              queda en la orden.
--- No revalida saldo: lo reservado al crearla es exactamente lo que se ejecuta. Por lo mismo,
--- una BUY no puede dejar el cash negativo ni una SELL la posición: de D-14 solo quedan por
--- validar el cash de una SELL y la posición de una BUY.
+--              cancel_reason = 'LIMIT'.
+-- En los dos casos la orden sale del executor, libera su reserva y el motivo queda en ella.
+-- El respaldo y D-14 se revalidan bajo el lock, con una sola lectura del estado. Una BUY con
+-- respaldo no puede dejar el cash negativo ni una SELL la posición: de D-14 solo quedan por
+-- validar el cash de una SELL y la posición y el costo de una BUY.
 CREATE OR REPLACE FUNCTION app.execute_limit_outcome(p_order_id bigint) RETURNS text
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, app, pg_temp SET lock_timeout = '2s' AS $$
-DECLARE o record; vc record; v_cash bigint; pos_qty bigint; pos_cost numeric; nxt bigint; n int;
+DECLARE uid int; o app.orders%ROWTYPE; vc record; v_cash bigint; pos_qty bigint; pos_cost numeric; nxt bigint; n int;
 BEGIN
   PERFORM app.deploy_barrier();
   -- El userid sale de la DB, no del llamador; solo sirve para elegir el lock.
-  SELECT userid INTO o FROM app.orders WHERE id = p_order_id;
+  SELECT userid INTO uid FROM app.orders WHERE id = p_order_id;
   IF NOT FOUND THEN RETURN 'SKIPPED'; END IF;
-  PERFORM app.lock_user(o.userid);
+  PERFORM app.lock_user(uid);
 
   -- Relectura bajo el lock: pudo haberse cancelado o ejecutado mientras esperábamos.
-  SELECT id, userid, instrumentid, side, size, price, status, type INTO o FROM app.orders WHERE id = p_order_id;
+  SELECT * INTO o FROM app.orders WHERE id = p_order_id;
   IF o.status <> 'NEW' OR o.type <> 'LIMIT' THEN
     RETURN 'SKIPPED';
   END IF;
@@ -278,13 +302,24 @@ BEGIN
     RETURN 'SKIPPED';
   END IF;
 
-  -- Límites de dominio (D-14), con el estado leído bajo el lock. El cash puede haber crecido
-  -- desde que se creó la orden, así que no alcanza con validar al crearla.
+  -- Estado bajo el lock: una pasada del fold para el respaldo y para D-14.
   SELECT max(s.cash_cents) FILTER (WHERE s.kind = 0),
          COALESCE(max(s.qty) FILTER (WHERE s.kind = 1 AND s.instrumentid = o.instrumentid), 0),
          COALESCE(max(s.cost_total) FILTER (WHERE s.kind = 1 AND s.instrumentid = o.instrumentid), 0)
     INTO v_cash, pos_qty, pos_cost
     FROM app.c_state(o.userid) s;
+
+  -- Respaldo (issue #6): una NEW heredada sin acciones o sin cash no se ejecuta; ejecutarla
+  -- dejaría la posición en corto o el cash negativo, y eso ya no sería historia sino una
+  -- decisión del sistema (D-01).
+  IF NOT app.limit_backed(o, v_cash, pos_qty) THEN
+    UPDATE app.orders SET status = 'CANCELLED', cancel_reason = 'UNBACKED'
+     WHERE id = p_order_id AND userid = o.userid AND status = 'NEW';
+    RETURN 'UNBACKED';
+  END IF;
+
+  -- Límites de dominio (D-14). El cash puede haber crecido desde que se creó la orden, así que
+  -- no alcanza con validar al crearla.
   IF o.side = 'SELL' AND v_cash + o.size::numeric * o.price * 100 > 1e17
      OR o.side = 'BUY' AND (pos_qty::numeric + o.size > 4611686018427387904
                             OR pos_cost + o.size::numeric * o.price * 1000000 > 1e23) THEN
@@ -301,8 +336,8 @@ BEGIN
   RETURN CASE WHEN n > 0 THEN 'FILLED' ELSE 'SKIPPED' END;
 END $$;
 
--- La misma ejecución, como booleano: true si la ejecutó. Una LIMIT cancelada por D-14 da false;
--- el executor usa execute_limit_outcome para informarla aparte.
+-- La misma ejecución, como booleano: true si la ejecutó. Una LIMIT cancelada por D-14 o sin
+-- respaldo da false; el executor usa execute_limit_outcome para informarla aparte.
 CREATE OR REPLACE FUNCTION app.execute_limit(p_order_id bigint) RETURNS boolean
 LANGUAGE sql SECURITY DEFINER SET search_path = pg_catalog, app, pg_temp AS $$
   SELECT app.execute_limit_outcome(p_order_id) = 'FILLED'

@@ -123,12 +123,13 @@ Devuelve la orden con la misma forma que `POST /orders`, con su estado actual, s
 }
 ```
 
-Una LIMIT también queda `CANCELLED` si el executor la cancela porque ejecutarla violaría los límites de [D-14](../decisiones.md#d-14). `cancel_reason` distingue los dos casos:
+Una LIMIT también queda `CANCELLED` si la cancela el sistema: el executor, porque ejecutarla violaría los límites de [D-14](../decisiones.md#d-14), o el executor o el bootstrap, porque no tiene respaldo ([D-12](../decisiones.md#d-12)). `cancel_reason` distingue los casos:
 
 | `cancel_reason` | Quién la canceló |
 |---|---|
 | `USER` | su dueño, con este endpoint |
 | `LIMIT` | el executor, porque ejecutarla habría dejado el cash por encima de 10¹⁵ ARS o la posición por encima de 2⁶² acciones |
+| `UNBACKED` | el executor o el bootstrap, porque no tenía respaldo: una venta sin esas acciones, una compra sin ese cash o una orden sobre una moneda. Solo le pasa a una orden heredada de una base preexistente, insertada sin pasar por `POST /orders`, que nunca deja una `NEW` sin respaldo ([D-12](../decisiones.md#d-12), [D-24](../decisiones.md#d-24)) |
 | `null` | nadie: la orden no está `CANCELLED` |
 
 Las órdenes canceladas antes de que existiera el campo figuran como `USER` ([D-14](../decisiones.md#d-14)).

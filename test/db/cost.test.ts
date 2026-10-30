@@ -278,7 +278,8 @@ describe('que no vuelva', () => {
       await c.query("SET LOCAL track_functions = 'pl'");
       // Una llamada que termina en excepción (el usuario con overflow) no entra en las estadísticas.
       const overflow = Number((await c.query<{ n: string }>("SELECT count(*)::text AS n FROM app.verify_ledger() WHERE problem = 'overflow'")).rows[0].n);
-      const users = Number((await c.query<{ n: string }>("SELECT count(DISTINCT userid)::text AS n FROM app.orders WHERE status = 'FILLED'")).rows[0].n);
+      // Los usuarios que verifica: con alguna orden FILLED o NEW (las NEW, por su respaldo; issue #6).
+      const users = Number((await c.query<{ n: string }>("SELECT count(DISTINCT userid)::text AS n FROM app.orders WHERE status IN ('FILLED', 'NEW')")).rows[0].n);
       const calls = Number((await c.query<{ c: string }>(
         "SELECT calls::text AS c FROM pg_stat_xact_user_functions WHERE funcname = 'c_state'")).rows[0]?.c ?? 0);
       expect(calls).toBe(users - overflow);

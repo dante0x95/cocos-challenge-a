@@ -3,6 +3,8 @@
 // coinciden con test/oracle/fold.ts, una implementación independiente.
 // Un 20 % de los usuarios arranca con una venta en corto heredada (D-01), para recorrer
 // también las reglas de cobertura (D-03), que la API sola nunca generaría.
+// En régimen ninguna LIMIT queda sin respaldo: cero UNBACKED al final (issue #6). Si aparece,
+// es un bug de reserva en place_order, no de historia heredada.
 // Tamaño por env: PARITY_USERS (100) × PARITY_OPS (20), PARITY_SEED (42).
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { admin, arsId, cents, fmt, legacyShort, newUser, placeOrder, quotes, type Quote } from '../support/db.js';
@@ -64,9 +66,11 @@ describe(`paridad base == oráculo (${USERS} usuarios × ${OPS} ops, seed ${SEED
     const pick = <T,>(xs: T[]): T => xs[Math.floor(rnd() * xs.length)];
     const int = (lo: number, hi: number) => lo + Math.floor(rnd() * (hi - lo + 1));
     let totalOps = 0;
+    const users: number[] = [];
 
     for (let u = 0; u < USERS; u++) {
       const userid = await newUser('parity');
+      users.push(userid);
       const s = O.newState();
       const pending: bigint[] = [];
 
@@ -176,6 +180,11 @@ describe(`paridad base == oráculo (${USERS} usuarios × ${OPS} ops, seed ${SEED
       await compare(userid, s, 'final');
     }
     expect(totalOps).toBeGreaterThanOrEqual(1000);
+    // Cada ejecución que el oráculo dio por válida se confirmó FILLED (ya comparado paso a paso);
+    // además, ninguna LIMIT de estos usuarios se canceló por falta de respaldo.
+    const unbacked = (await admin.query<{ n: number }>(
+      "SELECT count(*)::int AS n FROM app.orders WHERE userid = ANY($1) AND cancel_reason = 'UNBACKED'", [users])).rows[0].n;
+    expect(unbacked, 'LIMIT canceladas por UNBACKED en régimen').toBe(0);
   }, 300_000);
 });
 

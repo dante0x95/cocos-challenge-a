@@ -17,7 +17,7 @@ Requieren la cabecera `X-Internal-Token` con el valor de `INTERNAL_TOKEN` (`401`
 
 | Ruta | Qué hace |
 |---|---|
-| `/internal/execute-limits` | Ejecuta las LIMIT `NEW` que la cotización vigente cruza, a su precio límite. Cada una en su transacción; la decisión final la toma `app.execute_limit_outcome`, bajo el lock ([D-28](../decisiones.md#d-28)). Responde `{ candidates, executed, not_crossed, cancelled, errors }`. `cancelled` lista `{ order_id, reason: "LIMIT" }` de las que se cancelaron porque ejecutarlas violaría los límites de [D-14](../decisiones.md#d-14); esas órdenes quedan con `cancel_reason: "LIMIT"`. |
+| `/internal/execute-limits` | Ejecuta las LIMIT `NEW` que la cotización vigente cruza, a su precio límite. Cada una en su transacción; la decisión final la toma `app.execute_limit_outcome`, bajo el lock ([D-28](../decisiones.md#d-28)). Responde `{ candidates, executed, not_crossed, cancelled, errors }`. `cancelled` lista `{ order_id, reason }` de las que el executor canceló en vez de ejecutar: `reason: "LIMIT"`, porque ejecutarlas violaría los límites de [D-14](../decisiones.md#d-14); `reason: "UNBACKED"`, porque no tenían respaldo (venta sin las acciones, compra sin el cash: solo una orden heredada de una base preexistente, [D-12](../decisiones.md#d-12)). Esas órdenes quedan con ese mismo `cancel_reason`. |
 | `/internal/cleanup-idempotency` | Borra las claves de idempotencia vencidas hace más de un minuto (más viejas que `settings.idempotency_ttl`, 24 h, más un minuto de margen para los requests en curso). Solo recupera espacio: el vencimiento lo decide `app.place_order` al reclamar la clave, con el mismo plazo, así que una clave vencida que el job todavía no borró ya no da replay ni `422` ([D-19](../decisiones.md#d-19)). |
 
 ## Cuando la base se reinicia
@@ -36,7 +36,7 @@ El executor de LIMIT no tiene job ([D-28](../decisiones.md#d-28)): en producció
 pnpm db:bootstrap      # o: docker compose run --rm migrate
 ```
 
-Aplica las migraciones pendientes y reaplica `db/functions` en una sola transacción, con la barrera de despliegue: se puede correr con la API activa; las escrituras esperan hasta el `COMMIT` (o responden `503` y se reintentan) y, si algo falla, no queda nada aplicado. Una migración nueva va en un archivo nuevo de `db/migrations`; nunca se edita una ya aplicada ([D-24](../decisiones.md#d-24)).
+Aplica las migraciones pendientes y reaplica `db/functions` en una sola transacción, con la barrera de despliegue: se puede correr con la API activa; las escrituras esperan hasta el `COMMIT` (o responden `503` y se reintentan) y, si algo falla, no queda nada aplicado. Una migración nueva va en un archivo nuevo de `db/migrations`; nunca se edita una ya aplicada ([D-24](../decisiones.md#d-24)). Si aplicó alguna, verifica la historia: un corto heredado ([D-01](../decisiones.md#d-01)) o una historia fuera de los tipos ([D-14](../decisiones.md#d-14)) se informan, y una LIMIT `NEW` sin respaldo se cancela con `cancel_reason: "UNBACKED"` y se informa en el log (`historia: usuario N — reserva: …`, `orden N cancelada`), bajo el lock de ese usuario ([D-24](../decisiones.md#d-24)). Solo un cash que no cierra aborta el despliegue.
 
 En Fly lo corre el `release_command` de cada deploy, antes de cambiar de versión: si falla, sale con 1 y el deploy se corta ([D-29](../decisiones.md#d-29)).
 

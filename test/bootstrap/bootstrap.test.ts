@@ -51,8 +51,9 @@ describe('bootstrap', () => {
     await recreateDatabase(DB);
     const r = await bootstrap({ adminUrl: url, apiPassword: 'api', ...quiet });
     expect(r.applied).toEqual(['000_seed.sql', '001_app_schema.sql', '002_audit.sql', '003_orders_ledger.sql', '005_cancel_reason.sql',
-      '006_idempotency_ttl.sql']);
+      '006_idempotency_ttl.sql', '007_cancel_reason_unbacked.sql']);
     expect(r.ledger).toEqual([{ userid: 1, problem: 'short', detail: expect.stringContaining('instrumento 31 en -10') }]);
+    expect(r.unbacked).toEqual([]);   // la LIMIT NEW del challenge (orden 2) tiene respaldo
 
     first = await stateOf(url);
     expect(first.cash).toEqual({ qty: '75300000', reserved: '12550000', inconsistent: true });   // 753.000 / 125.500
@@ -270,9 +271,10 @@ describe('bootstrap', () => {
       if (out === s) throw new Error(`no se pudo reconstruir la versión anterior: ${from}`);
       return out;
     };
-    /** La versión anterior: sin la migración 005 y con 030_orders.sql sin cancel_reason. */
+    /** La versión anterior: sin las migraciones 005 y 007 y con 030_orders.sql sin cancel_reason. */
     const pre21 = (dir: string) => {
       rmSync(join(dir, 'migrations', '005_cancel_reason.sql'));
+      rmSync(join(dir, 'migrations', '007_cancel_reason_unbacked.sql'));
       let f030 = readFileSync(resolve('db/functions/030_orders.sql'), 'utf8');
       f030 = revert(f030, /,\n    'cancel_reason', NULL\);[^\n]*/, ');');
       f030 = revert(f030, ", cancel_reason = 'LIMIT'", '');
@@ -340,7 +342,7 @@ describe('bootstrap', () => {
       const sig = 'app.cancel_order_outcome(integer,bigint)';
       const oid = async () => (await adminDb.query<{ oid: number }>('SELECT $1::regprocedure::oid AS oid', [sig])).rows[0].oid;
       const oldOid = await oid();
-      expect((await bootstrap({ adminUrl: url, apiPassword: 'api', ...quiet })).applied).toEqual(['005_cancel_reason.sql']);
+      expect((await bootstrap({ adminUrl: url, apiPassword: 'api', ...quiet })).applied).toEqual(['005_cancel_reason.sql', '007_cancel_reason_unbacked.sql']);
       const newOid = await oid();
       expect(newOid).not.toBe(oldOid);
       expect((await bootstrap({ adminUrl: url, apiPassword: 'api', ...quiet })).applied).toEqual([]);
@@ -422,7 +424,7 @@ describe('bootstrap', () => {
         expect(await waitingOnLock('pid = $1', cold.pid)).toBe('relation');
 
         await pause.query('COMMIT');
-        expect((await deploying).applied).toEqual(['005_cancel_reason.sql']);
+        expect((await deploying).applied).toEqual(['005_cancel_reason.sql', '007_cancel_reason_unbacked.sql']);
         // Siguieron con el cuerpo anterior (cancelar sin motivo): APP04, reintentable (503).
         await expect(hotCancel).rejects.toMatchObject({ code: 'APP04' });
         await expect(coldCancel).rejects.toMatchObject({ code: 'APP04' });
@@ -437,6 +439,124 @@ describe('bootstrap', () => {
         // El reintento usa la función nueva.
         expect((await api.query('SELECT outcome, status, cancel_reason FROM app.cancel_order_outcome(1, $1)', [id])).rows[0])
           .toEqual({ outcome: 'ok', status: 'CANCELLED', cancel_reason: 'USER' });
+      }
+    }, 120_000);
+  });
+
+  // Issue #6: el despliegue sobre una base sin la migración 007 y con LIMIT NEW heredadas sin respaldo
+  // (insertadas directo en orders). La migración 007 admite el motivo UNBACKED; la verificación
+  // las señala con 'reserva' y las cancela bajo el lock, en vez de abortar.
+  describe('actualización a UNBACKED', () => {
+    /** Bootstrap desde una copia de db/ sin la migración 007. */
+    const deployWithout007 = async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'cocos-db-7-'));
+      try {
+        cpSync(resolve('db'), dir, { recursive: true });
+        rmSync(join(dir, 'migrations', '007_cancel_reason_unbacked.sql'));
+        return await bootstrap({ adminUrl: url, apiPassword: 'api', dbDir: dir, ...quiet });
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+
+    it('las NEW sin respaldo quedan CANCELLED con UNBACKED, se informan en el log y en el resultado, las que lo tienen siguen NEW y el executor no las ve', async () => {
+      await recreateDatabase(DB);
+      await deployWithout007();
+      const adminDb = new pg.Pool({ connectionString: url });
+      const api = new pg.Pool({ connectionString: dbUrl(DB, { name: 'api', password: 'api' }) });
+      try {
+        // Antes de 007 el CHECK no admite el motivo: lo que hoy haría el bootstrap no es posible.
+        await expect(adminDb.query(
+          `INSERT INTO app.orders (instrumentid, userid, size, price, type, side, status, datetime, cancel_reason)
+           VALUES (47, 1, 1, 1.00, 'LIMIT', 'SELL', 'CANCELLED', timezone('UTC', now()), 'UNBACKED')`))
+          .rejects.toMatchObject({ code: '23514', constraint: 'orders_cancel_reason_valid' });
+        // Historia heredada del usuario 1 (40 acciones del 47, 753.000 de cash con 125.500 reservados por las LIMIT 5 y 7):
+        // una SELL de 100 del 47, una BUY sobre ARS y, de control, una SELL de 10 del 47 con respaldo.
+        const insert = async (side: string, instrumentid: number, size: number, price: string) => (await adminDb.query<{ id: string }>(
+          `INSERT INTO app.orders (instrumentid, userid, size, price, type, side, status, datetime)
+           VALUES ($1, 1, $2, $3, 'LIMIT', $4, 'NEW', timezone('UTC', now())) RETURNING id::text`, [instrumentid, size, price, side])).rows[0].id;
+        const sell = await insert('SELL', 47, 100, '900.00');
+        const ok = await insert('SELL', 47, 10, '900.00');
+        const ars = await insert('BUY', 66, 1, '10.00');
+
+        const log: string[] = [];
+        const r = await bootstrap({ adminUrl: url, apiPassword: 'api', log: (m) => log.push(m) });
+        expect(r.applied).toEqual(['007_cancel_reason_unbacked.sql']);
+        expect(r.ledger).toEqual([
+          { userid: 1, problem: 'short', detail: expect.stringContaining('instrumento 31 en -10') },
+          { userid: 1, problem: 'reserva', detail: 'instrumento 47: 110 acciones reservadas > tenencia 40: venta LIMIT pendiente sin respaldo' },
+          { userid: 1, problem: 'reserva', detail: `orden ${ars} pendiente sobre la moneda ARS: BUY/SELL no aplica sobre una moneda` },
+        ]);
+        expect(r.unbacked).toEqual([sell, ars]);   // en orden de id
+        expect(log).toContain(`  historia: usuario 1 — orden ${sell} cancelada: LIMIT pendiente sin respaldo (cancel_reason UNBACKED)`);
+        expect(log).toContain(`  historia: usuario 1 — orden ${ars} cancelada: LIMIT pendiente sin respaldo (cancel_reason UNBACKED)`);
+
+        const state = async (id: string) => (await adminDb.query('SELECT status, cancel_reason FROM app.orders WHERE id = $1', [id])).rows[0];
+        expect(await state(sell)).toEqual({ status: 'CANCELLED', cancel_reason: 'UNBACKED' });
+        expect(await state(ars)).toEqual({ status: 'CANCELLED', cancel_reason: 'UNBACKED' });
+        expect(await state(ok)).toEqual({ status: 'NEW', cancel_reason: null });
+        expect(await state('5')).toEqual({ status: 'NEW', cancel_reason: null });
+        expect(await state('7')).toEqual({ status: 'NEW', cancel_reason: null });
+        expect((await adminDb.query("SELECT order_id::text FROM app.limit_candidates(1000)")).rows.map((x) => x.order_id)).not.toContain(sell);
+        // api la ve con su motivo y no la puede cancelar de nuevo.
+        expect((await api.query('SELECT outcome, status, cancel_reason FROM app.cancel_order_outcome(1, $1)', [sell])).rows[0])
+          .toEqual({ outcome: 'not_new', status: 'CANCELLED', cancel_reason: 'UNBACKED' });
+        // El executor ejecuta la que tiene respaldo (el close del 47 es 925,85 ≥ 900).
+        expect((await api.query<{ r: string }>('SELECT app.execute_limit_outcome($1) AS r', [ok])).rows[0].r).toBe('FILLED');
+
+        // Segunda corrida: nada que aplicar, nada que verificar, la base queda igual.
+        const again = await bootstrap({ adminUrl: url, apiPassword: 'api', ...quiet });
+        expect(again).toMatchObject({ applied: [], ledger: [], unbacked: [] });
+        expect(await state(sell)).toEqual({ status: 'CANCELLED', cancel_reason: 'UNBACKED' });
+      } finally {
+        await api.end();
+        await adminDb.end();
+      }
+    }, 120_000);
+
+    // D-24: la verificación va en la transacción del bootstrap. Si algo falla después de cancelar
+    // una NEW, la cancelación se revierte con todo lo demás.
+    it('un bootstrap que falla después de cancelar una NEW sin respaldo no deja nada: la orden vuelve a NEW y 007 no queda aplicada', async () => {
+      await recreateDatabase(DB);
+      await deployWithout007();
+      const adminDb = new pg.Pool({ connectionString: url });
+      try {
+        const insert = async (userid: number, size: number) => (await adminDb.query<{ id: string }>(
+          `INSERT INTO app.orders (instrumentid, userid, size, price, type, side, status, datetime)
+           VALUES (47, $1, $2, 900.00, 'LIMIT', 'SELL', 'NEW', timezone('UTC', now())) RETURNING id::text`, [userid, size])).rows[0].id;
+        const other = (await adminDb.query<{ id: number }>(
+          "INSERT INTO app.users (email, accountnumber) VALUES ('unbacked-2@test.local', '9900000002') RETURNING id")).rows[0].id;
+        const first = await insert(1, 100);       // usuario 1: 40 acciones del 47
+        const second = await insert(other, 10);   // el otro: ninguna
+        // Un archivo de funciones extra (después de 040) hace fallar la cancelación del segundo
+        // usuario: la del primero ya ocurrió dentro de la transacción.
+        const dir = mkdtempSync(join(tmpdir(), 'cocos-db-7-'));
+        try {
+          cpSync(resolve('db'), dir, { recursive: true });
+          writeFileSync(join(dir, 'functions', '095_test_fail.sql'), `
+            CREATE FUNCTION app.test_fail() RETURNS trigger LANGUAGE plpgsql AS $$
+            BEGIN RAISE EXCEPTION 'falla de prueba después de cancelar'; END $$;
+            CREATE TRIGGER test_fail BEFORE UPDATE ON app.orders FOR EACH ROW
+              WHEN (NEW.cancel_reason = 'UNBACKED' AND NEW.userid = ${other}) EXECUTE FUNCTION app.test_fail();`);
+          const log: string[] = [];
+          await expect(bootstrap({ adminUrl: url, apiPassword: 'api', dbDir: dir, log: (m) => log.push(m) }))
+            .rejects.toThrow(/falla de prueba después de cancelar/);
+          // La del primer usuario se canceló antes del fallo.
+          expect(log).toContain(`  historia: usuario 1 — orden ${first} cancelada: LIMIT pendiente sin respaldo (cancel_reason UNBACKED)`);
+        } finally {
+          rmSync(dir, { recursive: true, force: true });
+        }
+        const state = async (id: string) => (await adminDb.query('SELECT status, cancel_reason FROM app.orders WHERE id = $1', [id])).rows[0];
+        expect(await state(first)).toEqual({ status: 'NEW', cancel_reason: null });
+        expect(await state(second)).toEqual({ status: 'NEW', cancel_reason: null });
+        expect((await adminDb.query<{ name: string }>('SELECT name FROM public.schema_migrations ORDER BY name')).rows.map((r) => r.name))
+          .not.toContain('007_cancel_reason_unbacked.sql');
+        expect((await adminDb.query("SELECT 1 FROM pg_trigger WHERE tgname = 'test_fail'")).rowCount).toBe(0);
+        // Sin 007, el CHECK sigue sin admitir el motivo.
+        await expect(adminDb.query("UPDATE app.orders SET status = 'CANCELLED', cancel_reason = 'UNBACKED' WHERE id = $1", [first]))
+          .rejects.toMatchObject({ code: '23514', constraint: 'orders_cancel_reason_valid' });
+      } finally {
+        await adminDb.end();
       }
     }, 120_000);
   });

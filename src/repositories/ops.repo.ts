@@ -6,12 +6,13 @@ export interface ExecuteReport {
   candidates: number;
   executed: string[];
   not_crossed: string[];
-  // Canceladas por el executor porque ejecutarlas violaría D-14; no son cancelaciones del usuario.
-  cancelled: { order_id: string; reason: 'LIMIT' }[];
+  // Canceladas por el executor; no son cancelaciones del usuario. LIMIT: ejecutarla violaría
+  // D-14. UNBACKED: una NEW heredada sin respaldo (SELL sin acciones, BUY sin cash; issue #6).
+  cancelled: { order_id: string; reason: 'LIMIT' | 'UNBACKED' }[];
   errors: { order_id: string; error: string }[];
 }
 
-type LimitOutcome = 'FILLED' | 'SKIPPED' | 'LIMIT';
+type LimitOutcome = 'FILLED' | 'SKIPPED' | 'LIMIT' | 'UNBACKED';
 
 /** Ejecuta las LIMIT que la cotización vigente cruza (D-28). La decisión final es de execute_limit_outcome. */
 export async function executeLimits(max = 500): Promise<ExecuteReport> {
@@ -22,7 +23,7 @@ export async function executeLimits(max = 500): Promise<ExecuteReport> {
       // Una sentencia = una transacción, con los tiempos de la base (D-20).
       const outcome = (await pool.query<{ r: LimitOutcome }>('SELECT app.execute_limit_outcome($1) AS r', [id])).rows[0].r;
       if (outcome === 'FILLED') report.executed.push(id);
-      else if (outcome === 'LIMIT') report.cancelled.push({ order_id: id, reason: 'LIMIT' });
+      else if (outcome === 'LIMIT' || outcome === 'UNBACKED') report.cancelled.push({ order_id: id, reason: outcome });
       else report.not_crossed.push(id);
     } catch (e) {
       report.errors.push({ order_id: id, error: (e as { code?: string }).code ?? (e as Error).message });

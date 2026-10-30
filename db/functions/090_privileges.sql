@@ -56,4 +56,4 @@ GRANT EXECUTE ON FUNCTION
   app.health()
 TO api;
 -- Sin EXECUTE para api: c_state, idempotency_ttl e idempotency_purge_age (se usan solo desde las funciones de arriba),
--- verify_ledger (bootstrap), y las auxiliares internas.
+-- verify_ledger y cancel_unbacked (bootstrap), y las auxiliares internas.

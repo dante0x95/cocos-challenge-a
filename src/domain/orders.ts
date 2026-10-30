@@ -98,7 +98,7 @@ export interface OrderRow {
   status: string;
   balance_seq: string | null;
   datetime: string;             // timestamp sin zona, en UTC: 'YYYY-MM-DD HH:MM:SS[.ffffff]'
-  cancel_reason: 'USER' | 'LIMIT' | null;   // solo en CANCELLED (issue #21)
+  cancel_reason: 'USER' | 'LIMIT' | 'UNBACKED' | null;   // solo en CANCELLED (issues #21, #6)
 }
 
 /** Misma forma que el body que devuelve POST /orders. */

@@ -31,7 +31,7 @@ export async function executeLimits(max = 500): Promise<ExecuteReport> {
   return report;
 }
 
-/** Borra claves de idempotencia de más de 24 h, usuario por usuario. */
+/** Borra las claves de idempotencia vencidas (settings.idempotency_ttl), usuario por usuario. Solo recupera espacio: el vencimiento lo decide app.place_order (D-19). */
 export async function cleanupIdempotency(): Promise<{ users: number; deleted: number }> {
   const users = (await pool.query<{ userid: number }>('SELECT userid FROM app.cleanup_candidates()')).rows;
   let deleted = 0;

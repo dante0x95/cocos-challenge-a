@@ -50,5 +50,5 @@ GRANT EXECUTE ON FUNCTION
   app.cleanup_idempotency(int),
   app.health()
 TO api;
--- Sin EXECUTE para api: c_state (se usa solo desde las funciones de arriba), verify_ledger
--- (bootstrap), y las auxiliares internas.
+-- Sin EXECUTE para api: c_state, idempotency_ttl e idempotency_purge_age (se usan solo desde las funciones de arriba),
+-- verify_ledger (bootstrap), y las auxiliares internas.

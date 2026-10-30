@@ -169,61 +169,78 @@ describe('POST /orders — con la base', () => {
     expect((await portfolio(v)).body.cash.neto).toBe('100.00');
   });
 
-  it('transición: la clave vieja se resuelve con un solo lock; una limpieza en cola no la reemplaza por una nueva con el hash anterior', async () => {
-    const v = await newUser('legacy-cleanup');
-    const k = key();
-    const legacyHash = requestHash({ userid: v, side: 'CASH_IN', type: 'MARKET', amount: '100' });
-    const canonicalHash = requestHash({ userid: v, side: 'CASH_IN', type: 'MARKET', amount: '100.00' });
-    const first = await placeOrderDb(pool, { userid: v, key: k, hash: legacyHash, side: 'CASH_IN', type: 'MARKET', instrumentid: await arsId(), amount: '100' });
-    await admin.query("UPDATE app.idempotency_keys SET created_at = now() - interval '25 hours' WHERE userid = $1 AND key = $2", [v, k]);   // vencida: la limpieza la puede borrar
-
-    // Barreras con locks: A tiene el lock del usuario; el request queda esperando; detrás, C (la limpieza) también.
-    // Al soltar A, el request obtiene el lock primero y decide; C recién después. Un segundo intento del request
-    // quedaría detrás de C: C borraría la clave y ese intento crearía otra orden grabando el hash anterior.
-    const waiting = async (n: number) => {
+  // Issue #4 de este repositorio (plan de pruebas, punto 8): el vencimiento lo decide place_order,
+  // así que el resultado no depende de si la limpieza llegó antes o después del request.
+  it('transición: una clave legada vencida da lo mismo con la limpieza en cola detrás del request o delante: 201 nueva, replay false, hash canónico, una fila', async () => {
+    const lockSql = "SELECT pg_advisory_xact_lock(hashtext('user-balance'), $1)";
+    const waiting = async (v: number, n: number) => {
       for (let i = 0; i < 10_000; i++) {
         const r = await admin.query("SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted AND objid = $1::oid AND objsubid = 2", [v]);
         if (r.rows[0].n === n) return;
       }
       throw new Error(`no hay ${n} esperando el lock del usuario ${v}`);
     };
-    const lockSql = "SELECT pg_advisory_xact_lock(hashtext('user-balance'), $1)";
-    const a = await admin.connect();
-    const c = await admin.connect();
-    try {
-      await a.query('BEGIN');
-      await a.query(lockSql, [v]);
-      const pending = order({ userid: v, side: 'CASH_IN', amount: 100 }, k);
-      await waiting(1);
-      await c.query('BEGIN');
-      const cleanup = c.query(lockSql, [v])
-        .then(() => c.query("DELETE FROM app.idempotency_keys WHERE userid = $1 AND created_at < now() - interval '24 hours'", [v]))
-        .then(() => c.query('COMMIT'));
-      await waiting(2);
-      await a.query('COMMIT');
+    for (const cleanupFirst of [false, true]) {
+      const v = await newUser('legacy-cleanup');
+      const k = key();
+      const legacyHash = requestHash({ userid: v, side: 'CASH_IN', type: 'MARKET', amount: '100' });
+      const canonicalHash = requestHash({ userid: v, side: 'CASH_IN', type: 'MARKET', amount: '100.00' });
+      const first = await placeOrderDb(pool, { userid: v, key: k, hash: legacyHash, side: 'CASH_IN', type: 'MARKET', instrumentid: await arsId(), amount: '100' });
+      await admin.query("UPDATE app.idempotency_keys SET created_at = now() - interval '25 hours' WHERE userid = $1 AND key = $2", [v, k]);   // vencida
 
-      const r = await pending;
-      await cleanup;
-      expect(r.status).toBe(201);
-      expect(r.headers.get('idempotent-replay')).toBe('true');
-      expect(r.body).toEqual(first.body);
-    } finally {
-      a.release();
-      c.release();
+      // Barreras con locks: A tiene el lock del usuario; el request y C (la limpieza real, bajo el lock de
+      // usuario para que haga cola en vez de saltearlo con el try-lock) se encolan en el orden del caso.
+      const a = await admin.connect();
+      const c = await admin.connect();
+      let r: Awaited<ReturnType<typeof order>>;
+      let deleted: number;
+      try {
+        await a.query('BEGIN');
+        await a.query(lockSql, [v]);
+        const cleanup = async () => {
+          await c.query('BEGIN');
+          await c.query(lockSql, [v]);
+          const n = (await c.query<{ n: number }>('SELECT app.cleanup_idempotency($1) AS n', [v])).rows[0].n;
+          await c.query('COMMIT');
+          return n;
+        };
+        let pending: ReturnType<typeof order>;
+        let cleaning: Promise<number>;
+        if (cleanupFirst) {
+          cleaning = cleanup();
+          await waiting(v, 1);
+          pending = order({ userid: v, side: 'CASH_IN', amount: 100 }, k);
+        } else {
+          pending = order({ userid: v, side: 'CASH_IN', amount: 100 }, k);
+          await waiting(v, 1);
+          cleaning = cleanup();
+        }
+        await waiting(v, 2);
+        await a.query('COMMIT');
+        r = await pending;
+        deleted = await cleaning;
+      } finally {
+        await a.query('ROLLBACK').catch(() => undefined);
+        await c.query('ROLLBACK').catch(() => undefined);
+        a.release();
+        c.release();
+      }
+      const label = cleanupFirst ? 'limpieza primero' : 'request primero';
+      expect(r.status, label).toBe(201);
+      expect(r.headers.get('idempotent-replay'), label).toBe('false');
+      expect(r.body.id, label).not.toBe(first.body.id);
+      // La limpieza borró la clave solo si llegó primero; detrás del request, ya estaba renovada y no toca nada.
+      expect(deleted, label).toBe(cleanupFirst ? 1 : 0);
+
+      // Una sola fila, con el hash canonizado y la orden nueva; dos órdenes; ninguna clave con el hash anterior.
+      const stored = await admin.query('SELECT request_hash, order_id::text FROM app.idempotency_keys WHERE userid = $1', [v]);
+      expect(stored.rows, label).toEqual([{ request_hash: canonicalHash, order_id: r.body.id }]);
+      expect((await admin.query('SELECT count(*)::int AS n FROM app.orders WHERE userid = $1', [v])).rows[0].n, label).toBe(2);
+      // El reintento con "100.00" es replay de la orden nueva.
+      const retry = await order({ userid: v, side: 'CASH_IN', amount: '100.00' }, k);
+      expect(retry.headers.get('idempotent-replay'), label).toBe('true');
+      expect(retry.body, label).toEqual(r.body);
     }
-    // Ninguna clave quedó grabada con el hash anterior, y hay una sola orden.
-    expect((await admin.query('SELECT 1 FROM app.idempotency_keys WHERE userid = $1 AND request_hash = $2', [v, legacyHash])).rowCount).toBe(0);
-    expect((await admin.query('SELECT count(*)::int AS n FROM app.orders WHERE userid = $1', [v])).rows[0].n).toBe(1);
-
-    // Vencida y borrada, la clave se puede reusar (D-19): la nueva guarda el hash canonizado,
-    // así que el reintento con "100.00" es replay de la nueva orden.
-    const fresh = await order({ userid: v, side: 'CASH_IN', amount: 100 }, k);
-    expect(fresh.headers.get('idempotent-replay')).toBe('false');
-    const stored = await admin.query('SELECT request_hash FROM app.idempotency_keys WHERE userid = $1 AND key = $2', [v, k]);
-    expect(stored.rows[0].request_hash).toBe(canonicalHash);
-    const retry = await order({ userid: v, side: 'CASH_IN', amount: '100.00' }, k);
-    expect(retry.headers.get('idempotent-replay')).toBe('true');
-    expect(retry.body).toEqual(fresh.body);
   });
 
   it('BUY MARKET por monto: size = floor(monto / close) y el cash baja exactamente size × close', async () => {

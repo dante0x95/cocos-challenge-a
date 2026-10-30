@@ -89,11 +89,6 @@ BEGIN
     IF p_type <> 'MARKET' OR p_limit IS NOT NULL OR p_instrumentid <> k_ars OR p_size IS NOT NULL THEN
       RAISE EXCEPTION 'un movimiento de cash es MARKET, sobre ARS, por amount y sin precio' USING ERRCODE = 'APP02';
     END IF;
-    -- D-05: el máximo por movimiento, antes del cast a bigint de (p_amount * 100), que con
-    -- un monto de 10^17 desbordaría (22003) antes de llegar a la comprobación de size.
-    IF p_amount > 21474836.47 THEN
-      RAISE EXCEPTION 'la cantidad supera el máximo por orden (2147483647)' USING ERRCODE = 'APP02';
-    END IF;
     price := 0.01;
   ELSE
     IF inst_type = 'MONEDA' THEN

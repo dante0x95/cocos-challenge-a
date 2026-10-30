@@ -1,8 +1,11 @@
 # Un PR pasa a ready for review solo con codex/review en verde (CONTRIBUTING.md). GitHub no
-# deja bloquear ese paso con una regla: si se marca ready antes, este job lo devuelve a
-# borrador y falla. El merge en main lo bloquea aparte el ruleset, que exige codex/review.
-# pull_request_target corre la versión de este archivo que está en main, así que un PR no
-# puede ablandar su propia gate. No hace checkout ni ejecuta nada del PR.
+# deja bloquear ese paso con una regla: si se marca ready antes, scripts/ready-gate.sh lo
+# devuelve a borrador y falla. El merge en main lo bloquea aparte el ruleset, que exige
+# codex/review.
+# pull_request_target corre la versión de este archivo que está en la rama base (main), y el
+# checkout es el de esa rama (github.sha), así que un PR no puede ablandar su propia gate: no
+# se hace checkout ni se ejecuta nada del PR. test/unit/ready-gate.test.ts prueba el script y
+# este archivo.
 name: ready-gate
 
 on:
@@ -10,8 +13,15 @@ on:
     types: [opened, reopened, ready_for_review]
 
 permissions:
+  contents: read
   pull-requests: write
   statuses: read
+
+# De a una corrida por PR, sin cancelar la que está corriendo: cada una decide sobre el head y
+# el status vigentes, así que una corrida atrasada no pisa a una más nueva.
+concurrency:
+  group: ready-gate-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
 
 jobs:
   codex-review-before-ready:
@@ -19,20 +29,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
       - name: codex/review en verde, o de vuelta a borrador
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_NODE_ID: ${{ github.event.pull_request.node_id }}
-        run: |
-          state=$(gh api "repos/$REPO/commits/$HEAD_SHA/status" \
-            --jq '.statuses[] | select(.context == "codex/review") | .state')
-          if [ "$state" = "success" ]; then
-            echo "codex/review en verde en $HEAD_SHA."
-            exit 0
-          fi
-          gh api graphql -f id="$PR_NODE_ID" \
-            -f query='mutation($id: ID!) { convertPullRequestToDraft(input: {pullRequestId: $id}) { pullRequest { isDraft } } }'
-          echo "::error::codex/review no está en verde en $HEAD_SHA (estado: ${state:-sin status}). El PR volvió a borrador: correr scripts/codex-review.sh y marcarlo ready cuando apruebe."
-          exit 1
+          EVENT_SHA: ${{ github.event.pull_request.head.sha }}
+        run: scripts/ready-gate.sh

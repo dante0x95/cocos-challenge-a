@@ -119,9 +119,9 @@ describe('bootstrap', () => {
     const dir = mkdtempSync(join(tmpdir(), 'cocos-db-verify-'));
     try {
       cpSync(resolve('db'), dir, { recursive: true });
-      writeFileSync(join(dir, 'migrations', '999_verificacion.sql'),
-        'CREATE TABLE app.test_verificacion (x int); UPDATE app.settings SET price_max_age_days = 7;');
-      writeFileSync(join(dir, 'functions', '095_test_verificacion.sql'), `CREATE OR REPLACE FUNCTION app.verify_ledger()
+      writeFileSync(join(dir, 'migrations', '999_verification.sql'),
+        'CREATE TABLE app.test_verification (x int); UPDATE app.settings SET price_max_age_days = 7;');
+      writeFileSync(join(dir, 'functions', '095_test_verification.sql'), `CREATE OR REPLACE FUNCTION app.verify_ledger()
         RETURNS TABLE (userid int, problem text, detail text) LANGUAGE sql AS $$ SELECT 1, 'cash', 'verificación de prueba' $$;`);
       await expect(bootstrap({ adminUrl: url, apiPassword: 'otra-clave', dbDir: dir, ...quiet }))
         .rejects.toThrow(/verificación de la historia falló/);
@@ -130,11 +130,11 @@ describe('bootstrap', () => {
     }
     const after = await stateOf(url);
     expect(after).toEqual(first);
-    expect(after.migrations.map((m) => m.name)).not.toContain('999_verificacion.sql');
+    expect(after.migrations.map((m) => m.name)).not.toContain('999_verification.sql');
     const c = new pg.Client({ connectionString: url });
     await c.connect();
     try {
-      expect((await c.query("SELECT to_regclass('app.test_verificacion') AS t")).rows[0].t).toBeNull();
+      expect((await c.query("SELECT to_regclass('app.test_verification') AS t")).rows[0].t).toBeNull();
       expect((await c.query("SELECT pg_get_functiondef('app.verify_ledger()'::regprocedure) AS d")).rows[0].d)
         .not.toContain('verificación de prueba');
     } finally {

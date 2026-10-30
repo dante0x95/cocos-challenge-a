@@ -9,6 +9,9 @@ import { pool } from '../../src/db/pool.js';
 import { admin, apiClient, newUser } from '../support/db.js';
 import { TEST_DB } from '../support/urls.js';
 
+// Literal, no importado del código: el contrato del mensaje (resultado desconocido, D-20).
+const CONNECTION_LOST_MESSAGE = 'la conexión con la base se cortó; el resultado es desconocido: reintentar con la misma Idempotency-Key';
+
 let server: Server;
 let base: string;
 beforeAll(() => {
@@ -126,13 +129,13 @@ describe('GET /health mientras la base no acepta conexiones', () => {
 });
 
 describe('una request con la consulta en vuelo cuando se corta su conexión', () => {
-  it('POST /orders esperando el lock, su backend terminado → 500 INTERNAL; el proceso sigue y el reintento con la misma clave crea una orden', async () => {
+  it('POST /orders esperando el lock, su backend terminado → 503 CONNECTION_LOST; el proceso sigue y el reintento con la misma clave crea una orden', async () => {
     const u = await newUser('pool-inflight');
     const post = async () => {
       const r = await fetch(`${base}/orders`, {
         method: 'POST', headers: { 'content-type': 'application/json', 'Idempotency-Key': 'k' },
         body: JSON.stringify({ userid: u, side: 'CASH_IN', amount: '100.00' }) });
-      return { status: r.status, body: (await r.json()) as Record<string, string> };
+      return { status: r.status, retryAfter: r.headers.get('retry-after'), body: (await r.json()) as Record<string, string> };
     };
     const ordersOf = async () =>
       (await admin.query<{ n: number }>('SELECT count(*)::int AS n FROM app.orders WHERE userid = $1', [u])).rows[0].n;
@@ -150,8 +153,8 @@ describe('una request con la consulta en vuelo cuando se corta su conexión', ()
       }
       expect(target).toBeDefined();
       await admin.query('SELECT pg_terminate_backend($1)', [target]);
-      // Lo que publica docs/api/operacion.md para este PR: 500 INTERNAL, resultado desconocido.
-      expect(await pending).toEqual({ status: 500, body: { error: 'INTERNAL', message: 'error interno' } });
+      // Lo que publica docs/api/operacion.md: 503 CONNECTION_LOST, resultado desconocido (issue #7).
+      expect(await pending).toEqual({ status: 503, retryAfter: '1', body: { error: 'CONNECTION_LOST', message: CONNECTION_LOST_MESSAGE } });
       await a.query('ROLLBACK');
     } finally { await a.end(); }
     expect(await ordersOf()).toBe(0);

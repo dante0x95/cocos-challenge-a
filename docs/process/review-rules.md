@@ -38,3 +38,9 @@ Lo que el revisor (Codex) verifica en cada PR, además de que el PR resuelva su 
 ## R-7 · Idioma (CONTRIBUTING.md)
 - Código e identificadores en inglés.
 - Comentarios, nombres de tests, mensajes de error de la API, docs, commits y PRs en español.
+
+## R-8 · Compatibilidad con la versión anterior (D-24, D-29)
+- Un release solo agrega cosas compatibles con el anterior (expand/contract): funciones nuevas, argumentos con `DEFAULT`, columnas que admiten `NULL`, y la misma forma en lo que devuelven las funciones que la versión anterior llama. Retirar o cambiar una firma, una columna o una forma de respuesta que usa la versión anterior va en el release siguiente. Un PR que lo hace en el mismo release es un hallazgo. Reemplazar una firma por otra con argumentos de más que tienen `DEFAULT` (borrando la anterior en el mismo archivo) es compatible: la llamada anterior resuelve a la nueva.
+- Una sobrecarga nueva que hace ambigua una llamada existente es un hallazgo.
+- `src/db/contract.ts` lista las funciones `app.*` que llama `src/`, con sus tipos: un PR que agrega, quita o cambia una llamada lo actualiza.
+- Ni el contrato ni `scripts/previous-release.sh` (el paso del CI que corre las pruebas de escritura del último release sobre la base nueva) se debilitan para que un cambio incompatible pase.

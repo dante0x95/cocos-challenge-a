@@ -210,9 +210,14 @@ describe('POST /orders — el número se valida por su literal, no por el double
       .toEqual({ error: 'BAD_REQUEST', message: `0: ${NUMBER_LITERAL_MESSAGE}` });
   });
 
-  it('JSON inválido y body demasiado grande siguen como antes', async () => {
-    expect((await send('/orders', '{"amount": 1.}')).body).toEqual({ error: 'BAD_REQUEST', message: 'JSON inválido' });
-    expect((await send('/orders', `{"a":"${'x'.repeat(17 * 1024)}"}`)).body).toEqual({ error: 'BAD_REQUEST', message: 'body demasiado grande' });
+  // El middleware nuevo reenvía los demás errores del parser sin tocarlos: también el status (413, no 400).
+  it('JSON inválido (400) y body demasiado grande (413) siguen como antes', async () => {
+    const invalid = await send('/orders', '{"amount": 1.}');
+    expect(invalid.status).toBe(400);
+    expect(invalid.body).toEqual({ error: 'BAD_REQUEST', message: 'JSON inválido' });
+    const tooLarge = await send('/orders', `{"a":"${'x'.repeat(17 * 1024)}"}`);
+    expect(tooLarge.status).toBe(413);
+    expect(tooLarge.body).toEqual({ error: 'BAD_REQUEST', message: 'body demasiado grande' });
   });
 
   // El camino de un body aceptado: el mismo reviver que usa la app y después OrderBody.

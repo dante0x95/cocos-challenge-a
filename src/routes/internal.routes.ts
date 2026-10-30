@@ -20,14 +20,18 @@ export function internalRouter(token: string | undefined): Router {
   return r;
 }
 
-export const healthRouter = Router();
-
-// GET /health — lo usa el healthcheck de docker compose.
-healthRouter.get('/health', route(async (_req, res) => {
-  try {
-    const h = await health();
-    res.json({ ok: true, db: 'up', ...h });
-  } catch {
-    res.status(503).json({ ok: false, db: 'down' });
-  }
-}));
+// GET /health — lo usan el healthcheck de docker compose y el deploy en Fly (D-29): el check de
+// las máquinas nuevas (bluegreen) y el workflow, que lee `release` antes y después de desplegar.
+// `release` es el commit desplegado (RELEASE); va también en el 503, para saber qué atiende.
+export function healthRouter(release: string | undefined): Router {
+  const r = Router();
+  r.get('/health', route(async (_req, res) => {
+    try {
+      const h = await health();
+      res.json({ ok: true, db: 'up', release: release ?? null, ...h });
+    } catch {
+      res.status(503).json({ ok: false, db: 'down', release: release ?? null });
+    }
+  }));
+  return r;
+}

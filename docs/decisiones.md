@@ -8,6 +8,7 @@ Registro de todo lo que no se desprende directamente del enunciado y que cambia 
 - **Dominio:** [D-08](#d-08) qué mueve saldo y qué reserva · [D-09](#d-09) costo de una posición · [D-10](#d-10) rendimiento · [D-11](#d-11) orden por monto · [D-12](#d-12) ejecución de MARKET y LIMIT · [D-13](#d-13) números en la entrada y la salida · [D-14](#d-14) límites · [D-15](#d-15) valor total de la cuenta
 - **Arquitectura:** [D-16](#d-16) cómo se calcula el balance · [D-17](#d-17) protocolo de escritura · [D-18](#d-18) orden de ejecución · [D-19](#d-19) idempotencia · [D-20](#d-20) tiempos máximos · [D-21](#d-21) acceso a datos · [D-22](#d-22) lógica en la base · [D-23](#d-23) barrera de despliegue · [D-24](#d-24) migraciones
 - **API:** [D-25](#d-25) búsqueda · [D-26](#d-26) consulta y cancelación de una orden · [D-27](#d-27) autenticación · [D-28](#d-28) executor de LIMIT
+- **Despliegue:** [D-29](#d-29) Fly.io con deploy continuo desde `main`
 - [Fuera de alcance y límites conocidos](#fuera-de-alcance)
 
 ---
@@ -254,7 +255,7 @@ Poner lógica de negocio en Postgres tiene costos reales: herramientas de debug 
 
 - `db/migrations/*.sql` corren **una vez**, en orden. `public.schema_migrations` guarda el nombre y el checksum de cada una. Si un archivo ya aplicado cambió, el bootstrap **aborta**: se corrige con una migración nueva, no editando la vieja.
 - `db/functions/*.sql` corren **siempre** (`CREATE OR REPLACE`).
-- **Migraciones pendientes y funciones van en una sola transacción**, con la barrera de despliegue de [D-23](#d-23) en modo exclusivo: espera a las escrituras en curso y frena las nuevas hasta el `COMMIT`. Ningún escritor ve un esquema nuevo con funciones viejas, y un bootstrap que falla a mitad de camino no deja nada aplicado. Un escritor que ya había entrado a una función anterior y quedó esperando sigue con ese cuerpo después del `COMMIT`: si eso choca con el esquema nuevo, la migración lo hace fallar con un error reintentable (en `005`, una cancelación sin motivo da `APP04` → `503`; issue #21).
+- **Migraciones pendientes, funciones, la contraseña del rol `api` y la verificación de la historia van en una sola transacción**, con la barrera de despliegue de [D-23](#d-23) en modo exclusivo: espera a las escrituras en curso y frena las nuevas hasta el `COMMIT`. Ningún escritor ve un esquema nuevo con funciones viejas, y un bootstrap que falla en cualquier paso, también en la verificación posterior a migrar, no deja nada aplicado. Un escritor que ya había entrado a una función anterior y quedó esperando sigue con ese cuerpo después del `COMMIT`: si eso choca con el esquema nuevo, la migración lo hace fallar con un error reintentable (en `005`, una cancelación sin motivo da `APP04` → `503`; issue #21).
 - `000_seed.sql` es el `database.sql` del challenge **sin modificar**. Si la base ya tiene las tablas del challenge (datos propios), se registra como aplicado sin correrlo.
 - La migración de datos ([D-04](#d-04), [D-05](#d-05)) se **audita antes** (`002_audit.sql` aborta con el detalle si algún dato viola una regla nueva) y se **verifica después**: el cash que da el fold tiene que coincidir con una suma directa de importes.
 - **Por qué no una herramienta de migraciones.** El runner tiene 150 líneas y hace exactamente esto. Una herramienta como `node-pg-migrate` serviría igual con el mismo SQL; no hace falta para este alcance.
@@ -298,6 +299,41 @@ Los endpoints `/internal/*` exigen la cabecera `X-Internal-Token`. Si `INTERNAL_
 
 ---
 
+## Despliegue
+
+<a id="d-29"></a>
+### D-29 — Despliegue: Fly.io, un entorno, deploy continuo desde `main`
+
+**Qué se despliega.** Dos apps de Fly.io en `gru` (São Paulo, la región más cercana): la API (`cocos-challenge-a-api`, `fly.toml`), con la misma imagen que `docker compose`, y Postgres 18 (`cocos-challenge-a-db`, `deploy/fly/db.toml`) con la imagen oficial y un volumen, sin puertos públicos: la API la alcanza por la red privada. Cada commit de `main` con `ci` en verde se despliega solo (`.github/workflows/deploy.yml`):
+
+1. **El commit tiene que descender del release que atiende.** El workflow lee `release` de `GET /health` y verifica `git merge-base --is-ancestor <release> <commit>` (`deploy/fly/release-check.sh before`). `workflow_run` dispara con cualquier corrida de `ci` que termine en verde con evento `push` sobre `main`, incluida una reejecutada a mano sobre un commit anterior: sin este gate, ese re-run desplegaría un commit viejo encima del actual. Volver a desplegar el mismo commit pasa; un commit anterior, o de otra rama, frena el deploy con el motivo. Si `/health` no responde o no informa `release`, también frena: el primer deploy es `deploy/fly/setup.sh`, parado en `main`.
+2. Fly construye la imagen desde el `Dockerfile` y la etiqueta con el SHA del commit.
+3. `release_command` corre el bootstrap ([D-24](#d-24)) en una máquina aparte, con la versión anterior todavía atendiendo. Migraciones, funciones, la contraseña del rol `api` y la verificación de la historia van en una transacción bajo la barrera de despliegue ([D-23](#d-23)): si algo falla, también la verificación posterior a migrar, la CLI sale con 1, no queda nada aplicado, la versión anterior sigue escribiendo y el deploy se corta. Sin calentamiento ni versión del cálculo: el `release_command` es corto y acotado.
+4. Estrategia `bluegreen`: las máquinas nuevas reciben tráfico solo si `/health` responde 2xx. Si no, el deploy falla y siguen las anteriores; no hace falta un rollback.
+5. **`/health` tiene que atender ese commit.** El workflow lo verifica desde afuera, por el dominio público: `ok: true` y `release` igual al SHA (`deploy/fly/release-check.sh after`). Si el deploy no hubiera cambiado nada, `release` sería el commit anterior; reintenta mientras lo sea, porque la conmutación tarda, con un límite (30 intentos cada 5 segundos). Es un bucle en bash y no `curl --retry`, que solo reintenta errores de transporte y no un `jq` que falla.
+
+`/health` devuelve `release` (variable `RELEASE`, que el deploy pasa con `--env RELEASE=$SHA`) también en el `503` con la base caída: el gate necesita saber qué commit atiende aunque la base no responda. Sin la variable, como en `docker compose`, es `null`.
+
+No hay deploy manual desde GitHub: un commit que no pasó por el CI no se despliega. Re-desplegar es volver a correr el workflow de ese commit. Corre un deploy a la vez, sin cortar el que está en curso, y los que llegan mientras tanto esperan todos en orden de llegada (`queue: max`): con la cola por defecto de GitHub cada pendiente nuevo cancela al anterior, y un re-run del `ci` de un commit viejo cancelaría el deploy pendiente de un merge más nuevo, que quedaría sin desplegar. Si el `ci` de un merge más viejo termina después que el de uno más nuevo, su deploy se frena en el gate: una corrida en rojo que no cambia nada. Un operador con `flyctl` y el token puede desplegar a mano (`fly deploy --env RELEASE=<sha de main>`), fuera del workflow: es lo que haría falta si el release que atiende dejara de estar en la historia de `main`.
+
+Los secretos (URLs de la base, contraseña del rol `api`, `INTERNAL_TOKEN`) se generan una vez en `deploy/fly/setup.sh` y viven en Fly; en GitHub solo está `FLY_API_TOKEN`, un token de deploy acotado a la app de la API.
+
+**Alternativas.**
+1. **Fly.io.** Corre la imagen tal cual; `release_command`, health checks y bluegreen cubren migrar antes y no cortar el tráfico sin escribir infraestructura.
+2. **Render.** Equivalente en lo simple (pre-deploy command, Postgres administrado), pero el Postgres administrado no garantiza la versión 18, que es la que corren el CI y `docker compose`.
+3. **AWS ECS + RDS.** Lo más cercano a una producción real, pero exige VPC, task definitions e IaC: mucho más trabajo y costo que lo que prueba en un challenge.
+
+**Decisión: 1**, con un solo entorno (issue #12). Staging automático, producción con aprobación manual y la imagen en GHCR quedan como nice to have: duplican la infraestructura sin cambiar lo que el evaluador puede probar.
+
+**Cómo se prueba.** Lo que depende del código corre en el CI contra Postgres 18: `/health` con `release`, y en `503` con `db: "down"` y el mismo `release` si la consulta de salud falla en Postgres; el servidor real toma `RELEASE` del entorno; la CLI del bootstrap sale con 1 si una migración falla, y un bootstrap que falla en la verificación posterior a migrar no deja nada aplicado. `test/unit/deploy-workflow` evalúa la condición del workflow contra cada conclusión y evento del CI, simula su cola de concurrencia (un re-run viejo no desplaza a un deploy pendiente), fija el orden de sus pasos, compara el montaje del volumen de Postgres con el de `docker compose` y corre `deploy/fly/release-check.sh` con un `curl` simulado y un repositorio temporal: frena un commit anterior al release actual y uno de otra rama, deja pasar el mismo commit y uno posterior, y reintenta hasta el límite mientras `release` sea el anterior. Lo que depende de Fly (`release_command`, bluegreen, el workflow contra la app real, el volumen) lo ejercita `deploy/fly/drills.sh` **a mano, con la cuenta; no corre en el CI**: verifica que el último merge pasó por `ci` y deploy y que `/health` lo atiende; despliega un release con el bootstrap roto y otro con `/health` en `503`, y reejecuta el `ci` de un commit viejo, y esos tres tienen que fallar y seguir atendiendo el release anterior; aparte, `persistence` escribe un dato, redespliega la base y exige que siga.
+
+**Lo que cuesta y los límites conocidos.**
+- **La credencial de administrador queda en las máquinas de la API.** Los secretos de Fly son por app: `DATABASE_ADMIN_URL`, que solo usa el `release_command`, está también en las máquinas que atienden. La API sigue conectándose con el rol `api`, que no puede escribir tablas ([D-17](#d-17)), pero un proceso comprometido en esa máquina tendría la credencial de owner, y en producción eso vacía esa garantía. La alternativa es una app aparte para el release: una máquina con la misma imagen y solo `DATABASE_ADMIN_URL`, que el workflow despliega antes que la API, y la app de la API con `DATABASE_URL` solamente. Queda como límite conocido: duplica apps y pasos del workflow para un solo entorno.
+- **El executor de LIMIT no corre solo** ([D-28](#d-28)). En producción lo llamaría un cron externo cada N minutos: `POST /internal/execute-limits` con `INTERNAL_TOKEN`, desde una máquina programada de Fly (`fly machine run <imagen con curl> --schedule hourly`; el mínimo del scheduler de Fly es una hora) o desde un cron del operador si hace falta más seguido. No se implementa: con las cotizaciones del seed no ejecutaría nada, y ejecutar órdenes sin que nadie lo pida cambiaría los datos que el evaluador mira.
+- Postgres corre en una sola máquina con un volumen: sin réplica ni backups administrados (Fly hace snapshots diarios del volumen). Para producción iría a un Postgres administrado con la misma versión.
+
+---
+
 <a id="fuera-de-alcance"></a>
 ## Fuera de alcance y límites conocidos
 
@@ -311,3 +347,6 @@ Los endpoints `/internal/*` exigen la cabecera `X-Internal-Token`. Si `INTERNAL_
 | Serie temporal del portfolio | No se guarda ningún balance. Una fila por día daría la evolución del valor de la cuenta. |
 | Autenticación | Ver [D-27](#d-27). |
 | Calendario hábil | La antigüedad de una cotización se mide en días corridos. |
+| Credencial de administrador en las máquinas de la API | Los secretos de Fly son por app: `DATABASE_ADMIN_URL`, que solo usa el `release_command`, queda también en las máquinas que atienden. La alternativa es una app aparte para el release, con la misma imagen y solo esa credencial, desplegada antes que la API ([D-29](#d-29)). |
+| Executor de LIMIT programado | No corre solo ([D-28](#d-28)). En producción lo llamaría un cron externo cada N minutos (`fly machine run --schedule`, o un cron del operador) contra `POST /internal/execute-limits` ([D-29](#d-29)). |
+| Staging, aprobación manual para producción, imagen en GHCR | Un solo entorno, desplegado desde `main` ([D-29](#d-29)). Nice to have del deploy continuo. |

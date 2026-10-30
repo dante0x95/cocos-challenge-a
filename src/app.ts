@@ -7,13 +7,15 @@ import { ordersRouter } from './routes/orders.routes.js';
 import { instrumentsRouter } from './routes/instruments.routes.js';
 import { healthRouter, internalRouter } from './routes/internal.routes.js';
 
-export function createApp(opts: { internalToken?: string } = { internalToken: config.INTERNAL_TOKEN }) {
+export function createApp(
+  opts: { internalToken?: string; release?: string } = { internalToken: config.INTERNAL_TOKEN, release: config.RELEASE },
+) {
   const app = express();
   app.disable('x-powered-by');
   app.set('query parser', 'simple');
   app.use(requestLog);
   app.use(express.json({ limit: '16kb' }));
-  app.use(healthRouter);
+  app.use(healthRouter(opts.release));
   app.use(portfolioRouter);
   app.use(instrumentsRouter);
   app.use(ordersRouter);

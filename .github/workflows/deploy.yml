@@ -1,0 +1,60 @@
+# Deploy continuo a Fly.io (D-29): cada commit de main con el check "ci" en verde se despliega.
+# fly.toml corre el bootstrap como release_command antes de cambiar de versión, y la estrategia
+# bluegreen pasa el tráfico solo si /health responde 2xx. Antes de desplegar, el commit tiene
+# que descender del release que atiende (un re-run del CI de un commit viejo dispara este
+# workflow igual que un merge); después, /health tiene que atenderlo. Las dos verificaciones:
+# deploy/fly/release-check.sh. La primera vez: deploy/fly/setup.sh.
+# No hay deploy manual desde acá: un commit que no pasó por el CI no se despliega.
+name: deploy
+
+on:
+  workflow_run:
+    workflows: [ci]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+
+# Un deploy a la vez, sin cortar uno en curso: cortarlo a mitad del bootstrap no rompe nada
+# (es una transacción), pero deja un deploy fallido que hay que mirar. queue: max deja esperar
+# a todos los pendientes, en orden de llegada: con la cola por defecto (single) cada pendiente
+# nuevo cancela al anterior, y un re-run del CI de un commit viejo que llega mientras otro
+# deploy corre cancelaría el deploy pendiente de un merge más nuevo; después el gate frena al
+# viejo y ese merge queda sin desplegar.
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  deploy:
+    # Solo commits que llegaron a main con el CI en verde (un PR desde una rama llamada main no
+    # cuenta: su evento es pull_request).
+    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment:
+      name: production
+      url: https://cocos-challenge-a-api.fly.dev
+    env:
+      SHA: ${{ github.event.workflow_run.head_sha }}
+      URL: https://cocos-challenge-a-api.fly.dev
+    steps:
+      # El commit que pasó el CI, no el último de main. Con la historia completa: el gate
+      # compara ese commit con el release que atiende.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.SHA }}
+          fetch-depth: 0
+      - name: El commit desciende del release actual
+        run: deploy/fly/release-check.sh before
+      - uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1 # 1.6
+      - name: Deploy
+        run: flyctl deploy --remote-only --image-label "$SHA" --env "RELEASE=$SHA"
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+      # Desde afuera, por el dominio público: atiende este commit con ok: true. Si el deploy no
+      # hubiera cambiado nada, release sería el commit anterior; reintenta mientras lo sea.
+      - name: /health atiende el commit
+        run: deploy/fly/release-check.sh after

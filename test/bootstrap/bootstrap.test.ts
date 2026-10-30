@@ -2,6 +2,7 @@
 // challenge; la segunda no cambia nada (idempotente). También: una migración ya aplicada que
 // cambia de contenido aborta, y una base que ya tiene las tablas del challenge no se re-siembra.
 import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { spawnSync } from 'node:child_process';
 import { cpSync, mkdtempSync, readFileSync, rmSync, appendFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -82,6 +83,67 @@ describe('bootstrap', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  }, 60_000);
+
+  // D-29: la CLI es el release_command del deploy en Fly. Si el bootstrap falla tiene que salir
+  // con 1, para que el deploy se corte y siga atendiendo la versión anterior.
+  it('la CLI (release_command) sale con 0 si el bootstrap pasa y con 1 si falla, sin dejar nada aplicado', async () => {
+    const cli = (dbDir: string) => spawnSync(resolve('node_modules/.bin/tsx'), [resolve('src/db/bootstrap.ts')], {
+      encoding: 'utf8',
+      env: { ...process.env, DATABASE_ADMIN_URL: url, API_DB_PASSWORD: 'api', DB_DIR: dbDir },
+    });
+    const ok = cli(resolve('db'));
+    expect(ok.stderr).toBe('');
+    expect(ok.status).toBe(0);
+    expect(ok.stdout).toContain('bootstrap OK');
+
+    const dir = mkdtempSync(join(tmpdir(), 'cocos-db-cli-'));
+    try {
+      cpSync(resolve('db'), dir, { recursive: true });
+      writeFileSync(join(dir, 'migrations', '999_cli_falla.sql'), "DO $$ BEGIN RAISE EXCEPTION 'migración de prueba'; END $$;");
+      const bad = cli(dir);
+      expect(bad.status).toBe(1);
+      expect(bad.stderr).toContain('bootstrap FALLÓ: migración de prueba');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+    const after = await stateOf(url);
+    expect(after).toEqual(first);
+    expect(after.migrations.map((m) => m.name)).not.toContain('999_cli_falla.sql');
+  }, 60_000);
+
+  // D-24, D-29: la verificación de la historia corre después de migrar. Si rechaza el bootstrap,
+  // la migración, sus efectos, las funciones nuevas y la contraseña nueva del rol api tampoco
+  // quedan: un release rechazado no deja la base cambiada debajo de la versión anterior.
+  it('un bootstrap que falla en la verificación posterior a migrar no deja nada aplicado', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cocos-db-verify-'));
+    try {
+      cpSync(resolve('db'), dir, { recursive: true });
+      writeFileSync(join(dir, 'migrations', '999_verification.sql'),
+        'CREATE TABLE app.test_verification (x int); UPDATE app.settings SET price_max_age_days = 7;');
+      writeFileSync(join(dir, 'functions', '095_test_verification.sql'), `CREATE OR REPLACE FUNCTION app.verify_ledger()
+        RETURNS TABLE (userid int, problem text, detail text) LANGUAGE sql AS $$ SELECT 1, 'cash', 'verificación de prueba' $$;`);
+      await expect(bootstrap({ adminUrl: url, apiPassword: 'otra-clave', dbDir: dir, ...quiet }))
+        .rejects.toThrow(/verificación de la historia falló/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+    const after = await stateOf(url);
+    expect(after).toEqual(first);
+    expect(after.migrations.map((m) => m.name)).not.toContain('999_verification.sql');
+    const c = new pg.Client({ connectionString: url });
+    await c.connect();
+    try {
+      expect((await c.query("SELECT to_regclass('app.test_verification') AS t")).rows[0].t).toBeNull();
+      expect((await c.query("SELECT pg_get_functiondef('app.verify_ledger()'::regprocedure) AS d")).rows[0].d)
+        .not.toContain('verificación de prueba');
+    } finally {
+      await c.end();
+    }
+    // El rol api sigue con su contraseña anterior.
+    const api = new pg.Client({ connectionString: dbUrl(DB, { name: 'api', password: 'api' }) });
+    await api.connect();
+    await api.end();
   }, 60_000);
 
   it('base que ya tiene las tablas del challenge: el seed se registra sin correr (baseline)', async () => {

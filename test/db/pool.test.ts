@@ -15,7 +15,7 @@ const CONNECTION_LOST_MESSAGE = 'la conexión con la base se cortó; el resultad
 let server: Server;
 let base: string;
 beforeAll(() => {
-  server = createApp({ internalToken: 'test-token' }).listen(0);
+  server = createApp({ internalToken: 'test-token', release: 'test-release' }).listen(0);
   base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
 });
 afterAll(async () => { server.close(); await admin.end(); await pool.end(); });
@@ -110,7 +110,8 @@ describe('reinicio completo: todas las conexiones de la API cortadas a la vez', 
 });
 
 describe('GET /health mientras la base no acepta conexiones', () => {
-  it('responde 503 { ok: false, db: "down" } y vuelve a 200 sola, en la misma instancia', async () => {
+  // D-29: el 503 trae también el release que atiende; el gate del deploy lo lee con la base caída.
+  it('responde 503 { ok: false, db: "down", release } y vuelve a 200 sola, en la misma instancia', async () => {
     // La base rechaza conexiones nuevas del rol api (sin CONNECT) y se cortan las que había: la
     // misma ventana que un reinicio, sin apagar el servidor que comparten las pruebas.
     await admin.query(`REVOKE CONNECT ON DATABASE ${TEST_DB} FROM PUBLIC`);
@@ -118,13 +119,13 @@ describe('GET /health mientras la base no acepta conexiones', () => {
       await quiet(terminateApi);
       const down = await quiet(() => fetch(`${base}/health`));
       expect(down.status).toBe(503);
-      expect(await down.json()).toEqual({ ok: false, db: 'down' });
+      expect(await down.json()).toEqual({ ok: false, db: 'down', release: 'test-release' });
     } finally {
       await admin.query(`GRANT CONNECT ON DATABASE ${TEST_DB} TO PUBLIC`);
     }
     const up = await fetch(`${base}/health`);
     expect(up.status).toBe(200);
-    expect(await up.json()).toMatchObject({ ok: true, db: 'up' });
+    expect(await up.json()).toMatchObject({ ok: true, db: 'up', release: 'test-release' });
   });
 });
 

@@ -23,16 +23,23 @@ const POOL_TIMEOUTS = new Set(['timeout exceeded when trying to connect', 'Conne
 // no se ejecutó nada; después (query), el resultado es desconocido: la sentencia pudo confirmarse
 // y la respuesta perderse. Para el cliente es lo mismo: 503 y reintentar con la misma clave; el
 // replay devuelve la orden si existe (D-20). La fase va al log, no al cliente.
+// Toda la clase SQLSTATE 08 (connection_exception) es un corte; 08001 y 08004 son de apertura.
 const CONNECT_CODES = new Set(['ECONNREFUSED', 'ENOTFOUND', 'EHOSTUNREACH', 'ENETUNREACH', '57P03', '08001', '08004']);
-const QUERY_CODES = new Set(['ECONNRESET', 'EPIPE', 'ETIMEDOUT', '57P01', '57P02', '08000', '08003', '08006', '08P01']);
+const QUERY_CODES = new Set(['ECONNRESET', 'EPIPE', 'ETIMEDOUT', '57P01', '57P02']);
 const QUERY_MESSAGES = ['Connection terminated unexpectedly', 'Client has encountered a connection error and is not queryable', 'Connection terminated'];
+// Un error de socket de Node dice qué llamada falló: abrir el socket o resolver el nombre es antes
+// de enviar nada, aunque el código (ETIMEDOUT, ECONNRESET) también pueda darse con la conexión abierta.
+const CONNECT_SYSCALLS = new Set(['connect', 'getaddrinfo']);
 
 /** 'connect' | 'query' si el error es un corte de conexión con la base; null si no lo es. */
 export function connectionLostPhase(err: unknown): 'connect' | 'query' | null {
-  const e = err as { code?: string; message?: string };
-  if (e.code && CONNECT_CODES.has(e.code)) return 'connect';
-  if (e.code && QUERY_CODES.has(e.code)) return 'query';
-  if (!e.code && e.message && QUERY_MESSAGES.some((m) => e.message!.startsWith(m))) return 'query';
+  const e = err as { code?: unknown; message?: string; syscall?: unknown };
+  if (e.code) {
+    const code = String(e.code);
+    if (!CONNECT_CODES.has(code) && !QUERY_CODES.has(code) && !code.startsWith('08')) return null;
+    return CONNECT_CODES.has(code) || CONNECT_SYSCALLS.has(String(e.syscall)) ? 'connect' : 'query';
+  }
+  if (e.message && QUERY_MESSAGES.some((m) => e.message!.startsWith(m))) return 'query';
   return null;
 }
 

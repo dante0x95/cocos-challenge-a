@@ -98,6 +98,11 @@ BEGIN
       IF p_limit IS NULL OR p_limit <= 0 OR p_limit <> round(p_limit, 2) THEN
         RAISE EXCEPTION 'una orden LIMIT requiere precio > 0 con a lo sumo 2 decimales' USING ERRCODE = 'APP02';
       END IF;
+      -- Tope por orden (D-14), antes de asignar `price` (numeric(18,2)) y sin esperar el lock: un
+      -- precio o un importe por encima de 10^15 ARS nunca podría ejecutarse.
+      IF p_limit > 1e15 OR (p_size IS NOT NULL AND p_size::numeric * p_limit > 1e15) THEN
+        RAISE EXCEPTION 'el importe de la orden supera 10^15 ARS' USING ERRCODE = 'APP05';
+      END IF;
       price := p_limit;
     END IF;
   END IF;
@@ -143,6 +148,11 @@ BEGIN
   END IF;
   IF v_size > 2147483647 THEN
     RAISE EXCEPTION 'la cantidad supera el máximo por orden (2147483647)' USING ERRCODE = 'APP02';
+  END IF;
+  -- Tope por orden (D-14) con el precio ya resuelto (MARKET, o LIMIT por amount): size × price
+  -- ≤ 10^15 ARS, así el importe entra en numeric(20,0) y el amount de la respuesta en numeric(18,2).
+  IF v_size::numeric * price > 1e15 THEN
+    RAISE EXCEPTION 'el importe de la orden supera 10^15 ARS' USING ERRCODE = 'APP05';
   END IF;
   imp := (v_size::numeric * price * 100)::numeric(20,0);
 

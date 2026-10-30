@@ -130,9 +130,11 @@ La migración impone una cotización por instrumento y día (`UNIQUE (instrument
 <a id="d-14"></a>
 ### D-14 — Límites de dominio
 
-Ningún movimiento se confirma si deja el cash fuera de ±10¹⁵ ARS (1.000.000.000.000.000,00) o una posición por encima de 2⁶² acciones. El cash tiene además el límite por movimiento de [D-05](#d-05).
+Ningún movimiento se confirma si deja el cash fuera de ±10¹⁵ ARS (1.000.000.000.000.000,00) o una posición por encima de 2⁶² acciones. El cash tiene además el límite por movimiento de [D-05](#d-05). Y ninguna orden se graba, en ningún estado, si su importe (`size × price`) supera 10¹⁵ ARS: responde `422 LIMIT` sin orden.
 
 **Por qué existe el tope.** El cash sale del fold como `bigint` en centavos (`cash_cents`): su máximo es 92.233.720.368.547.758,07 ARS. Un cash por encima no se puede leer ni autorizar. El tope de 10¹⁵ deja margen sobre lo representable y es una cifra que se explica. Para las posiciones, 2⁶² deja margen dentro de `bigint`.
+
+**Por qué un tope por orden, y antes de todo.** Una orden cuyo importe supera el cash máximo representable nunca podría ejecutarse: una compra no tendría con qué pagarse y una venta dejaría el cash fuera del tope. Pero una LIMIT que queda `NEW` o `REJECTED` no pasa por la validación del estado, y el importe entra en tipos acotados (`numeric(20,0)` para el importe, `numeric(18,2)` para el precio y el `amount` de la respuesta): sin el tope, una orden con `size × price ≥ 10¹⁶` respondía `500` por overflow en vez de un código claro. Lo mismo una MARKET con `size` máximo sobre un instrumento de cotización muy alta. El tope se valida apenas se conocen `size` y `price`: para una LIMIT por `size`, antes del lock; para MARKET o por `amount`, con el precio ya resuelto, antes de calcular el importe.
 
 **Dónde se valida.** Siempre bajo el lock, con el estado del momento en que el movimiento se confirma:
 

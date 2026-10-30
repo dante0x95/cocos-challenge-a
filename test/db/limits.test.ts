@@ -69,6 +69,13 @@ async function richUser(cashCents: bigint, iid = inst): Promise<number> {
   return u;
 }
 
+/** LIMIT `NEW` escrita directo como administrador (historia heredada): la API no la validó. */
+const legacyNew = async (u: number, iid: number, side: 'BUY' | 'SELL', size: number, price: string) =>
+  (await admin.query<{ id: string }>(
+    `INSERT INTO app.orders (instrumentid, userid, size, price, type, side, status, datetime)
+     VALUES ($1, $2, $3, $4, 'LIMIT', $5, 'NEW', timezone('UTC', now())) RETURNING id::text`,
+    [iid, u, size, price, side])).rows[0].id;
+
 /** SELL LIMIT 1.000 @ 5.000,00: cruza con el close de `iid` y suma 5.000.000,00 ARS al cash. */
 const sellLimit = (u: number, iid = inst) =>
   placeOrder(pool, { userid: u, key: 'sl', side: 'SELL', type: 'LIMIT', instrumentid: iid, size: 1000, limit: '5000.00' });
@@ -126,11 +133,8 @@ describe('executor con LIMITs que violarían D-14 en el lote', () => {
   beforeAll(async () => {
     // Las que violan van primero (id menor): antes ocupaban su lugar del lote en cada corrida.
     bad = (await sellLimit(await richUser(99_999_999_999_900_000n))).order_id;
-    const h = await placeOrder(pool, {
-      userid: await richUser(99_999_999_999_900_000n, big), key: 'slb', side: 'SELL', type: 'LIMIT',
-      instrumentid: big, size: 1000, limit: '9500000000000.00' });
-    expect(h.body.status).toBe('NEW');
-    huge = h.order_id;
+    // Importe 9,5 × 10¹⁵: por la API ya no se puede crear (tope por orden); se escribe como heredada.
+    huge = await legacyNew(await richUser(99_999_999_999_900_000n, big), big, 'SELL', 1000, '9500000000000.00');
     const w = await newUser('d14-ok');
     await placeOrder(pool, { userid: w, key: 'c', side: 'CASH_IN', type: 'MARKET', instrumentid: ars, amount: '5000.00' });
     const ok = await placeOrder(pool, { userid: w, key: 'b', side: 'BUY', type: 'LIMIT', instrumentid: inst, size: 1, limit: '5000.00' });
@@ -335,5 +339,142 @@ describe('concurrencia: la decisión de D-14 se toma con el estado leído bajo e
       expect(r.errors.map((x) => x.order_id)).not.toContain(lim.order_id);
     } finally { await a.end(); }
     expect(await orderRow(lim.order_id)).toEqual({ status: 'CANCELLED', balance_seq: null });
+  });
+});
+
+// Tope por orden (D-14, issue #2): size × price ≤ 10¹⁵ ARS en cualquier estado. Sin el tope, una
+// LIMIT grande que quedaba NEW o REJECTED (o una MARKET con size máximo sobre un close alto)
+// reventaba en un cast y respondía 500.
+describe('tope por orden: el importe no supera 10¹⁵ ARS en ningún estado', () => {
+  const ONE_E15 = '1000000000000000.00';
+  const limit = (u: number, key: string, side: 'BUY' | 'SELL', iid: number, size: number | null, price: string, amount: string | null = null) =>
+    placeOrder(pool, { userid: u, key, side, type: 'LIMIT', instrumentid: iid, size, amount, limit: price });
+  const statusAndCount = async (u: number) =>
+    (await admin.query<{ status: string; n: string }>(
+      'SELECT status, count(*)::text AS n FROM app.orders WHERE userid = $1 GROUP BY status', [u])).rows;
+
+  describe('frontera por cada camino que calcula el importe', () => {
+    it.each([
+      ['1 × 10¹⁵', 1, ONE_E15],
+      ['10⁸ × 10⁷', 100_000_000, '10000000.00'],
+    ])('LIMIT por size, %s exacto → camino normal (REJECTED sin cash); + 0,01 → 422 LIMIT sin orden', async (_n, size, price) => {
+      const u = await newUser('cap');
+      const ok = await limit(u, 'ok', 'BUY', inst, size, price);
+      expect(ok.body.status).toBe('REJECTED');
+      expect(ok.body.amount).toBe(ONE_E15);
+      const over = size === 1 ? '1000000000000000.01' : '10000000.01';
+      await expect(limit(u, 'over', 'BUY', inst, size, over)).rejects.toMatchObject({ code: 'APP05' });
+      expect(await statusAndCount(u)).toEqual([{ status: 'REJECTED', n: '1' }]);
+    });
+
+    it('LIMIT por amount: el tope es sobre size × price, no sobre el monto', async () => {
+      const u = await newUser('cap-amount');
+      // amount 10¹⁶ con price 2 × 10¹² → size 5.000 → importe 10¹⁶: 422, no 400 ni 500.
+      await expect(limit(u, 'a1', 'BUY', inst, null, '2000000000000.00', '10000000000000000.00')).rejects.toMatchObject({ code: 'APP05' });
+      // amount 10¹⁵ con price 6 × 10¹⁴ → size 1 → importe 6 × 10¹⁴ < amount: camino normal.
+      const r = await limit(u, 'a2', 'BUY', inst, null, '600000000000000.00', ONE_E15);
+      expect(r.body).toMatchObject({ status: 'REJECTED', size: '1', amount: '600000000000000.00' });
+      expect(await ordersOf(u)).toBe(1);
+    });
+
+    it('MARKET por size sobre un close de 9,5 × 10¹²: size máximo → 422 LIMIT, no 500', async () => {
+      const u = await newUser('cap-market');
+      await expect(placeOrder(pool, { userid: u, key: 'm', side: 'BUY', type: 'MARKET', instrumentid: big, size: 2_147_483_647 }))
+        .rejects.toMatchObject({ code: 'APP05' });
+      expect(await ordersOf(u)).toBe(0);
+    });
+
+    it('MARKET por amount sobre ese close: amount 2 × 10¹⁶ → 422 LIMIT, no 500 con REJECTED', async () => {
+      const u = await newUser('cap-market-amount');
+      await expect(placeOrder(pool, { userid: u, key: 'm', side: 'BUY', type: 'MARKET', instrumentid: big, amount: '20000000000000000.00' }))
+        .rejects.toMatchObject({ code: 'APP05' });
+      expect(await ordersOf(u)).toBe(0);
+    });
+  });
+
+  describe('el precio solo', () => {
+    it('BUY LIMIT size 1 a 10¹⁶ → 422 LIMIT (antes: 500 al asignar price, antes del lock)', async () => {
+      const u = await newUser('cap-price');
+      await expect(limit(u, 'p', 'BUY', inst, 1, '10000000000000000.00')).rejects.toMatchObject({ code: 'APP05' });
+      expect(await ordersOf(u)).toBe(0);
+    });
+
+    it('price de 10.000 dígitos por HTTP → 422, nunca 500', async () => {
+      const server = createApp({ internalToken: 'test-token' }).listen(0);
+      try {
+        const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+        const u = await newUser('cap-digits');
+        const r = await fetch(`${base}/orders`, {
+          method: 'POST', headers: { 'content-type': 'application/json', 'Idempotency-Key': 'digits' },
+          body: JSON.stringify({ userid: u, side: 'BUY', type: 'LIMIT', instrumentid: inst, size: 1, price: '9'.repeat(10_000) + '.00' }) });
+        expect(r.status).toBe(422);
+        expect(((await r.json()) as { error: string }).error).toBe('LIMIT');
+        expect(await ordersOf(u)).toBe(0);
+      } finally { server.close(); }
+    });
+  });
+
+  describe('orden de evaluación y efectos del 422', () => {
+    it('con el lock del usuario tomado por otra sesión, una LIMIT por size fuera del tope responde 422 enseguida, no 503', async () => {
+      const u = await newUser('cap-lock');
+      const a = await apiClient();
+      try {
+        await a.query('BEGIN');
+        await a.query("SELECT pg_advisory_xact_lock(hashtext('user-balance'), $1)", [u]);
+        const t0 = Date.now();
+        await expect(limit(u, 'l', 'BUY', inst, 2, ONE_E15)).rejects.toMatchObject({ code: 'APP05' });
+        expect(Date.now() - t0).toBeLessThan(1000);   // lock_timeout es 2 s: no lo esperó
+        await a.query('ROLLBACK');
+      } finally { await a.end(); }
+    });
+
+    it('la clave no se consume: misma clave y mismo body → otra vez 422; otro body → 201', async () => {
+      const u = await newUser('cap-key');
+      await expect(limit(u, 'k', 'BUY', inst, 2, ONE_E15)).rejects.toMatchObject({ code: 'APP05' });
+      await expect(limit(u, 'k', 'BUY', inst, 2, ONE_E15)).rejects.toMatchObject({ code: 'APP05' });
+      const r = await limit(u, 'k', 'BUY', inst, 1, ONE_E15);
+      expect(r.replay).toBe(false);
+      expect(r.body.status).toBe('REJECTED');
+      expect(await ordersOf(u)).toBe(1);
+    });
+  });
+
+  describe('compatibilidad con una NEW heredada por encima del tope', () => {
+    it('SELL LIMIT NEW de 9,5 × 10¹⁵: GET, portfolio, cancel y executor siguen funcionando', async () => {
+      const server = createApp({ internalToken: 'test-token' }).listen(0);
+      try {
+        const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+        const u = await richUser(1_000_000n, big);
+        const id = await legacyNew(u, big, 'SELL', 1000, '9500000000000.00');
+        const get = await fetch(`${base}/orders/${id}?userid=${u}`);
+        expect(get.status).toBe(200);
+        expect(await get.json()).toMatchObject({ status: 'NEW', amount: '9500000000000000.00' });
+        const pf = await fetch(`${base}/portfolio/${u}`);
+        expect(((await pf.json()) as { positions: { instrumentid: number; acciones_reservadas: string }[] }).positions
+          .find((p) => p.instrumentid === big)!.acciones_reservadas).toBe('1000');
+        // El executor la cancela por el tope de cash (D-14), como a cualquier otra.
+        expect(await run('execute_limit_outcome', id)).toBe('LIMIT');
+        expect(await orderRow(id)).toEqual({ status: 'CANCELLED', balance_seq: null });
+        const id2 = await legacyNew(u, big, 'SELL', 1, '9500000000000.00');
+        const cancel = await fetch(`${base}/orders/${id2}/cancel`, {
+          method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ userid: u }) });
+        expect(cancel.status).toBe(200);
+      } finally { server.close(); }
+    });
+  });
+
+  describe('la clase de bug: ningún 500 dentro del rango, 422 fuera', () => {
+    const sizes = [1, 1000, 2_147_483_647];
+    const prices = ['0.01', '1.00', '10000000.00', ONE_E15];
+    const cases = sizes.flatMap((size) => prices.map((price) => [size, price] as const));
+    it.each(cases)('LIMIT BUY y SELL con size %s y price %s → 201 si size × price ≤ 10¹⁵, 422 LIMIT si no; nunca otro error', async (size, price) => {
+      const u = await newUser('cap-grid');
+      const over = BigInt(size) * BigInt(price.replace('.', '')) > CAP_CENTS;
+      for (const side of ['BUY', 'SELL'] as const) {
+        const p = limit(u, side, side, inst, size, price);
+        if (over) await expect(p).rejects.toMatchObject({ code: 'APP05' });
+        else expect((await p).body.status).toBe('REJECTED');   // sin cash ni acciones, pero con orden
+      }
+    });
   });
 });

@@ -15,9 +15,9 @@
    - `commit-messages`: formato de cada commit y del título + descripción del PR.
 5. Con el CI en verde, Dante corre la [revisión de Codex](#revisión-de-codex).
 6. Cada hallazgo se responde en su hilo con `FIXED <sha>` (y el commit que lo arregla) o `JUSTIFIED <motivo>`. Después se vuelve a correr la revisión.
-7. Con `codex/review` en verde, el PR se marca **ready for review** y Dante lo integra con **squash merge**.
+7. Con `codex/review` en verde, el PR se marca **ready for review** y Dante lo integra con **squash merge**. Antes no se puede: `ready-gate` devuelve a borrador un PR que se marca ready sin `codex/review` en verde.
 
-`main` está protegida (branch protection, también para administradores): no se integra nada sin `ci`, `commit-messages` y `codex/review` en verde.
+`main` está protegida por un ruleset sin bypass (también para administradores): no se integra nada sin `ci`, `commit-messages` y `codex/review` en verde. `ready-gate` (`.github/workflows/ready-gate.yml`) corre con `pull_request_target`, es decir, la versión de `main`: un PR no puede cambiar su propia gate.
 
 ## Formato de commits y PRs
 

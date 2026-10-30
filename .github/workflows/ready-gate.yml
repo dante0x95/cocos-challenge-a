@@ -1,0 +1,38 @@
+# Un PR pasa a ready for review solo con codex/review en verde (CONTRIBUTING.md). GitHub no
+# deja bloquear ese paso con una regla: si se marca ready antes, este job lo devuelve a
+# borrador y falla. El merge en main lo bloquea aparte el ruleset, que exige codex/review.
+# pull_request_target corre la versión de este archivo que está en main, así que un PR no
+# puede ablandar su propia gate. No hace checkout ni ejecuta nada del PR.
+name: ready-gate
+
+on:
+  pull_request_target:
+    types: [opened, reopened, ready_for_review]
+
+permissions:
+  pull-requests: write
+  statuses: read
+
+jobs:
+  codex-review-before-ready:
+    if: ${{ !github.event.pull_request.draft }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: codex/review en verde, o de vuelta a borrador
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NODE_ID: ${{ github.event.pull_request.node_id }}
+        run: |
+          state=$(gh api "repos/$REPO/commits/$HEAD_SHA/status" \
+            --jq '.statuses[] | select(.context == "codex/review") | .state')
+          if [ "$state" = "success" ]; then
+            echo "codex/review en verde en $HEAD_SHA."
+            exit 0
+          fi
+          gh api graphql -f id="$PR_NODE_ID" \
+            -f query='mutation($id: ID!) { convertPullRequestToDraft(input: {pullRequestId: $id}) { pullRequest { isDraft } } }'
+          echo "::error::codex/review no está en verde en $HEAD_SHA (estado: ${state:-sin status}). El PR volvió a borrador: correr scripts/codex-review.sh y marcarlo ready cuando apruebe."
+          exit 1

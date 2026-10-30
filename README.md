@@ -86,7 +86,7 @@ Todos en [`db/migrations`](db/migrations), justificados en cada archivo y en las
 | Tablas al esquema `app`, roles `app_owner` / `api` | Privilegios en un solo lugar; la API no puede escribir ([D-17](docs/decisiones.md#d-17)) |
 | Cash en centavos | Montos con centavos con una sola fórmula de importe ([D-05](docs/decisiones.md#d-05)) |
 | Columna `orders.balance_seq` | Orden de ejecución, distinto del de creación ([D-18](docs/decisiones.md#d-18)) |
-| Columna `orders.cancel_reason` | Por qué se canceló una orden: el usuario o el tope de [D-14](docs/decisiones.md#d-14) |
+| Columna `orders.cancel_reason` | Por qué se canceló una orden: el usuario, el tope de [D-14](docs/decisiones.md#d-14) o la falta de respaldo de una LIMIT heredada ([D-12](docs/decisiones.md#d-12)) |
 | `NOT NULL`, `CHECK`s, trigger de inmutabilidad | La base rechaza estados imposibles, aunque alguien escriba sin pasar por la API |
 | Índices parciales por usuario y estado | Leer la historia de un usuario sin recorrer la tabla (de 3–4 s a 3 ms por lectura en el benchmark) |
 | `marketdata`: una cotización por instrumento y día | El "último precio" queda bien definido ([D-07](docs/decisiones.md#d-07)) |

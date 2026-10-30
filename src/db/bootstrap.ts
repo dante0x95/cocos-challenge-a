@@ -14,7 +14,9 @@
 // 3. Contraseña del rol api desde API_DB_PASSWORD.
 // 4. Si se aplicó alguna migración: verifica la historia (app.verify_ledger) y aborta si el
 //    cash del fold no coincide con la suma directa de importes. Un corto heredado (D-01) o una
-//    historia fuera de lo representable (D-14) se informan y no abortan.
+//    historia fuera de lo representable (D-14) se informan y no abortan. Una LIMIT NEW sin
+//    respaldo (heredada: place_order no las crea) se cancela con cancel_reason = 'UNBACKED'
+//    (app.cancel_unbacked, bajo el lock del usuario) y se informa.
 // Los cuatro pasos van en UNA transacción, con la barrera de despliegue en modo exclusivo
 // (D-24): un escritor nunca ve el esquema nuevo con las funciones anteriores, y si algo falla,
 // también la verificación del paso 4, no queda nada aplicado (es el release_command del deploy,
@@ -32,11 +34,15 @@ export interface BootstrapOptions {
   log?: (msg: string) => void;
 }
 
+export interface LedgerProblem { userid: number; problem: string; detail: string }
+
 export interface BootstrapResult {
   applied: string[];
   baselined: string[];
   functions: string[];
-  ledger: { userid: number; problem: string; detail: string }[];
+  ledger: LedgerProblem[];
+  // LIMIT NEW heredadas sin respaldo, canceladas con cancel_reason = 'UNBACKED' (issue #6).
+  unbacked: string[];
 }
 
 const sqlFiles = (dir: string) => readdirSync(dir).filter((f) => f.endsWith('.sql')).sort();
@@ -56,8 +62,29 @@ export async function bootstrap(opts: BootstrapOptions): Promise<BootstrapResult
   }
 }
 
+/**
+ * Paso 4 del bootstrap: verifica la historia, dentro de su transacción. Aborta (excepción) si el
+ * cash del fold no coincide con la suma directa de importes. Un corto heredado (D-01) o una
+ * historia fuera de lo representable (D-14) solo se informan. Las LIMIT NEW sin respaldo se
+ * cancelan usuario por usuario, bajo su lock (app.cancel_unbacked vuelve a decidir con el estado
+ * del momento), y se informan con su id.
+ */
+export async function verifyLedger(db: pg.Pool | pg.PoolClient, log: (m: string) => void): Promise<{ ledger: LedgerProblem[]; unbacked: string[] }> {
+  const ledger = (await db.query<LedgerProblem>('SELECT userid, problem, detail FROM app.verify_ledger()')).rows;
+  for (const p of ledger) log(`  historia: usuario ${p.userid} — ${p.problem}: ${p.detail}`);
+  const broken = ledger.filter((p) => p.problem !== 'short' && p.problem !== 'overflow' && p.problem !== 'reserva');
+  if (broken.length) throw new Error(`verificación de la historia falló para ${broken.length} usuario(s)`);
+  const unbacked: string[] = [];
+  for (const userid of new Set(ledger.filter((p) => p.problem === 'reserva').map((p) => p.userid))) {
+    const ids = (await db.query<{ order_id: string }>('SELECT order_id::text FROM app.cancel_unbacked($1)', [userid])).rows.map((r) => r.order_id);
+    for (const id of ids) log(`  historia: usuario ${userid} — orden ${id} cancelada: LIMIT pendiente sin respaldo (cancel_reason UNBACKED)`);
+    unbacked.push(...ids);
+  }
+  return { ledger, unbacked };
+}
+
 async function run(db: pg.Pool, dbDir: string, opts: BootstrapOptions, log: (m: string) => void): Promise<BootstrapResult> {
-  const result: BootstrapResult = { applied: [], baselined: [], functions: [], ledger: [] };
+  const result: BootstrapResult = { applied: [], baselined: [], functions: [], ledger: [], unbacked: [] };
   const client = await db.connect();
   client.on('notice', (n) => log(`  ${n.severity ?? 'NOTICE'}: ${n.message}`));
 
@@ -118,11 +145,7 @@ async function run(db: pg.Pool, dbDir: string, opts: BootstrapOptions, log: (m: 
 
       // 4. Verificación de la historia
       if (result.applied.length > 0) {
-        result.ledger = (await client.query('SELECT userid, problem, detail FROM app.verify_ledger()')).rows;
-        for (const p of result.ledger) log(`  historia: usuario ${p.userid} — ${p.problem}: ${p.detail}`);
-        // 'short' (D-01) y 'overflow' (historia fuera de los tipos, D-14) se toleran y se informan.
-        const broken = result.ledger.filter((p) => p.problem !== 'short' && p.problem !== 'overflow');
-        if (broken.length) throw new Error(`verificación de la historia falló para ${broken.length} usuario(s)`);
+        ({ ledger: result.ledger, unbacked: result.unbacked } = await verifyLedger(client, log));
       }
       await client.query('COMMIT');
     } catch (e) {

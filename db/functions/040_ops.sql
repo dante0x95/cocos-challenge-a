@@ -87,7 +87,8 @@ BEGIN
     -- Sin compras NEW no hay nada que respaldar, aunque el cash heredado sea negativo.
     IF res_cash > 0 AND res_cash > fold_cash THEN
       userid := u; problem := 'reserva';
-      detail := format('cash reservado %s > cash %s (centavos): compra LIMIT pendiente sin respaldo', res_cash::numeric(20,0), fold_cash);
+      -- trunc, no un cast acotado: una reserva heredada puede no entrar en numeric(20,0).
+      detail := format('cash reservado %s > cash %s (centavos): compra LIMIT pendiente sin respaldo', trunc(res_cash), fold_cash);
       RETURN NEXT;
     END IF;
     FOR r IN SELECT x.instrumentid, x.reserved, COALESCE(p.q, 0) AS qty

@@ -513,6 +513,52 @@ describe('bootstrap', () => {
         await adminDb.end();
       }
     }, 120_000);
+
+    // D-24: la verificación va en la transacción del bootstrap. Si algo falla después de cancelar
+    // una NEW, la cancelación se revierte con todo lo demás.
+    it('un bootstrap que falla después de cancelar una NEW sin respaldo no deja nada: la orden vuelve a NEW y 007 no queda aplicada', async () => {
+      await recreateDatabase(DB);
+      await deployWithout007();
+      const adminDb = new pg.Pool({ connectionString: url });
+      try {
+        const insert = async (userid: number, size: number) => (await adminDb.query<{ id: string }>(
+          `INSERT INTO app.orders (instrumentid, userid, size, price, type, side, status, datetime)
+           VALUES (47, $1, $2, 900.00, 'LIMIT', 'SELL', 'NEW', timezone('UTC', now())) RETURNING id::text`, [userid, size])).rows[0].id;
+        const other = (await adminDb.query<{ id: number }>(
+          "INSERT INTO app.users (email, accountnumber) VALUES ('unbacked-2@test.local', '9900000002') RETURNING id")).rows[0].id;
+        const first = await insert(1, 100);       // usuario 1: 40 acciones del 47
+        const second = await insert(other, 10);   // el otro: ninguna
+        // Un archivo de funciones extra (después de 040) hace fallar la cancelación del segundo
+        // usuario: la del primero ya ocurrió dentro de la transacción.
+        const dir = mkdtempSync(join(tmpdir(), 'cocos-db-7-'));
+        try {
+          cpSync(resolve('db'), dir, { recursive: true });
+          writeFileSync(join(dir, 'functions', '095_test_falla.sql'), `
+            CREATE FUNCTION app.test_falla() RETURNS trigger LANGUAGE plpgsql AS $$
+            BEGIN RAISE EXCEPTION 'falla de prueba después de cancelar'; END $$;
+            CREATE TRIGGER test_falla BEFORE UPDATE ON app.orders FOR EACH ROW
+              WHEN (NEW.cancel_reason = 'UNBACKED' AND NEW.userid = ${other}) EXECUTE FUNCTION app.test_falla();`);
+          const log: string[] = [];
+          await expect(bootstrap({ adminUrl: url, apiPassword: 'api', dbDir: dir, log: (m) => log.push(m) }))
+            .rejects.toThrow(/falla de prueba después de cancelar/);
+          // La del primer usuario se canceló antes del fallo.
+          expect(log).toContain(`  historia: usuario 1 — orden ${first} cancelada: LIMIT pendiente sin respaldo (cancel_reason UNBACKED)`);
+        } finally {
+          rmSync(dir, { recursive: true, force: true });
+        }
+        const state = async (id: string) => (await adminDb.query('SELECT status, cancel_reason FROM app.orders WHERE id = $1', [id])).rows[0];
+        expect(await state(first)).toEqual({ status: 'NEW', cancel_reason: null });
+        expect(await state(second)).toEqual({ status: 'NEW', cancel_reason: null });
+        expect((await adminDb.query<{ name: string }>('SELECT name FROM public.schema_migrations ORDER BY name')).rows.map((r) => r.name))
+          .not.toContain('007_cancel_reason_unbacked.sql');
+        expect((await adminDb.query("SELECT 1 FROM pg_trigger WHERE tgname = 'test_falla'")).rowCount).toBe(0);
+        // Sin 007, el CHECK sigue sin admitir el motivo.
+        await expect(adminDb.query("UPDATE app.orders SET status = 'CANCELLED', cancel_reason = 'UNBACKED' WHERE id = $1", [first]))
+          .rejects.toMatchObject({ code: '23514', constraint: 'orders_cancel_reason_valid' });
+      } finally {
+        await adminDb.end();
+      }
+    }, 120_000);
   });
 });
 

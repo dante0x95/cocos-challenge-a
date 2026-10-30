@@ -246,6 +246,37 @@ describe('5 y 6. lo que hace el bootstrap: verify_ledger señala y cancel_unback
     expect(await orderRow(sell)).toEqual({ status: 'NEW', cancel_reason: null, balance_seq: null });
   });
 
+  it('BUY LIMIT NEW heredada que reserva 10²⁰ centavos (más que numeric(20,0)): la verificación la señala con el número exacto y la cancela; el otro usuario sigue igual', async () => {
+    const u = await legacyUser('unb-huge', 10_000n);
+    const id = await legacyNew(u, 'BUY', 1000, '1000000000000000.00');
+    const other = await legacyUser('unb-huge-ok', 10_000n);
+    const ok = await legacyNew(other, 'BUY', 1, '50.00');
+    const r = await verify();   // no lanza: el bootstrap sigue
+    expect(r.ledger).toContainEqual({ userid: u, problem: 'reserva', detail: 'cash reservado 100000000000000000000 > cash 10000 (centavos): compra LIMIT pendiente sin respaldo' });
+    expect(r.unbacked).toContain(id);
+    expect(await orderRow(id)).toEqual(UNBACKED);
+    expect(r.ledger.filter((p) => p.userid === other)).toEqual([]);
+    expect(await orderRow(ok)).toEqual({ status: 'NEW', cancel_reason: null, balance_seq: null });
+  });
+
+  // Una base heredada puede tener usuarios cuya única orden es una NEW: la verificación los recorre
+  // aunque no tengan ninguna FILLED.
+  it('usuario sin ninguna orden FILLED, con una SELL NEW sin acciones y una BUY NEW sobre ARS: se señalan y se cancelan las dos', async () => {
+    const u = await newUser('unb-only-new');
+    const sell = await legacyNew(u, 'SELL', 10, '900.00');
+    const buy = await legacyNew(u, 'BUY', 1, '10.00', ars);
+    expect((await admin.query<{ n: number }>("SELECT count(*)::int AS n FROM app.orders WHERE userid = $1 AND status = 'FILLED'", [u])).rows[0].n).toBe(0);
+    const r = await verify();
+    expect(r.ledger.filter((p) => p.userid === u)).toEqual([
+      { userid: u, problem: 'reserva', detail: 'cash reservado 1000 > cash 0 (centavos): compra LIMIT pendiente sin respaldo' },
+      { userid: u, problem: 'reserva', detail: `instrumento ${inst}: 10 acciones reservadas > tenencia 0: venta LIMIT pendiente sin respaldo` },
+      { userid: u, problem: 'reserva', detail: `orden ${buy} pendiente sobre la moneda ARS: BUY/SELL no aplica sobre una moneda` },
+    ]);
+    expect(r.unbacked).toEqual(expect.arrayContaining([sell, buy]));
+    expect(await orderRow(sell)).toEqual(UNBACKED);
+    expect(await orderRow(buy)).toEqual(UNBACKED);
+  });
+
   it('6. BUY LIMIT NEW heredada sobre ARS → la verificación la cancela; el executor no la lista en errors en ninguna corrida', async () => {
     const u = await legacyUser('unb-ars', 100_000n);
     const id = await legacyNew(u, 'BUY', 1, '10.00', ars);   // con cash de sobra: el problema es el instrumento

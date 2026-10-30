@@ -618,7 +618,7 @@ describe('deploy con la API atendiendo (issue #13)', () => {
   };
 
   /** Bootstrap con una migración nueva, pausado después de migrar hasta que `release` vuelve. */
-  async function deployDuring(release: () => Promise<void>, requests: () => Promise<unknown>[]) {
+  async function deployDuring(release: (inFlight: Promise<unknown>[]) => Promise<unknown>, requests: () => Promise<unknown>[]) {
     const dir = mkdtempSync(join(tmpdir(), 'cocos-db-live-'));
     cpSync(resolve('db'), dir, { recursive: true });
     writeFileSync(join(dir, 'migrations', '999_test_live.sql'), 'ALTER TABLE app.orders ADD COLUMN test_live int; CREATE TABLE app.test_live_new (x int);');
@@ -640,7 +640,7 @@ describe('deploy con la API atendiendo (issue #13)', () => {
       }
       const inFlight = requests();
       await apiWaiting(inFlight.length);
-      await release();
+      await release(inFlight);
       await pause.query('COMMIT');
       expect((await deploying).applied).toEqual(['999_test_live.sql']);
       return await Promise.all(inFlight);
@@ -666,7 +666,11 @@ describe('deploy con la API atendiendo (issue #13)', () => {
   it('si el bootstrap tarda más que el lock_timeout: 503 reintentables y nunca 500, y el reintento deja una orden por clave', async () => {
     const before = await cashInOrders();
     const keys = ['lento-1', 'lento-2', 'lento-3'];
-    const results = await deployDuring(() => new Promise((r) => setTimeout(r, 2_500)), () => [...keys.map(cashIn), portfolio()]) as Awaited<ReturnType<typeof cashIn>>[];
+    // La barrera sigue tomada hasta que las tres escrituras respondieron: su lock_timeout (2 s)
+    // vence con el bootstrap todavía en curso. Recién entonces termina el bootstrap y responde la
+    // lectura, que esperaba app.orders.
+    const results = await deployDuring((inFlight) => Promise.all(inFlight.slice(0, keys.length)),
+      () => [...keys.map(cashIn), portfolio()]) as Awaited<ReturnType<typeof cashIn>>[];
     for (const r of results) {
       expect(r.status, JSON.stringify(r.body)).not.toBe(500);
       expect([200, 201, 503]).toContain(r.status);

@@ -39,6 +39,13 @@ function evaluate(expr: string, ctx: Ctx): unknown {
       return v;
     }
     if (t === '!') return !primary();
+    // Funciones de estado del job: success(), failure(), always(), cancelled().
+    if (/^(success|failure|always|cancelled)$/.test(t) && tokens[i] === '(' && tokens[i + 1] === ')') {
+      i += 2;
+      const status = (ctx.job as { status?: string } | undefined)?.status;
+      if (status === undefined) throw new Error(`${t}() sin job.status en el contexto`);
+      return t === 'always' ? true : t === 'success' ? status === 'success' : t === 'failure' ? status === 'failure' : status === 'cancelled';
+    }
     if (t.startsWith("'")) return t.slice(1, -1);
     if (t === 'true') return true;
     if (t === 'false') return false;
@@ -83,6 +90,25 @@ const run = (conclusion: string, event: string) => ({
 });
 const deploys = (conclusion: string, event: string) => Boolean(evaluate(valueOf('if'), run(conclusion, event)));
 
+/** Bloque YAML de un job (indentación de 2 espacios bajo `jobs:`). */
+const jobs = yml.slice(yml.indexOf('\njobs:\n') + 1);
+const job = (name: string) => {
+  const m = jobs.match(new RegExp(`^  ${name}:\\n([\\s\\S]*?)(?=^  \\w+:\\n|$(?![\\s\\S]))`, 'm'));
+  if (!m) throw new Error(`deploy.yml no tiene el job ${name}`);
+  return m[1];
+};
+const runsOf = (block: string) => [...block.matchAll(/^\s*run: (.+)$/gm)].map((m) => m[1]);
+const keyIn = (block: string, key: string) => block.match(new RegExp(`^\\s*${key}:\\s*(.+)$`, 'm'))?.[1].trim();
+/** Clave del job mismo (4 espacios), no de un paso. */
+const jobKey = (block: string, key: string) => block.match(new RegExp(`^ {4}${key}:[ \\t]*(.+)$`, 'm'))?.[1].trim();
+/** Los pasos de un job, como bloques de texto. */
+const stepsOf = (block: string) => block.split(/^ {6}- /m).slice(1);
+const step = (block: string, name: string) => {
+  const found = stepsOf(block).find((st) => st.startsWith(`name: ${name}\n`));
+  if (!found) throw new Error(`no hay un paso "${name}"`);
+  return found;
+};
+
 describe('workflow de deploy', () => {
   it('el evaluador rechaza lo que no entiende', () => {
     expect(() => evaluate("contains(github.ref, 'main')", {})).toThrow(/sintaxis no soportada/);
@@ -118,25 +144,6 @@ describe('workflow de deploy', () => {
     'no despliega un CI en verde disparado por %s', (event) => {
       expect(deploys('success', event)).toBe(false);
     });
-
-  /** Bloque YAML de un job (indentación de 2 espacios bajo `jobs:`). */
-  const jobs = yml.slice(yml.indexOf('\njobs:\n') + 1);
-  const job = (name: string) => {
-    const m = jobs.match(new RegExp(`^  ${name}:\\n([\\s\\S]*?)(?=^  \\w+:\\n|$(?![\\s\\S]))`, 'm'));
-    if (!m) throw new Error(`deploy.yml no tiene el job ${name}`);
-    return m[1];
-  };
-  const runsOf = (block: string) => [...block.matchAll(/^\s*run: (.+)$/gm)].map((m) => m[1]);
-  const keyIn = (block: string, key: string) => block.match(new RegExp(`^\\s*${key}:\\s*(.+)$`, 'm'))?.[1].trim();
-  /** Clave del job mismo (4 espacios), no de un paso. */
-  const jobKey = (block: string, key: string) => block.match(new RegExp(`^ {4}${key}:[ \\t]*(.+)$`, 'm'))?.[1].trim();
-  /** Los pasos de un job, como bloques de texto. */
-  const stepsOf = (block: string) => block.split(/^ {6}- /m).slice(1);
-  const step = (block: string, name: string) => {
-    const found = stepsOf(block).find((st) => st.startsWith(`name: ${name}\n`));
-    if (!found) throw new Error(`no hay un paso "${name}"`);
-    return found;
-  };
 
   it('despliega exactamente el commit que pasó el CI, con RELEASE igual a ese SHA, y la imagen lleva ese SHA', () => {
     expect(evaluate(inner(valueOf('SHA')), run('success', 'push'))).toBe(SHA);
@@ -208,13 +215,13 @@ describe('workflow de deploy', () => {
 
   // Si /health deja de atender el commit después de que el tráfico pasó a la versión nueva, el
   // entorno vuelve a la imagen y el release que atendían antes del deploy.
-  it.each(['staging', 'production'])('%s vuelve a la imagen anterior solo si falla la verificación de después del deploy', (name) => {
+  it.each(['staging', 'production'])('%s vuelve a la imagen anterior si algo falla desde el deploy, con la imagen y el release anotados antes', (name) => {
     const block = job(name);
     expect(keyIn(step(block, 'El commit desciende del release actual'), 'id')).toBe('gate');
     expect(keyIn(step(block, 'Imagen que atiende'), 'id')).toBe('serving');
     expect(keyIn(step(block, 'Deploy'), 'id')).toBe('deploy');
     const back = step(block, 'Volver a la imagen anterior');
-    expect(keyIn(back, 'if')).toBe("failure() && steps.deploy.outcome == 'success'");
+    expect(keyIn(back, 'if')).toBe("failure() && steps.deploy.outcome != 'skipped'");
     expect(keyIn(back, 'PREVIOUS_IMAGE')).toBe('${{ steps.serving.outputs.image }}');
     expect(keyIn(back, 'PREVIOUS_RELEASE')).toBe('${{ steps.gate.outputs.previous }}');
     expect(keyIn(back, 'FLY_API_TOKEN')).toBe('${{ secrets.FLY_API_TOKEN }}');
@@ -628,8 +635,8 @@ describe('rollback.sh', () => {
   const OLD = `ghcr.io/o/r@sha256:${'a'.repeat(64)}`;
   const NEW = `ghcr.io/o/r@sha256:${'b'.repeat(64)}`;
   const PREV = 'p'.repeat(40);
-  const machine = (id: string, image: string, group = 'app', state = 'started') =>
-    ({ id, state, config: { image, metadata: { fly_process_group: group } } });
+  const machine = (id: string, image: string, group = 'app', state = 'started', release = image === OLD ? PREV : SHA) =>
+    ({ id, state, config: { image, env: { RELEASE: release }, metadata: { fly_process_group: group } } });
   // flyctl: `machines list` responde MACHINES; `machine update` se anota. curl: responde, en
   // orden, cada línea de HEALTH (la última se repite).
   const fakes = (machines: unknown[], health: string[]) => {
@@ -699,6 +706,78 @@ describe('rollback.sh', () => {
     ]);
     expect(f.calls().some((c) => c.startsWith('flyctl deploy'))).toBe(false);
     rmSync(f.dir, { recursive: true, force: true });
+  });
+
+  // Los pasos de un job como los corre GitHub: el `if` de cada uno (por defecto success()) con el
+  // estado del job y los outcome de los pasos anteriores; `outcome` decide cómo termina cada
+  // `run`. Devuelve los `run` que corrieron, en orden.
+  function runJob(block: string, outcome: (run: string) => 'success' | 'failure'): string[] {
+    const steps: Record<string, { outcome: string }> = {};
+    let status = 'success';
+    const ran: string[] = [];
+    for (const st of stepsOf(block)) {
+      const run = keyIn(st, 'run');
+      let out = 'skipped';
+      if (evaluate(keyIn(st, 'if') ?? 'success()', { job: { status }, steps })) {
+        out = run ? outcome(run) : 'success';
+        if (run) ran.push(run);
+        if (out === 'failure') status = 'failure';
+      }
+      const id = keyIn(st, 'id');
+      if (id) steps[id] = { outcome: out };
+    }
+    return ran;
+  }
+  const failing = (...prefixes: string[]) => (run: string) => (prefixes.some((p) => run.startsWith(p)) ? 'failure' as const : 'success' as const);
+
+  describe.each(['staging', 'production'])('orquestación del job %s', (name) => {
+    const block = job(name);
+    const deployRun = runsOf(block).find((r) => r.startsWith('flyctl deploy'))!;
+    const BEFORE = 'deploy/fly/release-check.sh before';
+    const RECORD = 'deploy/fly/rollback.sh record';
+    const AFTER = 'deploy/fly/release-check.sh after';
+    const RESTORE = 'deploy/fly/rollback.sh restore';
+    const app = readFileSync(join(ROOT, keyIn(block, 'CONFIG')!), 'utf8').match(/^app = "(.+)"$/m)![1];
+    /** rollback.sh restore con el entorno del job y las máquinas como quedaron. */
+    const restore = (machines: unknown[]) => {
+      const f = fakes(machines, [body(PREV)]);
+      const r = runScript('deploy/fly/rollback.sh', ['restore'], f.bin,
+        { ...f.env, CONFIG: keyIn(block, 'CONFIG')!, URL: keyIn(block, 'URL')!, PREVIOUS_IMAGE: OLD, PREVIOUS_RELEASE: PREV });
+      const calls = f.calls();
+      rmSync(f.dir, { recursive: true, force: true });
+      return { status: r.status, updates: calls.filter((c) => c.startsWith('flyctl machine update')), health: calls.filter((c) => c.startsWith('curl')) };
+    };
+
+    // bluegreen habilita las máquinas nuevas antes de retirar las anteriores; si la retirada
+    // falla, flyctl termina con error y quedan las nuevas (y quizá las anteriores) atendiendo.
+    it('flyctl deploy falla después de conmutar: no verifica el commit, vuelve las máquinas nuevas a la imagen anterior y verifica el release anterior', () => {
+      expect(runJob(block, failing(deployRun))).toEqual([BEFORE, RECORD, deployRun, RESTORE]);
+      const r = restore([machine('m1', NEW), machine('m2', OLD)]);
+      expect(r.status).toBe(0);
+      expect(r.updates).toEqual([`flyctl machine update m1 --app ${app} --image ${OLD} --env RELEASE=${PREV} --yes`]);
+      expect(r.health).toEqual([`curl -sS --max-time 10 ${keyIn(block, 'URL')}/health`]);
+    });
+
+    it('flyctl deploy falla antes de conmutar: la vuelta atrás no toca ninguna máquina y verifica que sigue el release anterior', () => {
+      expect(runJob(block, failing(deployRun))).toContain(RESTORE);
+      const r = restore([machine('m1', OLD), machine('m2', OLD)]);
+      expect(r.status).toBe(0);
+      expect(r.updates).toEqual([]);
+      expect(r.health).toHaveLength(1);
+    });
+
+    it('el deploy termina y /health no atiende el commit: vuelve a la imagen anterior', () => {
+      expect(runJob(block, failing(AFTER))).toEqual([BEFORE, RECORD, deployRun, AFTER, RESTORE]);
+      const r = restore([machine('m1', NEW)]);
+      expect(r.status).toBe(0);
+      expect(r.updates).toHaveLength(1);
+    });
+
+    it('todo bien: no vuelve atrás; con el gate o record en rojo no hay deploy ni vuelta atrás', () => {
+      expect(runJob(block, failing())).toEqual([BEFORE, RECORD, deployRun, AFTER]);
+      expect(runJob(block, failing(BEFORE))).toEqual([BEFORE]);
+      expect(runJob(block, failing(RECORD))).toEqual([BEFORE, RECORD]);
+    });
   });
 
   it('restore falla si después de volver /health no atiende el release anterior', () => {

@@ -107,10 +107,13 @@ jobs:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
       - name: /health atiende el commit
         run: deploy/fly/release-check.sh after
-      # Solo si el deploy terminó y lo que falló es la verificación de después: el tráfico ya
-      # pasó a la versión nueva. Si el deploy falló, bluegreen no conmutó y no hay nada que volver.
+      # Si algo falló desde que empezó el deploy: la verificación de después, o el deploy mismo,
+      # que puede fallar después de conmutar (bluegreen habilita las máquinas nuevas antes de
+      # retirar las anteriores, y la retirada puede fallar). rollback.sh mira las máquinas: si el
+      # deploy falló antes de conmutar, todas siguen en la imagen anterior y no toca ninguna.
+      # Con el gate o record en rojo, el deploy no corrió (skipped) y no hay nada que volver.
       - name: Volver a la imagen anterior
-        if: failure() && steps.deploy.outcome == 'success'
+        if: failure() && steps.deploy.outcome != 'skipped'
         run: deploy/fly/rollback.sh restore
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
@@ -153,10 +156,13 @@ jobs:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
       - name: /health atiende el commit
         run: deploy/fly/release-check.sh after
-      # Solo si el deploy terminó y lo que falló es la verificación de después: el tráfico ya
-      # pasó a la versión nueva. Si el deploy falló, bluegreen no conmutó y no hay nada que volver.
+      # Si algo falló desde que empezó el deploy: la verificación de después, o el deploy mismo,
+      # que puede fallar después de conmutar (bluegreen habilita las máquinas nuevas antes de
+      # retirar las anteriores, y la retirada puede fallar). rollback.sh mira las máquinas: si el
+      # deploy falló antes de conmutar, todas siguen en la imagen anterior y no toca ninguna.
+      # Con el gate o record en rojo, el deploy no corrió (skipped) y no hay nada que volver.
       - name: Volver a la imagen anterior
-        if: failure() && steps.deploy.outcome == 'success'
+        if: failure() && steps.deploy.outcome != 'skipped'
         run: deploy/fly/rollback.sh restore
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}

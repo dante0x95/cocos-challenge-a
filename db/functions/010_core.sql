@@ -20,6 +20,15 @@ LANGUAGE sql IMMUTABLE STRICT SET search_path = pg_catalog, app, pg_temp AS $$
   END
 $$;
 
+-- unaccent() sin acentos ni diéresis, IMMUTABLE para poder indexarla (D-25, migración 009).
+-- unaccent() a secas no es IMMUTABLE porque resuelve el diccionario por search_path; con el
+-- diccionario fijo sí lo es. Los índices GIN de app.instruments usan esta función: el cuerpo no
+-- puede cambiar sin un REINDEX en una migración nueva. Mismo cuerpo que en 009_instruments_trgm.sql.
+CREATE OR REPLACE FUNCTION app.unaccent_immutable(text) RETURNS text
+LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE AS $$
+  SELECT public.unaccent('public.unaccent'::regdictionary, $1)
+$$;
+
 -- Última cotización válida de un instrumento (D-06): fecha ≤ hoy en Buenos Aires y, si
 -- settings.price_max_age_days no es NULL, no más vieja que esa cantidad de días.
 CREATE OR REPLACE FUNCTION app.valid_close(p_instrumentid int,

@@ -31,6 +31,16 @@ async function stateOf(u: string) {
       cancelled: await q("SELECT id, cancel_reason FROM app.orders WHERE status = 'CANCELLED' ORDER BY id"),
       settings: (await q('SELECT price_max_age_days, idempotency_ttl::text FROM app.settings'))[0],
       apiCanWrite: (await q("SELECT has_table_privilege('api', 'app.orders', 'INSERT') AS ins, has_table_privilege('api', 'app.orders', 'UPDATE') AS upd"))[0],
+      // Búsqueda (issue #14, migración 009): extensiones, wrapper IMMUTABLE, índices GIN, EXECUTE y umbral del rol api.
+      search: (await q(`SELECT
+          (SELECT array_agg(extname::text ORDER BY extname) FROM pg_extension WHERE extname IN ('pg_trgm', 'unaccent')) AS extensions,
+          (SELECT provolatile FROM pg_proc WHERE oid = 'app.unaccent_immutable(text)'::regprocedure) AS wrapper,
+          (SELECT array_agg(indexname::text ORDER BY indexname) FROM pg_indexes
+            WHERE schemaname = 'app' AND tablename = 'instruments' AND indexdef LIKE '%gin_trgm_ops%') AS gin,
+          has_function_privilege('api', 'app.unaccent_immutable(text)', 'EXECUTE') AS api_exec,
+          EXISTS (SELECT 1 FROM pg_db_role_setting WHERE setrole = 'api'::regrole
+                     AND setdatabase = (SELECT oid FROM pg_database WHERE datname = current_database())
+                     AND 'pg_trgm.strict_word_similarity_threshold=0.45' = ANY (setconfig)) AS threshold`))[0],
     };
   } finally {
     await db.end();
@@ -51,7 +61,7 @@ describe('bootstrap', () => {
     await recreateDatabase(DB);
     const r = await bootstrap({ adminUrl: url, apiPassword: 'api', ...quiet });
     expect(r.applied).toEqual(['000_seed.sql', '001_app_schema.sql', '002_audit.sql', '003_orders_ledger.sql', '005_cancel_reason.sql',
-      '006_idempotency_ttl.sql', '007_cancel_reason_unbacked.sql', '008_limit_candidates_index.sql']);
+      '006_idempotency_ttl.sql', '007_cancel_reason_unbacked.sql', '008_limit_candidates_index.sql', '009_instruments_trgm.sql']);
     expect(r.ledger).toEqual([{ userid: 1, problem: 'short', detail: expect.stringContaining('instrumento 31 en -10') }]);
     expect(r.unbacked).toEqual([]);   // la LIMIT NEW del challenge (orden 2) tiene respaldo
 
@@ -70,6 +80,9 @@ describe('bootstrap', () => {
     expect(first.cancelled).toEqual([{ id: 3, cancel_reason: 'USER' }]);
     expect(first.settings).toEqual({ price_max_age_days: null, idempotency_ttl: '24:00:00' });
     expect(first.apiCanWrite).toEqual({ ins: false, upd: false });
+    expect(first.search).toEqual({
+      extensions: ['pg_trgm', 'unaccent'], wrapper: 'i', gin: ['instruments_name_trgm', 'instruments_ticker_trgm'], api_exec: true, threshold: true,
+    });
   }, 60_000);
 
   it('segunda corrida: no aplica nada y la base queda idéntica', async () => {

@@ -21,7 +21,8 @@
 #       no queda en el servidor (ni en ~/.docker ni en los argumentos de ningún proceso).
 #   remote.sh bootstrap <entorno> <ref> <sha>      (stdin: el compose.yml del release)
 #       Con la imagen nueva y la API anterior todavía atendiendo: levanta la base (con el compose
-#       nuevo) y corre el bootstrap. Si falla, sale con 1 y no cambió de versión. Borra la
+#       nuevo) y corre el bootstrap, con RELEASE (el commit nuevo) y SERVING_RELEASE (el que
+#       atiende, de release.env). Si falla, sale con 1 y no cambió de versión. Borra la
 #       confirmación anterior al empezar y escribe bootstrap.ok solo si el bootstrap terminó bien.
 #   remote.sh switch <entorno> <ref> <sha>
 #       Exige el bootstrap terminado de esa misma imagen y commit (bootstrap.ok, que consume: otro
@@ -106,8 +107,14 @@ bootstrap() {
   printf 'IMAGE=%s\nRELEASE=%s\nENVIRONMENT=%s\n' "$ref" "$sha" "$ENV" > "$DIR/release.next.env"
   echo "== $ENV: base"
   compose next up -d --wait --wait-timeout "$WAIT" db || fail "la base de $ENV no quedó sana"
-  echo "== $ENV: bootstrap con $ref"
-  compose next run --rm -T --no-deps migrate || fail "el bootstrap falló: no se cambió de versión"
+  # El bootstrap verifica el contrato del release que atiende ahora (release.env; vacío si
+  # ninguno) y registra el de este con su SHA (D-24, issue #39): así una vuelta atrás vuelve a un
+  # release cuyo contrato el próximo bootstrap sigue exigiendo.
+  local serving=""
+  [ -f "$DIR/release.env" ] && serving="$(field RELEASE "$DIR/release.env")"
+  echo "== $ENV: bootstrap con $ref (atiende: ${serving:-ninguno})"
+  compose next run --rm -T --no-deps -e "RELEASE=$sha" -e "SERVING_RELEASE=$serving" migrate \
+    || fail "el bootstrap falló: no se cambió de versión"
   cp "$DIR/release.next.env" "$DIR/bootstrap.ok"
 }
 

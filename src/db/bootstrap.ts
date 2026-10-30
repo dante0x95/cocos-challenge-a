@@ -17,10 +17,11 @@
 //    historia fuera de lo representable (D-14) se informan y no abortan. Una LIMIT NEW sin
 //    respaldo (heredada: place_order no las crea) se cancela con cancel_reason = 'UNBACKED'
 //    (app.cancel_unbacked, bajo el lock del usuario) y se informa.
-// 5. Contrato de la API (issue #39): con las funciones nuevas aplicadas, cada llamada que hace la
-//    versión anterior (el contrato que registró su bootstrap en public.api_contract) y cada una
-//    de esta versión (src/db/contract.ts) tiene que resolver a una sola función que api pueda
-//    ejecutar. Si alguna no resuelve, aborta. Después registra el contrato de esta versión.
+// 5. Contrato de la API (issue #39): con las funciones nuevas aplicadas, cada llamada del release
+//    que atiende (SERVING_RELEASE; el contrato que registró su bootstrap en public.api_contract)
+//    y cada una de esta versión (src/db/contract.ts) tiene que resolver a una sola función que
+//    api pueda ejecutar. Si alguna no resuelve, aborta. Después registra el contrato de esta
+//    versión con su RELEASE, y conserva el del release que atiende.
 // Los cinco pasos van en UNA transacción, con la barrera de despliegue en modo exclusivo
 // (D-24): un escritor nunca ve el esquema nuevo con las funciones anteriores, y si algo falla,
 // también las verificaciones de los pasos 4 y 5, no queda nada aplicado (el deploy lo corre antes de cambiar
@@ -39,6 +40,10 @@ export interface BootstrapOptions {
   // Las firmas de app.* que invoca la API de esta versión. Por defecto, las de src/db/contract.ts;
   // las pruebas pasan el de otra versión.
   contract?: readonly string[];
+  // El release de esta versión (RELEASE, el SHA del commit) y el que atiende mientras corre
+  // (SERVING_RELEASE: '' si ninguno, sin definir si no se sabe). Los pasa el deploy (D-29).
+  release?: string;
+  servingRelease?: string;
   log?: (msg: string) => void;
 }
 
@@ -51,7 +56,7 @@ export interface BootstrapResult {
   ledger: LedgerProblem[];
   // LIMIT NEW heredadas sin respaldo, canceladas con cancel_reason = 'UNBACKED' (issue #6).
   unbacked: string[];
-  // El contrato de la versión anterior que se verificó (vacío si no había ninguno registrado).
+  // El contrato del release que atiende que se verificó (vacío si no había ninguno registrado).
   previousContract: string[];
 }
 
@@ -96,33 +101,47 @@ export async function verifyLedger(db: pg.Pool | pg.PoolClient, log: (m: string)
 /** Por qué una llamada del contrato no resuelve, o null si resuelve a una sola función que api puede ejecutar. */
 async function contractProblem(db: pg.PoolClient, signature: string): Promise<string | null> {
   const { name, args } = parseSignature(signature);
-  // Lo que haría Postgres con una llamada con exactamente esos tipos: la misma firma, o una con
-  // argumentos de más que tienen DEFAULT (así entró p_legacy_hash, issue #4). Dos candidatas son
-  // una llamada ambigua (42725), que también rompe a la versión anterior.
-  const found = (await db.query<{ fn: string; exec: boolean }>(
-    `SELECT p.oid::regprocedure::text AS fn, has_function_privilege('api', p.oid, 'EXECUTE') AS exec
+  // Candidata es toda función de app con ese nombre que acepta esa cantidad de argumentos (contando
+  // los que tienen DEFAULT, como p_legacy_hash en el issue #4), sin mirar los tipos: la API manda
+  // parámetros sin tipo ($1, $2, ...), y para Postgres dos candidatas que difieren solo en un tipo
+  // son una llamada ambigua (42725). Una sola candidata tiene que tener los tipos del contrato.
+  const found = (await db.query<{ fn: string; same: boolean; exec: boolean }>(
+    `SELECT p.oid::regprocedure::text AS fn,
+            p.provariadic = 0 AND (p.proargtypes::oid[])[0:cardinality($2::regtype[]) - 1] = $2::regtype[]::oid[] AS same,
+            has_function_privilege('api', p.oid, 'EXECUTE') AS exec
        FROM pg_proc p
-      WHERE p.pronamespace = 'app'::regnamespace AND p.proname = $1 AND p.prokind = 'f' AND p.provariadic = 0
-        AND p.pronargs >= cardinality($2::regtype[]) AND p.pronargs - p.pronargdefaults <= cardinality($2::regtype[])
-        AND (p.proargtypes::oid[])[0:cardinality($2::regtype[]) - 1] = $2::regtype[]::oid[]
+      WHERE p.pronamespace = 'app'::regnamespace AND p.proname = $1 AND p.prokind = 'f'
+        AND (p.provariadic <> 0
+             OR (p.pronargs >= cardinality($2::regtype[]) AND p.pronargs - p.pronargdefaults <= cardinality($2::regtype[])))
       ORDER BY p.oid::regprocedure::text COLLATE "C"`, [name, args])).rows;
   if (found.length === 0) return 'no resuelve';
   if (found.length > 1) return `es ambigua (${found.map((f) => f.fn).join(', ')})`;
+  if (!found[0].same) return `resuelve a ${found[0].fn}, con otros tipos`;
   if (!found[0].exec) return `api no puede ejecutar ${found[0].fn}`;
   return null;
 }
 
 /**
  * Paso 5 del bootstrap (issue #39), dentro de su transacción y con las funciones nuevas ya
- * aplicadas: verifica el contrato registrado por el bootstrap anterior (la versión que atiende
- * durante el deploy y a la que vuelve una vuelta atrás) y el de esta versión, y registra el de
- * esta versión. Aborta (excepción) si alguna llamada no resuelve.
+ * aplicadas. Verifica el contrato del release que atiende (`serving`: el que atiende durante el
+ * deploy y al que vuelve una vuelta atrás) y el de esta versión, y registra el de esta versión
+ * con su `release`. Aborta (excepción) si alguna llamada no resuelve.
+ *
+ * `serving`: el release que atiende (deploy.sh lo pasa en SERVING_RELEASE); '' si no atiende
+ * ninguno (primer deploy); undefined si no se sabe (desarrollo): entonces se verifican todos los
+ * contratos registrados. Quedan registrados el de esta versión y el del release que atiende, que
+ * sigue siendo obligatorio hasta que otro bootstrap sepa que atiende otro.
  */
-export async function verifyContract(db: pg.PoolClient, contract: readonly string[], log: (m: string) => void): Promise<string[]> {
+export async function verifyContract(db: pg.PoolClient, contract: readonly string[], release: string, serving: string | undefined,
+  log: (m: string) => void): Promise<string[]> {
   if (!(await db.query("SELECT to_regclass('public.api_contract') AS t")).rows[0].t) {
-    await db.query('CREATE TABLE public.api_contract (signature text PRIMARY KEY, registered_at timestamptz NOT NULL DEFAULT now())');
+    await db.query(`CREATE TABLE public.api_contract (
+      release text NOT NULL, signature text NOT NULL, registered_at timestamptz NOT NULL DEFAULT now(),
+      PRIMARY KEY (release, signature))`);
   }
-  const previous = (await db.query<{ signature: string }>('SELECT signature FROM public.api_contract ORDER BY signature COLLATE "C"')).rows.map((r) => r.signature);
+  const previous = serving === '' ? [] : (await db.query<{ signature: string }>(
+    `SELECT DISTINCT signature COLLATE "C" AS signature FROM public.api_contract WHERE $1::text IS NULL OR release = $1
+      ORDER BY 1`, [serving ?? null])).rows.map((r) => r.signature);
   const owners = new Map<string, string>();
   for (const s of previous) owners.set(s, 'la versión anterior');
   for (const s of contract) owners.set(s, owners.has(s) ? 'las dos versiones' : 'esta versión');
@@ -135,11 +154,13 @@ export async function verifyContract(db: pg.PoolClient, contract: readonly strin
   if (broken.length) {
     throw new Error(`contrato de la API: ${broken.join('; ')}. Retirar o cambiar una firma que usa la versión anterior va en el release siguiente (expand/contract, D-24)`);
   }
-  log(previous.length
-    ? `contrato: las ${previous.length} llamadas de la versión anterior siguen resolviendo`
-    : 'contrato: no había uno registrado; se registra el de esta versión');
-  await db.query('DELETE FROM public.api_contract');
-  await db.query('INSERT INTO public.api_contract (signature) SELECT unnest($1::text[])', [contract]);
+  const who = serving === undefined ? 'los releases registrados (no se sabe cuál atiende)' : serving;
+  log(previous.length ? `contrato: las ${previous.length} llamadas de ${who} siguen resolviendo`
+    : serving === undefined ? `contrato: no hay ninguno registrado; se registra el de ${release}`
+    : serving === '' ? `contrato: no atiende ningún release; se registra el de ${release}`
+    : `contrato: el release que atiende (${serving}) no registró uno; se registra el de ${release}`);
+  await db.query('DELETE FROM public.api_contract WHERE release = $1 OR release IS DISTINCT FROM $2', [release, serving || null]);
+  await db.query('INSERT INTO public.api_contract (release, signature) SELECT $1, unnest($2::text[])', [release, contract]);
   return previous;
 }
 
@@ -209,7 +230,7 @@ async function run(db: pg.Pool, dbDir: string, opts: BootstrapOptions, log: (m: 
       }
 
       // 5. Contrato de la API
-      result.previousContract = await verifyContract(client, opts.contract ?? API_CONTRACT, log);
+      result.previousContract = await verifyContract(client, opts.contract ?? API_CONTRACT, opts.release ?? 'local', opts.servingRelease, log);
       await client.query('COMMIT');
     } catch (e) {
       await client.query('ROLLBACK').catch(() => undefined);
@@ -229,7 +250,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     console.error('falta DATABASE_ADMIN_URL');
     process.exit(2);
   }
-  bootstrap({ adminUrl, apiPassword: process.env.API_DB_PASSWORD ?? 'api' })
+  bootstrap({ adminUrl, apiPassword: process.env.API_DB_PASSWORD ?? 'api',
+    release: process.env.RELEASE || undefined, servingRelease: process.env.SERVING_RELEASE })
     .then((r) => {
       console.log(`bootstrap OK: ${r.applied.length} migración(es) aplicadas, ${r.baselined.length} registradas como existentes`);
       process.exit(0);

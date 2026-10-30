@@ -34,8 +34,9 @@ base="${TEST_PG_URL%%\?*}"
 admin="${base%/*}/cocos_test"
 psql "$TEST_PG_URL" -q -c 'DROP DATABASE IF EXISTS cocos_test WITH (FORCE)' -c 'CREATE DATABASE cocos_test'
 echo "== base de $tag ($(git rev-parse --short "$tag^{commit}"))"
-(cd "$prev" && DATABASE_ADMIN_URL="$admin" API_DB_PASSWORD=api pnpm -s db:bootstrap)
+(cd "$prev" && DATABASE_ADMIN_URL="$admin" API_DB_PASSWORD=api RELEASE="$tag" SERVING_RELEASE= pnpm -s db:bootstrap)
 echo "== bootstrap de HEAD sobre esa base"
-DATABASE_ADMIN_URL="$admin" API_DB_PASSWORD=api pnpm -s db:bootstrap
+# Como en el deploy: el bootstrap de HEAD exige el contrato del release que atiende.
+DATABASE_ADMIN_URL="$admin" API_DB_PASSWORD=api RELEASE=HEAD SERVING_RELEASE="$tag" pnpm -s db:bootstrap
 echo "== pruebas de escritura de $tag contra la base de HEAD: ${TESTS[*]}"
 (cd "$prev" && SKIP_DB_SETUP=1 TEST_PG_URL="$TEST_PG_URL" pnpm -s exec vitest run "${TESTS[@]}")

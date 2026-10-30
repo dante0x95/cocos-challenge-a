@@ -97,3 +97,45 @@ describe('contrato de la API (issue #39)', () => {
     expect(() => parseSignature('place_order(integer)')).toThrow('firma inválida');
   });
 });
+
+// Plan de pruebas 5 del issue #39: la regla expand/contract está en las tres fuentes y nada la
+// contradice. Se buscan las ideas, no los párrafos.
+describe('la regla de compatibilidad con la versión anterior en los docs (issue #39)', () => {
+  const read = (f: string) => readFileSync(resolve(f), 'utf8');
+  /** La sección de una decisión: desde su ancla hasta la siguiente. */
+  const decision = (id: string) => {
+    const doc = read('docs/decisiones.md');
+    const start = doc.indexOf(`<a id="${id}"></a>`);
+    expect(start, `falta ${id}`).toBeGreaterThanOrEqual(0);
+    const end = doc.indexOf('<a id="', start + 1);
+    return doc.slice(start, end < 0 ? undefined : end);
+  };
+
+  it('D-24: expand/contract (N solo agrega, retirar va en N+1), el contrato y su verificación; nada de borrar la firma anterior en el mismo release', () => {
+    const d24 = decision('d-24');
+    expect(d24).toMatch(/expand\/contract/i);
+    expect(d24).toMatch(/N\+1/);
+    expect(d24).toContain('src/db/contract.ts');
+    expect(d24).toContain('public.api_contract');
+    expect(d24).toContain('SERVING_RELEASE');
+    expect(d24).toContain('scripts/previous-release.sh');
+    expect(d24).not.toMatch(/borra (antes )?la firma anterior/i);
+  });
+
+  it('D-29: la vuelta atrás no da por hecho que la versión anterior opera sobre la base nueva', () => {
+    const d29 = decision('d-29');
+    expect(d29).toMatch(/expand\/contract/i);
+    expect(d29).toContain('SERVING_RELEASE');
+    expect(d29).toMatch(/`\/health` no lo prueba/);
+  });
+
+  it('review-rules.md: una regla de compatibilidad con la versión anterior que cita D-24 y el contrato', () => {
+    const rules = read('docs/process/review-rules.md');
+    const m = /^## (R-\d+) · Compatibilidad con la versión anterior \(([^)]*)\)\n([\s\S]*?)(?=^## |$(?![\s\S]))/m.exec(rules);
+    expect(m, 'falta la regla de compatibilidad').not.toBeNull();
+    expect(m![2]).toContain('D-24');
+    expect(m![3]).toMatch(/expand\/contract/i);
+    expect(m![3]).toMatch(/release siguiente/);
+    expect(m![3]).toContain('src/db/contract.ts');
+  });
+});

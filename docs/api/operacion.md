@@ -17,6 +17,10 @@ Requieren la cabecera `X-Internal-Token` con el valor de `INTERNAL_TOKEN` (`401`
 | `/internal/execute-limits` | Ejecuta las LIMIT `NEW` que la cotización vigente cruza, a su precio límite. Cada una en su transacción; la decisión final la toma `app.execute_limit_outcome`, bajo el lock ([D-28](../decisiones.md#d-28)). Responde `{ candidates, executed, not_crossed, cancelled, errors }`. `cancelled` lista `{ order_id, reason: "LIMIT" }` de las que se cancelaron porque ejecutarlas violaría los límites de [D-14](../decisiones.md#d-14); esas órdenes quedan con `cancel_reason: "LIMIT"`. |
 | `/internal/cleanup-idempotency` | Borra las claves de idempotencia de más de 24 h ([D-19](../decisiones.md#d-19)). |
 
+## Cuando la base se reinicia
+
+Un reinicio de Postgres (mantenimiento, failover, `pg_terminate_backend`) corta todas las conexiones del pool. Las ociosas se descartan solas (el pool recibe el evento `error`, lo registra con `scope: "pg-pool-idle"` y sigue); la siguiente request abre una conexión nueva. Las consultas en vuelo fallan y responden con un error reintentable; para `POST /orders`, con la misma `Idempotency-Key` ([D-20](../decisiones.md#d-20)). El proceso no se reinicia. `GET /health` responde `503` con `db: "down"` mientras la base no contesta y vuelve a `200` sola.
+
 ## Jobs periódicos
 
 Con `JOBS_ENABLED=true` (activo en docker compose), la API corre la limpieza de idempotencia cada hora (`CLEANUP_EVERY_MS`). Cada usuario se procesa en su propia transacción y con try-lock, así que nunca bloquea escrituras. En producción irían a un worker aparte.

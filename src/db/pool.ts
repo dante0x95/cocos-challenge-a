@@ -21,6 +21,19 @@ export const pool = new pg.Pool({
   max: config.PG_POOL_MAX,
   connectionTimeoutMillis: config.PG_CONNECT_TIMEOUT_MS,
   application_name: 'cocos-api',
+  // Sondas TCP sobre las conexiones ociosas: un peer que desapareció sin cerrar (failover, red)
+  // termina detectado y descartado. Con los defaults de Linux tarda minutos, no segundos: lo que
+  // acota una request es el 503 reintentable de un error de conexión, no esto.
+  keepAlive: true,
+  keepAliveInitialDelayMillis: 10_000,
+});
+
+// Una conexión ociosa que el servidor corta (reinicio de Postgres, failover, pg_terminate_backend)
+// emite 'error' en el pool. Sin listener, Node lo trata como excepción no capturada y el proceso
+// sale con código 1: un reinicio de la base tumbaba todas las instancias de la API a la vez. El
+// cliente ya está fuera del pool; la próxima consulta abre una conexión nueva. Solo se registra.
+pool.on('error', (err) => {
+  console.error(JSON.stringify({ level: 'error', scope: 'pg-pool-idle', err: String(err) }));
 });
 
 /** Para el test de parsers: int8 y numeric deben devolver el string intacto. */

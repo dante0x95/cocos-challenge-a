@@ -392,16 +392,55 @@ LANGUAGE sql SECURITY DEFINER SET search_path = pg_catalog, app, pg_temp AS $$
   SELECT outcome = 'ok' FROM app.cancel_order_outcome(p_userid, p_order_id)
 $$;
 
--- LIMITs pendientes que la cotización vigente cruza. Las lee el executor (D-28), que después
--- llama execute_limit por cada una: la decisión final se toma ahí, bajo el lock.
-CREATE OR REPLACE FUNCTION app.limit_candidates(p_max int DEFAULT 500)
-RETURNS TABLE (order_id bigint)
+-- LIMITs pendientes que la cotización vigente cruza, para el executor (D-28), que después llama
+-- execute_limit_outcome por cada una: la decisión final se toma ahí, bajo el lock.
+--   p_max       tamaño del lote.
+--   p_after     cursor: solo órdenes con id > p_after (0 = desde el principio).
+--   p_per_user  a lo sumo N órdenes por usuario, aplicado ANTES del LIMIT: un usuario con
+--               miles de pendientes no llena el lote solo.
+-- Devuelve también userid e instrumentid, para que el executor saltee las demás de un usuario
+-- cuyo lock no consiguió o de un instrumento que se quedó sin cotización, sin otra consulta.
+-- Costo (issue #9): la cotización se resuelve UNA vez por instrumento (CTE materializado) y las
+-- órdenes se buscan por rango en el índice (instrumentid, side, price) WHERE NEW/LIMIT (008):
+-- nada se evalúa por fila pendiente. El reparto y el orden final solo tocan las que cruzan.
+-- La firma anterior (solo p_max, una columna) se borra: cambian las columnas del resultado.
+DROP FUNCTION IF EXISTS app.limit_candidates(int);
+CREATE OR REPLACE FUNCTION app.limit_candidates(p_max int DEFAULT 500, p_after bigint DEFAULT 0, p_per_user int DEFAULT 50)
+RETURNS TABLE (order_id bigint, userid int, instrumentid int)
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, app, pg_temp AS $$
-  SELECT o.id::bigint
-    FROM app.orders o
-    CROSS JOIN LATERAL app.valid_close(o.instrumentid) vc
-   WHERE o.status = 'NEW' AND o.type = 'LIMIT' AND vc.close IS NOT NULL
-     AND ((o.side = 'BUY' AND vc.close <= o.price) OR (o.side = 'SELL' AND vc.close >= o.price))
-   ORDER BY o.id
+  WITH quote AS MATERIALIZED (
+    SELECT i.id AS instrumentid, vc.close
+      FROM app.instruments i
+      CROSS JOIN LATERAL app.valid_close(i.id) vc
+     WHERE vc.close IS NOT NULL
+  ), crossing AS (
+    -- Un rango del índice por instrumento y lado. OFFSET 0 impide que el planificador aplane la
+    -- subconsulta y la cambie por un hash join con recorrido completo de las pendientes, que es
+    -- lo que elige cuando estima que un tercio de ellas cruza.
+    SELECT c.id, c.userid, c.instrumentid
+      FROM quote q
+      CROSS JOIN LATERAL (
+        SELECT o.id, o.userid, o.instrumentid
+          FROM app.orders o
+         WHERE o.status = 'NEW' AND o.type = 'LIMIT' AND o.id > p_after
+           AND o.instrumentid = q.instrumentid AND o.side = 'BUY' AND o.price >= q.close
+        OFFSET 0) c
+    UNION ALL
+    SELECT c.id, c.userid, c.instrumentid
+      FROM quote q
+      CROSS JOIN LATERAL (
+        SELECT o.id, o.userid, o.instrumentid
+          FROM app.orders o
+         WHERE o.status = 'NEW' AND o.type = 'LIMIT' AND o.id > p_after
+           AND o.instrumentid = q.instrumentid AND o.side = 'SELL' AND o.price <= q.close
+        OFFSET 0) c
+  ), ranked AS (
+    SELECT c.id, c.userid, c.instrumentid, row_number() OVER (PARTITION BY c.userid ORDER BY c.id) AS rn
+      FROM crossing c
+  )
+  SELECT r.id::bigint, r.userid, r.instrumentid
+    FROM ranked r
+   WHERE r.rn <= p_per_user
+   ORDER BY r.id
    LIMIT p_max
 $$;

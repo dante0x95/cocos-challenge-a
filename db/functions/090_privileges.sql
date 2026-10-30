@@ -50,7 +50,7 @@ GRANT EXECUTE ON FUNCTION
   app.execute_limit_outcome(bigint),
   app.cancel_order(int, bigint),
   app.cancel_order_outcome(int, bigint),
-  app.limit_candidates(int),
+  app.limit_candidates(int, bigint, int),
   app.cleanup_candidates(),
   app.cleanup_idempotency(int),
   app.health()

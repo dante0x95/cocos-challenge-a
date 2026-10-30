@@ -51,7 +51,7 @@ describe('bootstrap', () => {
     await recreateDatabase(DB);
     const r = await bootstrap({ adminUrl: url, apiPassword: 'api', ...quiet });
     expect(r.applied).toEqual(['000_seed.sql', '001_app_schema.sql', '002_audit.sql', '003_orders_ledger.sql', '005_cancel_reason.sql',
-      '006_idempotency_ttl.sql', '007_cancel_reason_unbacked.sql']);
+      '006_idempotency_ttl.sql', '007_cancel_reason_unbacked.sql', '008_limit_candidates_index.sql']);
     expect(r.ledger).toEqual([{ userid: 1, problem: 'short', detail: expect.stringContaining('instrumento 31 en -10') }]);
     expect(r.unbacked).toEqual([]);   // la LIMIT NEW del challenge (orden 2) tiene respaldo
 

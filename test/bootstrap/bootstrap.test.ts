@@ -62,7 +62,8 @@ describe('bootstrap', () => {
     await recreateDatabase(DB);
     const r = await bootstrap({ adminUrl: url, apiPassword: 'api', ...quiet });
     expect(r.applied).toEqual(['000_seed.sql', '001_app_schema.sql', '002_audit.sql', '003_orders_ledger.sql', '005_cancel_reason.sql',
-      '006_idempotency_ttl.sql', '007_cancel_reason_unbacked.sql', '008_limit_candidates_index.sql', '009_instruments_trgm.sql']);
+      '006_idempotency_ttl.sql', '007_cancel_reason_unbacked.sql', '008_limit_candidates_index.sql', '009_instruments_trgm.sql',
+      '010_order_cap_verify.sql']);
     expect(r.ledger).toEqual([{ userid: 1, problem: 'short', detail: expect.stringContaining('instrumento 31 en -10') }]);
     expect(r.unbacked).toEqual([]);   // la LIMIT NEW del challenge (orden 2) tiene respaldo
 
@@ -579,74 +580,180 @@ describe('bootstrap', () => {
 
   // Issue #41: una base heredada con una NEW por encima del tope de D-14 (place_order no la graba).
   // La verificación la señala con 'tope' y el bootstrap la cancela con LIMIT, sin abortar. La
-  // verificación corre cuando el despliegue aplica una migración: acá, una sin efectos.
-  it('NEW heredada con importe por encima de 10¹⁵: verify_ledger informa tope, el bootstrap la cancela con LIMIT, la segunda corrida no hace nada y su clave sigue dando el 201 original', async () => {
-    await recreateDatabase(DB);
-    await bootstrap({ adminUrl: url, apiPassword: 'api', ...quiet });
-    const adminDb = new pg.Pool({ connectionString: url });
-    const api = new pg.Pool({ connectionString: dbUrl(DB, { name: 'api', password: 'api' }) });
-    const dir = mkdtempSync(join(tmpdir(), 'cocos-db-41-'));
-    try {
-      cpSync(resolve('db'), dir, { recursive: true });
-      writeFileSync(join(dir, 'migrations', '990_test_noop.sql'), 'SELECT 1;\n');
+  // base anterior es la de main antes de este cambio: todas las migraciones menos la 010. El
+  // despliegue de esta rama, con los archivos reales, aplica la 010 y por eso verifica la historia.
+  describe('actualización a la verificación del tope por orden', () => {
+    /** Bootstrap desde una copia de db/ sin la migración 010: la base desplegada antes del issue #41. */
+    const deployWithout010 = async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'cocos-db-41-'));
+      try {
+        cpSync(resolve('db'), dir, { recursive: true });
+        rmSync(join(dir, 'migrations', '010_order_cap_verify.sql'));
+        return await bootstrap({ adminUrl: url, apiPassword: 'api', dbDir: dir, ...quiet });
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
 
-      // El caso del issue, como lo deja una base preexistente (admin): cash −0,03 y 2 acciones del 47,
-      // una SELL LIMIT NEW de 2 a 500.000.000.000.000,01 (importe 10¹⁵ + 0,02) con su clave y su 201,
-      // y una SELL LIMIT NEW de 2 a 900 dentro del tope, que tiene respaldo si no se cuenta la otra.
-      const u = (await adminDb.query<{ id: number }>(
-        "INSERT INTO app.users (email, accountnumber) VALUES ('tope-41@test.local', '9900000041') RETURNING id")).rows[0].id;
-      const ars = (await adminDb.query<{ id: number }>("SELECT id FROM app.instruments WHERE ticker = 'ARS'")).rows[0].id;
-      await adminDb.query(
-        `INSERT INTO app.orders (instrumentid, userid, size, price, type, side, status, datetime, balance_seq) VALUES
-           ($1, $2, 1, 0.01, 'MARKET', 'CASH_IN', 'FILLED', timezone('UTC', now()), 1),
-           (47, $2, 2, 0.02, 'MARKET', 'BUY',     'FILLED', timezone('UTC', now()), 2)`, [ars, u]);
-      const insert = async (price: string) => (await adminDb.query<{ id: string }>(
-        `INSERT INTO app.orders (instrumentid, userid, size, price, type, side, status, datetime)
-         VALUES (47, $1, 2, $2, 'LIMIT', 'SELL', 'NEW', timezone('UTC', now())) RETURNING id::text`, [u, price])).rows[0].id;
-      const over = await insert('500000000000000.01');
-      const ok = await insert('900.00');
-      const original = { id: over, userid: String(u), instrumentid: '47', side: 'SELL', type: 'LIMIT', size: '2',
-        price: '500000000000000.01', amount: '1000000000000000.02', status: 'NEW', balance_seq: null,
-        datetime: '2026-01-02T03:04:05Z', cancel_reason: null };
-      await adminDb.query(
-        `INSERT INTO app.idempotency_keys (userid, key, request_hash, order_id, http_status, response_body)
-         VALUES ($1, 'pre41', 'h41', $2, 201, $3)`, [u, over, original]);
-      const replay = async (key: string) => (await api.query<{ r: Record<string, unknown> }>(
-        "SELECT app.place_order($1, $2, 'h41', 'SELL', 'LIMIT', 47, 2, NULL, 500000000000000.01) AS r", [u, key])).rows[0].r;
-      const expected = { status: 201, body: original, replay: true, order_id: over };
-      expect(await replay('pre41')).toEqual(expected);
+    it('NEW heredada con importe por encima de 10¹⁵: verify_ledger informa tope, el bootstrap la cancela con LIMIT, la segunda corrida no hace nada y su clave sigue dando el 201 original', async () => {
+      await recreateDatabase(DB);
+      expect((await deployWithout010()).applied).not.toContain('010_order_cap_verify.sql');
+      const adminDb = new pg.Pool({ connectionString: url });
+      const api = new pg.Pool({ connectionString: dbUrl(DB, { name: 'api', password: 'api' }) });
+      try {
+        // El caso del issue, como lo deja una base preexistente (admin): cash −0,03 y 2 acciones del 47,
+        // una SELL LIMIT NEW de 2 a 500.000.000.000.000,01 (importe 10¹⁵ + 0,02) con su clave y su 201,
+        // y una SELL LIMIT NEW de 2 a 900 dentro del tope, que tiene respaldo si no se cuenta la otra.
+        const u = (await adminDb.query<{ id: number }>(
+          "INSERT INTO app.users (email, accountnumber) VALUES ('tope-41@test.local', '9900000041') RETURNING id")).rows[0].id;
+        const ars = (await adminDb.query<{ id: number }>("SELECT id FROM app.instruments WHERE ticker = 'ARS'")).rows[0].id;
+        await adminDb.query(
+          `INSERT INTO app.orders (instrumentid, userid, size, price, type, side, status, datetime, balance_seq) VALUES
+             ($1, $2, 1, 0.01, 'MARKET', 'CASH_IN', 'FILLED', timezone('UTC', now()), 1),
+             (47, $2, 2, 0.02, 'MARKET', 'BUY',     'FILLED', timezone('UTC', now()), 2)`, [ars, u]);
+        const insert = async (price: string) => (await adminDb.query<{ id: string }>(
+          `INSERT INTO app.orders (instrumentid, userid, size, price, type, side, status, datetime)
+           VALUES (47, $1, 2, $2, 'LIMIT', 'SELL', 'NEW', timezone('UTC', now())) RETURNING id::text`, [u, price])).rows[0].id;
+        const over = await insert('500000000000000.01');
+        const ok = await insert('900.00');
+        const original = { id: over, userid: String(u), instrumentid: '47', side: 'SELL', type: 'LIMIT', size: '2',
+          price: '500000000000000.01', amount: '1000000000000000.02', status: 'NEW', balance_seq: null,
+          datetime: '2026-01-02T03:04:05Z', cancel_reason: null };
+        await adminDb.query(
+          `INSERT INTO app.idempotency_keys (userid, key, request_hash, order_id, http_status, response_body)
+           VALUES ($1, 'pre41', 'h41', $2, 201, $3)`, [u, over, original]);
+        const replay = async (key: string) => (await api.query<{ r: Record<string, unknown> }>(
+          "SELECT app.place_order($1, $2, 'h41', 'SELL', 'LIMIT', 47, 2, NULL, 500000000000000.01) AS r", [u, key])).rows[0].r;
+        const expected = { status: 201, body: original, replay: true, order_id: over };
+        expect(await replay('pre41')).toEqual(expected);
 
-      const log: string[] = [];
-      const r = await bootstrap({ adminUrl: url, apiPassword: 'api', dbDir: dir, log: (m) => log.push(m) });
-      expect(r.applied).toEqual(['990_test_noop.sql']);
-      const detail = `orden ${over} pendiente con importe 1000000000000000.02 ARS > 10^15 ARS: no se ejecuta (D-14)`;
-      // Solo 'tope': la reserva de la que va a cancelar no le quita respaldo a la otra (2 acciones, 2 reservadas).
-      expect(r.ledger.filter((p) => p.userid === u)).toEqual([{ userid: u, problem: 'tope', detail }]);
-      expect(r.overCap).toEqual([over]);
-      expect(r.unbacked).toEqual([]);
-      expect(log).toContain(`  historia: usuario ${u} — tope: ${detail}`);
-      expect(log).toContain(`  historia: usuario ${u} — orden ${over} cancelada: importe por encima de 10^15 ARS (cancel_reason LIMIT)`);
-      const state = async (id: string) => (await adminDb.query('SELECT status, cancel_reason FROM app.orders WHERE id = $1', [id])).rows[0];
-      expect(await state(over)).toEqual({ status: 'CANCELLED', cancel_reason: 'LIMIT' });
-      expect(await state(ok)).toEqual({ status: 'NEW', cancel_reason: null });
-      expect((await adminDb.query('SELECT 1 FROM app.verify_ledger() WHERE userid = $1', [u])).rowCount).toBe(0);
+        const log: string[] = [];
+        const r = await bootstrap({ adminUrl: url, apiPassword: 'api', log: (m) => log.push(m) });
+        expect(r.applied).toEqual(['010_order_cap_verify.sql']);
+        const detail = `orden ${over} pendiente con importe 1000000000000000.02 ARS > 10^15 ARS: no se ejecuta (D-14)`;
+        // Solo 'tope': la reserva de la que va a cancelar no le quita respaldo a la otra (2 acciones, 2 reservadas).
+        expect(r.ledger.filter((p) => p.userid === u)).toEqual([{ userid: u, problem: 'tope', detail }]);
+        expect(r.overCap).toEqual([over]);
+        expect(r.unbacked).toEqual([]);
+        expect(log).toContain(`  historia: usuario ${u} — tope: ${detail}`);
+        expect(log).toContain(`  historia: usuario ${u} — orden ${over} cancelada: importe por encima de 10^15 ARS (cancel_reason LIMIT)`);
+        const state = async (id: string) => (await adminDb.query('SELECT status, cancel_reason FROM app.orders WHERE id = $1', [id])).rows[0];
+        expect(await state(over)).toEqual({ status: 'CANCELLED', cancel_reason: 'LIMIT' });
+        expect(await state(ok)).toEqual({ status: 'NEW', cancel_reason: null });
+        expect((await adminDb.query('SELECT 1 FROM app.verify_ledger() WHERE userid = $1', [u])).rowCount).toBe(0);
 
-      // Segunda corrida: nada que aplicar, nada que verificar ni cancelar, la base queda igual.
-      const again = await bootstrap({ adminUrl: url, apiPassword: 'api', dbDir: dir, ...quiet });
-      expect(again).toMatchObject({ applied: [], ledger: [], unbacked: [], overCap: [] });
-      expect(await state(over)).toEqual({ status: 'CANCELLED', cancel_reason: 'LIMIT' });
-      expect(await state(ok)).toEqual({ status: 'NEW', cancel_reason: null });
+        // Segunda corrida: nada que aplicar, nada que verificar ni cancelar, la base queda igual.
+        const again = await bootstrap({ adminUrl: url, apiPassword: 'api', ...quiet });
+        expect(again).toMatchObject({ applied: [], ledger: [], unbacked: [], overCap: [] });
+        expect(await state(over)).toEqual({ status: 'CANCELLED', cancel_reason: 'LIMIT' });
+        expect(await state(ok)).toEqual({ status: 'NEW', cancel_reason: null });
 
-      // D-19: la clave conserva su respuesta original (NEW); una clave nueva con el mismo request, el tope.
-      expect(await replay('pre41')).toEqual(expected);
-      await expect(replay('nueva41')).rejects.toMatchObject({ code: 'APP05' });
-      expect((await adminDb.query('SELECT count(*)::int AS n FROM app.orders WHERE userid = $1', [u])).rows[0].n).toBe(4);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-      await api.end();
-      await adminDb.end();
-    }
-  }, 120_000);
+        // D-19: la clave conserva su respuesta original (NEW); una clave nueva con el mismo request, el tope.
+        expect(await replay('pre41')).toEqual(expected);
+        await expect(replay('nueva41')).rejects.toMatchObject({ code: 'APP05' });
+        expect((await adminDb.query('SELECT count(*)::int AS n FROM app.orders WHERE userid = $1', [u])).rows[0].n).toBe(4);
+      } finally {
+        await api.end();
+        await adminDb.end();
+      }
+    }, 120_000);
+
+    // El mismo despliegue sobre una base con cinco usuarios heredados, cada uno con un caso:
+    //   overflow  historia fuera de numeric(20,0) y una NEW por encima del tope: se informan las
+    //             dos, la NEW se cancela con LIMIT sin leer el fold y la historia no cambia;
+    //   otro      una venta sin acciones: UNBACKED, el bootstrap sigue para él y puede operar;
+    //   orden     10 acciones, una venta de 10 por encima del tope (con respaldo) y después ventas
+    //             de 10 y de 5 dentro del tope: primero el tope (LIMIT), después el respaldo
+    //             (la de 10 sigue NEW y solo la de 5 queda UNBACKED);
+    //   borde     cash 10¹⁵, una compra de importe exacto 10¹⁵ y otra de 10¹⁵ + 0,01: solo la segunda;
+    //   solo      ninguna orden FILLED, una sola venta de 2³¹ − 1 a 9.999.999.999.999.999,99
+    //             (el máximo representable): tope con el importe exacto y LIMIT, no UNBACKED.
+    it('cinco usuarios heredados: tope con overflow, tope antes que el respaldo, borde exacto y producto máximo sin historia', async () => {
+      await recreateDatabase(DB);
+      await deployWithout010();
+      const adminDb = new pg.Pool({ connectionString: url });
+      const api = new pg.Pool({ connectionString: dbUrl(DB, { name: 'api', password: 'api' }) });
+      try {
+        const ars = (await adminDb.query<{ id: number }>("SELECT id FROM app.instruments WHERE ticker = 'ARS'")).rows[0].id;
+        const user = async (tag: string, n: number) => (await adminDb.query<{ id: number }>(
+          'INSERT INTO app.users (email, accountnumber) VALUES ($1, $2) RETURNING id', [`tope41-${tag}@test.local`, `994100000${n}`])).rows[0].id;
+        /** Historia FILLED, en orden de balance_seq: [instrumentid, side, size, price]. */
+        const filled = async (u: number, rows: [number, string, number, string][]) => {
+          for (const [i, [iid, side, size, price]] of rows.entries()) {
+            await adminDb.query(
+              `INSERT INTO app.orders (instrumentid, userid, size, price, type, side, status, datetime, balance_seq)
+               VALUES ($1, $2, $3, $4, 'MARKET', $5, 'FILLED', timezone('UTC', now()), $6)`, [iid, u, size, price, side, i + 1]);
+          }
+        };
+        const pending = async (u: number, side: 'BUY' | 'SELL', size: number, price: string) => (await adminDb.query<{ id: string }>(
+          `INSERT INTO app.orders (instrumentid, userid, size, price, type, side, status, datetime)
+           VALUES (47, $1, $2, $3, 'LIMIT', $4, 'NEW', timezone('UTC', now())) RETURNING id::text`, [u, size, price, side])).rows[0].id;
+
+        const uOverflow = await user('overflow', 1);
+        await filled(uOverflow, [[ars, 'CASH_IN', 100_000, '0.01'], [47, 'BUY', 2_147_483_647, '9999999999999999.99']]);
+        const overflowNew = await pending(uOverflow, 'SELL', 2, '500000000000000.01');
+        const uOther = await user('otro', 2);
+        const otherSell = await pending(uOther, 'SELL', 10, '900.00');
+        const uOrder = await user('orden', 3);
+        await filled(uOrder, [[ars, 'CASH_IN', 1, '0.01'], [47, 'BUY', 10, '0.01']]);
+        const orderOver = await pending(uOrder, 'SELL', 10, '100000000000000.01');   // importe 10¹⁵ + 0,10
+        const order10 = await pending(uOrder, 'SELL', 10, '900.00');
+        const order5 = await pending(uOrder, 'SELL', 5, '900.00');
+        const uEdge = await user('borde', 4);
+        await filled(uEdge, [[ars, 'CASH_IN', 1, '0.01'], [47, 'BUY', 1, '0.01'], [47, 'SELL', 1, '1000000000000000.00']]);
+        const edgeExact = await pending(uEdge, 'BUY', 1, '1000000000000000.00');
+        const edgeOver = await pending(uEdge, 'BUY', 1, '1000000000000000.01');
+        const uOnly = await user('solo', 5);
+        const onlyNew = await pending(uOnly, 'SELL', 2_147_483_647, '9999999999999999.99');
+
+        const filledOf = async (u: number) =>
+          (await adminDb.query("SELECT id, size, price::text, balance_seq FROM app.orders WHERE userid = $1 AND status = 'FILLED' ORDER BY id", [u])).rows;
+        const overflowHistory = await filledOf(uOverflow);
+        const cash = async (u: number) =>
+          (await adminDb.query<{ c: string }>('SELECT cash_cents::text AS c FROM app.c_state($1) WHERE kind = 0', [u])).rows[0].c;
+        expect(await cash(uEdge)).toBe('100000000000000000');   // 10¹⁵ ARS
+
+        const r = await bootstrap({ adminUrl: url, apiPassword: 'api', ...quiet });
+        expect(r.applied).toEqual(['010_order_cap_verify.sql']);
+        const tope = (id: string, amount: string) => `orden ${id} pendiente con importe ${amount} ARS > 10^15 ARS: no se ejecuta (D-14)`;
+        const mine = [uOverflow, uOther, uOrder, uEdge, uOnly];
+        expect(r.ledger.filter((p) => mine.includes(p.userid))).toEqual([
+          { userid: uOverflow, problem: 'tope', detail: tope(overflowNew, '1000000000000000.02') },
+          { userid: uOverflow, problem: 'overflow', detail: expect.any(String) },
+          { userid: uOther, problem: 'reserva', detail: 'instrumento 47: 10 acciones reservadas > tenencia 0: venta LIMIT pendiente sin respaldo' },
+          { userid: uOrder, problem: 'tope', detail: tope(orderOver, '1000000000000000.10') },
+          { userid: uOrder, problem: 'reserva', detail: 'instrumento 47: 15 acciones reservadas > tenencia 10: venta LIMIT pendiente sin respaldo' },
+          { userid: uEdge, problem: 'tope', detail: tope(edgeOver, '1000000000000000.01') },
+          { userid: uOnly, problem: 'tope', detail: tope(onlyNew, '21474836469999999978525163.53') },
+        ]);
+        expect(r.overCap).toEqual([overflowNew, orderOver, edgeOver, onlyNew]);
+        expect(r.unbacked).toEqual([otherSell, order5]);
+
+        const state = async (id: string) => (await adminDb.query('SELECT status, cancel_reason FROM app.orders WHERE id = $1', [id])).rows[0];
+        const LIMIT = { status: 'CANCELLED', cancel_reason: 'LIMIT' };
+        const UNBACKED = { status: 'CANCELLED', cancel_reason: 'UNBACKED' };
+        const NEW = { status: 'NEW', cancel_reason: null };
+        for (const [id, want] of [[overflowNew, LIMIT], [otherSell, UNBACKED], [orderOver, LIMIT], [order10, NEW], [order5, UNBACKED],
+          [edgeExact, NEW], [edgeOver, LIMIT], [onlyNew, LIMIT]] as const) {
+          expect(await state(id), `orden ${id}`).toEqual(want);
+        }
+        expect(await filledOf(uOverflow)).toEqual(overflowHistory);
+        // El otro usuario sigue operando después del despliegue.
+        expect((await api.query<{ r: { status: number } }>(
+          "SELECT app.place_order($1, 'dep41', 'h', 'CASH_IN', 'MARKET', $2, NULL, 1.00, NULL, NULL) AS r", [uOther, ars])).rows[0].r.status).toBe(201);
+
+        // Queda solo la historia que no se puede corregir; la segunda corrida no hace nada.
+        expect((await adminDb.query('SELECT userid, problem FROM app.verify_ledger() WHERE userid = ANY($1)', [mine])).rows)
+          .toEqual([{ userid: uOverflow, problem: 'overflow' }]);
+        expect(await bootstrap({ adminUrl: url, apiPassword: 'api', ...quiet })).toMatchObject({ applied: [], ledger: [], unbacked: [], overCap: [] });
+        expect(await state(order10)).toEqual(NEW);
+        expect(await state(edgeExact)).toEqual(NEW);
+      } finally {
+        await api.end();
+        await adminDb.end();
+      }
+    }, 120_000);
+  });
 });
 
 // Issue #3: cost_total pasa de bigint a numeric en c_state y read_portfolio.

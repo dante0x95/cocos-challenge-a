@@ -130,9 +130,13 @@ La migración impone una cotización por instrumento y día (`UNIQUE (instrument
 <a id="d-14"></a>
 ### D-14 — Límites de dominio
 
-Ningún movimiento se confirma si deja el cash fuera de ±10¹⁵ ARS (1.000.000.000.000.000,00) o una posición por encima de 2⁶² acciones. El cash tiene además el límite por movimiento de [D-05](#d-05).
+Ningún movimiento se confirma si deja el cash fuera de ±10¹⁵ ARS (1.000.000.000.000.000,00) o una posición por encima de 2⁶² acciones. El cash tiene además el límite por movimiento de [D-05](#d-05). Y ninguna orden se graba, en ningún estado, si su importe (`size × price`) supera 10¹⁵ ARS: responde `422 LIMIT` sin orden.
 
 **Por qué existe el tope.** El cash sale del fold como `bigint` en centavos (`cash_cents`): su máximo es 92.233.720.368.547.758,07 ARS. Un cash por encima no se puede leer ni autorizar. El tope de 10¹⁵ deja margen sobre lo representable y es una cifra que se explica. Para las posiciones, 2⁶² deja margen dentro de `bigint`.
+
+**Por qué un tope por orden, y antes de todo.** Una orden cuyo importe supera el cash máximo representable nunca podría ejecutarse: una compra no tendría con qué pagarse y una venta dejaría el cash fuera del tope. Pero una LIMIT que queda `NEW` o `REJECTED` no pasa por la validación del estado, y el importe entra en tipos acotados (`numeric(20,0)` para el importe, `numeric(18,2)` para el precio y el `amount` de la respuesta): sin el tope, una orden con `size × price ≥ 10¹⁶` respondía `500` por overflow en vez de un código claro. Lo mismo una MARKET con `size` máximo sobre un instrumento de cotización muy alta. El tope se calcula apenas se conocen `size` y `price` (para una LIMIT, antes de asignar el precio; para MARKET o por `amount`, con el precio ya resuelto) y siempre antes de calcular el importe. La cantidad que sale de un `amount` se acota como `numeric` (a lo sumo 2³¹ − 1, `400`) antes de pasar a `bigint`: un `amount` no tiene máximo y el cociente podía no entrar.
+
+**Una clave anterior al tope sigue dando su respuesta.** Una LIMIT por encima del tope que la versión anterior aceptó (por ejemplo `NEW` con importe 9,5 × 10¹⁵) dejó su clave con el `201` ([D-19](#d-19)). Por eso el `422` sale después del bloque de idempotencia, bajo el lock: una clave existente repite la respuesta original o rechaza otro body ([D-19](#d-19)), y solo una clave reclamada recién llega al `422`. Saber si la clave existe es leer estado, así que va bajo el lock ([D-17](#d-17)): la LIMIT fuera del tope espera el lock como cualquier escritura. Con el lock tomado por otra escritura del mismo usuario, puede terminar en `503 LOCK_TIMEOUT` en vez de `422`; reintentada con la misma clave, responde `422`.
 
 **Dónde se valida.** Siempre bajo el lock, con el estado del momento en que el movimiento se confirma:
 
@@ -171,6 +175,8 @@ Toda escritura de órdenes pasa por una función de Postgres (`place_order`, `ex
 2. lee el estado (órdenes ejecutadas + reservas),
 3. decide,
 4. escribe.
+
+Antes del lock solo se validan los argumentos: su forma y que existan el usuario y el instrumento, datos que ninguna escritura de órdenes cambia. Nada que dependa de las órdenes o de las claves de idempotencia se lee antes del lock. Por eso un rechazo que tiene que respetar el replay de una clave anterior, como el tope por orden de [D-14](#d-14), sale después del bloque de idempotencia.
 
 El rol con que se conecta la API **no tiene INSERT, UPDATE ni DELETE** sobre ninguna tabla, solo `EXECUTE` sobre esas funciones. Por eso es imposible saltearse el orden lock → leer → decidir → escribir.
 

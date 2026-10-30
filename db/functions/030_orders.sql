@@ -48,6 +48,8 @@ DECLARE
   ts          timestamp := timezone('UTC', now());
   is_cash     boolean := p_side IN ('CASH_IN','CASH_OUT');
   v_size      bigint;
+  v_qty       numeric;
+  over_cap    boolean := false;   -- LIMIT fuera del tope: 422 después del bloque de idempotencia
 BEGIN
   PERFORM app.deploy_barrier();
 
@@ -98,7 +100,14 @@ BEGIN
       IF p_limit IS NULL OR p_limit <= 0 OR p_limit <> round(p_limit, 2) THEN
         RAISE EXCEPTION 'una orden LIMIT requiere precio > 0 con a lo sumo 2 decimales' USING ERRCODE = 'APP02';
       END IF;
-      price := p_limit;
+      -- Tope por orden (D-14), antes de asignar `price` (numeric(18,2)): un precio o un importe por
+      -- encima de 10^15 ARS nunca podría ejecutarse. El 422 sale después del bloque de
+      -- idempotencia: una clave grabada antes del tope guarda la respuesta que dio la versión
+      -- anterior (D-19), y la clave se lee bajo el lock (D-17).
+      over_cap := p_limit > 1e15 OR (p_size IS NOT NULL AND p_size::numeric * p_limit > 1e15);
+      IF NOT over_cap THEN
+        price := p_limit;
+      END IF;
     END IF;
   END IF;
 
@@ -119,6 +128,9 @@ BEGIN
     RETURN jsonb_build_object('status', prev.http_status, 'body', prev.response_body,
                               'replay', true, 'order_id', prev.order_id::text);
   END IF;
+  IF over_cap THEN
+    RAISE EXCEPTION 'el importe de la orden supera 10^15 ARS' USING ERRCODE = 'APP05';
+  END IF;
 
   -- Precio de ejecución de una MARKET (D-12). Sin cotización: excepción; la transacción se
   -- revierte y con ella el reclamo de la clave.
@@ -132,17 +144,24 @@ BEGIN
 
   -- Cantidad (D-11), con el precio ya resuelto.
   IF p_size IS NOT NULL THEN
-    v_size := p_size;
+    v_qty := p_size;
   ELSIF is_cash THEN
-    v_size := (p_amount * 100)::bigint;
+    v_qty := p_amount * 100;
   ELSE
-    v_size := floor(p_amount / price)::bigint;
-    IF v_size <= 0 THEN
+    v_qty := floor(p_amount / price);
+    IF v_qty <= 0 THEN
       RAISE EXCEPTION 'amount % no alcanza para una acción a %', p_amount, price USING ERRCODE = 'APP02';
     END IF;
   END IF;
-  IF v_size > 2147483647 THEN
+  -- Se acota como numeric, antes del cast: un amount sin máximo da un cociente que no entra en bigint.
+  IF v_qty > 2147483647 THEN
     RAISE EXCEPTION 'la cantidad supera el máximo por orden (2147483647)' USING ERRCODE = 'APP02';
+  END IF;
+  v_size := v_qty;
+  -- Tope por orden (D-14) con el precio ya resuelto (MARKET, o LIMIT por amount): size × price
+  -- ≤ 10^15 ARS, así el importe entra en numeric(20,0) y el amount de la respuesta en numeric(18,2).
+  IF v_size::numeric * price > 1e15 THEN
+    RAISE EXCEPTION 'el importe de la orden supera 10^15 ARS' USING ERRCODE = 'APP05';
   END IF;
   imp := (v_size::numeric * price * 100)::numeric(20,0);
 

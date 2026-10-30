@@ -162,3 +162,128 @@ describe(`paridad base == oráculo (${USERS} usuarios × ${OPS} ops, seed ${SEED
     expect(totalOps).toBeGreaterThanOrEqual(1000);
   }, 300_000);
 });
+
+// Tope por orden (D-14, issue #2): cerca de 10¹⁵ ARS, por los cuatro caminos (LIMIT/MARKET ×
+// size/amount) y con usuarios que llevan la orden a cada estado. 422 por el tope de la orden si y
+// solo si size × price > 10¹⁵; si no, lo que decide el oráculo, salvo que confirmar el movimiento
+// deje el cash fuera de ±10¹⁵ (el tope del estado, otro 422, que se distingue por el mensaje).
+// Tamaño por env: PARITY_CAP_CASES (64).
+describe(`tope por orden cerca de 10¹⁵ ARS (${Number(process.env.PARITY_CAP_CASES ?? 64)} casos, seed ${SEED})`, () => {
+  const CAP = 100_000_000_000_000_000n;   // 10¹⁵ ARS en centavos
+  const MAX_SIZE = 2_147_483_646;         // el sembrado compra size + 1, que tiene que entrar en integer
+  const ORDER_CAP = /importe de la orden supera/;
+  const STATE_CAP = /cash quedaría fuera/;
+  const PATHS = [['LIMIT', 'size'], ['LIMIT', 'amount'], ['MARKET', 'size'], ['MARKET', 'amount']] as const;
+
+  const clone = (s: O.OracleState): O.OracleState => ({
+    cashCents: s.cashCents, positions: new Map(s.positions),
+    pendingBuys: new Map(s.pendingBuys), pendingSells: new Map(s.pendingSells) });
+  const outOfCap = (s: O.OracleState) => s.cashCents > CAP || s.cashCents < -CAP;
+
+  /** Instrumento propio con close `closeCents` hoy: MARKET ejecuta a ese precio y una LIMIT a ese precio cruza. */
+  async function instrument(tag: string, closeCents: bigint): Promise<number> {
+    const id = (await admin.query<{ id: number }>(
+      "INSERT INTO app.instruments (ticker, name, type) VALUES ($1, $2, 'ACCIONES') RETURNING id", [tag, `Prueba tope ${tag}`],
+    )).rows[0].id;
+    await admin.query(
+      `INSERT INTO app.marketdata (instrumentid, close, previousclose, date)
+       VALUES ($1, $2, $2, (now() AT TIME ZONE 'America/Argentina/Buenos_Aires')::date)`, [id, fmt(closeCents)]);
+    return id;
+  }
+
+  /**
+   * Historia heredada (admin) que deja `cashCents` de cash y `shares` acciones de `iid`: CASH_IN
+   * 1.000,00 → BUY shares + 1 @ 0,01 → SELL 1 al precio que cierra el cash. Por la API, llegar
+   * cerca de 10¹⁵ pediría millones de depósitos (D-05).
+   */
+  async function seed(u: number, s: O.OracleState, iid: number, cashCents: bigint, shares: bigint) {
+    const sellCents = cashCents - 100_000n + shares + 1n;
+    const ins = (side: string, i: number, size: bigint, priceCents: bigint, seq: number) => admin.query(
+      `INSERT INTO app.orders (instrumentid, userid, size, price, type, side, status, datetime, balance_seq)
+       VALUES ($1, $2, $3, $4, 'MARKET', $5, 'FILLED', timezone('UTC', now()), $6)`,
+      [i, u, size.toString(), fmt(priceCents), side, seq]);
+    await ins('CASH_IN', ars, 100_000n, 1n, 1);
+    await ins('BUY', iid, shares + 1n, 1n, 2);
+    await ins('SELL', iid, 1n, sellCents, 3);
+    s.cashCents = 100_000n;
+    O.fill(s, 'BUY', iid, shares + 1n, 1n);
+    O.fill(s, 'SELL', iid, 1n, sellCents);
+  }
+
+  it('422 por el tope de la orden si y solo si size × price > 10¹⁵; si no, la decisión del oráculo, en los cuatro estados', async () => {
+    const CASES = Number(process.env.PARITY_CAP_CASES ?? 64);
+    const rnd = mulberry32(SEED + 1);
+    const int = (lo: number, hi: number) => lo + Math.floor(rnd() * (hi - lo + 1));
+    const big = (lo: bigint, hi: bigint) => lo + (BigInt(Math.floor(rnd() * 2 ** 52)) * (hi - lo + 1n)) / 2n ** 52n;
+    const seen = new Set<string>();
+
+    for (let c = 0; c < CASES; c++) {
+      const [type, by] = PATHS[c % 4];
+      const side = (c >> 2) % 2 === 0 ? 'BUY' : 'SELL';
+      // size en tres escalas; el precio en la frontera (±1 centavo) o a ±50 % de ella.
+      const size = BigInt([() => int(1, 9), () => int(10, 100_000), () => int(100_001, MAX_SIZE)][int(0, 2)]());
+      const edge = CAP / size;
+      const priceCents = rnd() < 0.5 ? edge + BigInt(int(-1, 1)) : big(edge / 2n, edge + edge / 2n);
+      // Por amount, el resto queda por debajo de medio precio: floor(amount / price) en numeric
+      // redondea el cociente a 16 dígitos (issue #10), y acá se prueba el tope, no esa división.
+      const amountCents = size * priceCents + big(0n, priceCents / 2n);
+      const iid = await instrument(`CAP${c}`, priceCents);
+
+      // Estado del usuario: sin nada (REJECTED) o con lo necesario para operar (FILLED o NEW). Una
+      // SELL arranca con cash al azar: ejecutarla puede pasar el tope del estado. Una BUY ejecutada
+      // cerca del tope deja un costo que hoy no entra en bigint en micro-ARS (issue #3): hasta ese
+      // arreglo, una BUY con fondos es LIMIT y se cancela.
+      const u = await newUser('parity-cap');
+      const s = O.newState();
+      const funded = rnd() < 0.75 && (side === 'SELL' || type === 'LIMIT');
+      if (funded && side === 'BUY') await seed(u, s, iid, CAP, 0n);
+      if (funded && side === 'SELL') await seed(u, s, iid, big(100_000n, CAP), size);
+      if (funded) await compare(u, s, 'sembrado');
+
+      const step = `#${c} ${side} ${type} por ${by}: size ${size} × ${fmt(priceCents)}${by === 'amount' ? ` (amount ${fmt(amountCents)})` : ''}`;
+      const args = { userid: u, key: 'cap', side, type, instrumentid: iid,
+        ...(by === 'size' ? { size } : { amount: fmt(amountCents) }), ...(type === 'LIMIT' ? { limit: fmt(priceCents) } : {}) };
+      const order = { side, type, instrumentid: iid, size, priceCents } as const;
+      const trial = clone(s);
+      const decision = O.placeOrder(trial, order, 0n);
+
+      if (size * priceCents > CAP) {
+        await expect(placeOrder(pool, args), step).rejects.toMatchObject({ code: 'APP05', message: expect.stringMatching(ORDER_CAP) });
+        seen.add(`${type}/${by}: tope de la orden`);
+      } else if (decision === 'FILLED' && outOfCap(trial)) {
+        await expect(placeOrder(pool, args), step).rejects.toMatchObject({ code: 'APP05', message: expect.stringMatching(STATE_CAP) });
+        seen.add('tope del estado');
+      } else {
+        const r = await placeOrder(pool, args);
+        const id = BigInt(r.order_id);
+        expect(O.placeOrder(s, order, id), step).toBe(decision);
+        expect(r.body.status, step).toBe(decision);
+        expect(r.body.size, step).toBe(size.toString());
+        seen.add(`${type}/${by}: dentro`);
+        seen.add(decision);
+        if (decision === 'NEW') {
+          // Se ejecuta (cruza: el close es el límite) o se cancela. Ejecutar una SELL puede pasar el tope del estado.
+          if (side === 'SELL' && rnd() < 0.5) {
+            const after = clone(s);
+            O.executeLimit(after, id, priceCents);
+            const outcome = (await pool.query<{ r: string }>('SELECT app.execute_limit_outcome($1) AS r', [Number(id)])).rows[0].r;
+            if (outOfCap(after)) { expect(outcome, step).toBe('LIMIT'); O.cancelOrder(s, id); seen.add('CANCELLED'); }
+            else { expect(outcome, step).toBe('FILLED'); O.executeLimit(s, id, priceCents); seen.add('FILLED'); }
+          } else {
+            expect((await pool.query<{ r: boolean }>('SELECT app.cancel_order($1, $2) AS r', [u, Number(id)])).rows[0].r, step).toBe(true);
+            O.cancelOrder(s, id);
+            seen.add('CANCELLED');
+          }
+        }
+      }
+      await compare(u, s, step);
+    }
+
+    // La propiedad recorrió todo: los cuatro caminos a los dos lados del tope, los cuatro estados y el otro 422.
+    expect([...seen].sort()).toEqual([
+      'CANCELLED', 'FILLED', 'LIMIT/amount: dentro', 'LIMIT/amount: tope de la orden', 'LIMIT/size: dentro',
+      'LIMIT/size: tope de la orden', 'MARKET/amount: dentro', 'MARKET/amount: tope de la orden', 'MARKET/size: dentro',
+      'MARKET/size: tope de la orden', 'NEW', 'REJECTED', 'tope del estado',
+    ].sort());
+  }, 120_000);
+});

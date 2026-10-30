@@ -65,10 +65,10 @@ Un replay devuelve la respuesta del request original, no el estado actual de la 
 
 | Código | `error` | Cuándo | ¿Se grabó? |
 |---|---|---|---|
-| `400` | `BAD_REQUEST` | falta la clave, JSON inválido, campos o combinaciones inválidas, usuario o instrumento inexistente, moneda como activo, monto que no alcanza para una acción | no |
+| `400` | `BAD_REQUEST` | falta la clave, JSON inválido, campos o combinaciones inválidas, usuario o instrumento inexistente, moneda como activo, monto que no alcanza para una acción o que da más de 2³¹ − 1 acciones | no |
 | `422` | `NO_PRICE` | MARKET sin cotización válida | no; la clave queda libre |
 | `422` | `IDEMPOTENCY_MISMATCH` | misma clave con otro body | no |
-| `422` | `LIMIT` | el resultado saldría de ±10¹⁵ ARS o 2⁶² acciones ([D-14](../decisiones.md#d-14)) | no |
+| `422` | `LIMIT` | el resultado saldría de ±10¹⁵ ARS o 2⁶² acciones, o el importe de la orden (`size × price`) supera 10¹⁵ ARS ([D-14](../decisiones.md#d-14)) | no |
 | `503` | `LOCK_TIMEOUT` · `TIMEOUT` · `VERSION_MISMATCH` | el usuario tenía otra operación en curso, se venció el tiempo (de la escritura o de la espera por una conexión con la base), o hay un despliegue en curso | no, o resultado desconocido: **reintentar con la misma clave** ([D-20](../decisiones.md#d-20)) |
 
 Todos los errores responden `{ "error": "...", "message": "..." }`.

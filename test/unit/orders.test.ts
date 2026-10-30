@@ -2,7 +2,6 @@
 import { describe, expect, it } from 'vitest';
 import { OrderBody, legacyRequestHash, orderView, requestHash, validateOrder } from '../../src/domain/orders.js';
 import { parserFor } from '../../src/db/pool.js';
-import { escapeLike } from '../../src/repositories/instruments.repo.js';
 
 const parse = (b: unknown) => OrderBody.safeParse(b);
 
@@ -157,8 +156,4 @@ describe('orderView', () => {
 describe('guard de parsers de node-postgres (D-13)', () => {
   it('int8 (OID 20) llega como string intacto', () => expect(parserFor(20)('9007199254740993')).toBe('9007199254740993'));
   it('numeric (OID 1700) llega como string intacto', () => expect(parserFor(1700)('1.10')).toBe('1.10'));
-});
-
-describe('búsqueda: los comodines de LIKE se escapan', () => {
-  it('% _ y \\ son literales', () => expect(escapeLike('a%b_c\\')).toBe('a\\%b\\_c\\\\'));
 });

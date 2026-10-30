@@ -21,7 +21,7 @@ Levanta Postgres 18, corre el bootstrap (carga el `database.sql` del challenge, 
 
 Para operar a mano está [`rest-client/cocos.http`](rest-client/cocos.http) (extensión REST Client de VS Code), con un request por caso: depósito, replay, compra por cantidad y por monto, LIMIT, cancelación, venta rechazada y errores.
 
-**Sin Docker para la API** (con un Postgres propio):
+**Sin Docker para la API** (con un Postgres propio; necesita las extensiones `pg_trgm` y `unaccent`, que vienen con Postgres — paquete `contrib` en algunas distribuciones — y las instala el bootstrap):
 
 ```bash
 pnpm install

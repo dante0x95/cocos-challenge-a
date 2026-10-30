@@ -9,6 +9,7 @@ import { createServer } from 'node:net';
 import { resolve } from 'node:path';
 import { createApp } from '../../src/app.js';
 import { pool } from '../../src/db/pool.js';
+import { SEARCH_SQL } from '../../src/repositories/instruments.repo.js';
 import { admin, arsId, cents, fmt, newUser, placeOrder as placeOrderDb, quotes, type Quote } from '../support/db.js';
 import { requestHash } from '../../src/domain/orders.js';
 
@@ -889,7 +890,9 @@ describe('GET /instruments', () => {
 
   it('_ se busca literalmente también por HTTP: no es "cualquier carácter"', async () => {
     expect((await get('/instruments?q=_')).body.results).toEqual([]);
-    expect((await get('/instruments?q=PA_P')).body.results).toEqual([]);   // como comodín, encontraría PAMP
+    // Como comodín, PA_P encontraría PAMP. Desde #14 la similitud lo lee como las palabras "pa" y "p"
+    // (lo que no es letra ni número separa palabras), y la palabra "p" se parece a la P de Y.P.F.
+    expect(await tickers('q=PA_P')).toEqual(['YPFD']);
   });
 
   // El seed no tiene `_` ni `%`: para probar que se encuentran literalmente hacen falta instrumentos
@@ -904,12 +907,196 @@ describe('GET /instruments', () => {
     });
     afterAll(async () => { await admin.query('DELETE FROM app.instruments WHERE id = ANY($1)', [ids]); });
 
-    it('_ y % literales encuentran el instrumento que los contiene, y solo ese', async () => {
-      // Como comodines, "Q_2" encontraría también QX28 y "100%" también "al 1000".
+    it('_ y % literales encuentran el instrumento que los contiene; lo que como comodín entraría, no', async () => {
+      // Como comodín, "Q_2" encontraría también QX28.
       expect(await tickers('q=Q_2')).toEqual(['Q_28']);
-      expect(await tickers('q=100%25')).toEqual(['Q_28']);
+      // "100%" como comodín encontraría también "al 1000"; literal, solo Q_28. Desde #14, QX28 entra
+      // igual, por similitud (100 ~ 1000: 0,8), detrás del que lo contiene literalmente (1,0).
+      expect(await tickers('q=100%25')).toEqual(['Q_28', 'QX28']);
+      // Donde la similitud no llega se ve que % no es comodín: "ue%00" encontraría los dos
+      // (Pr-ue-ba … 1-00) y literal no encuentra nada; "ue" y "00" no se parecen a ninguna palabra.
+      expect(await tickers('q=ue%2500')).toEqual([]);
       expect(await tickers('q=D-25%20al')).toEqual(['Q_28', 'QX28']);   // control: los dos existen y se encuentran
     });
+  });
+
+  // Issue #14: pg_trgm + unaccent (migración 009). Lo que contiene q (LIKE) o se le parece por
+  // trigramas (strict_word_similarity ≥ 0,45), sin acentos de los dos lados; las reglas de orden
+  // de D-25 siguen por encima de la similitud.
+  describe('errores de tipeo y acentos (#14)', () => {
+    it('un error de tipeo en una palabra casi completa encuentra el nombre: galisia → GGAL', async () => {
+      expect(await tickers('q=galisia')).toEqual(['GGAL']);
+    });
+
+    it('los acentos no cuentan, ni en los datos ni en q: rio y río → Molinos Río de la Plata; compania y Compañía → INTR', async () => {
+      // Los cuatro contienen "rio" (Río, Laboratorios, Hipotecario, Concesionario): el mismo nivel de
+      // D-25 (el resto), ordenados por similitud (la palabra entera primero) y después por ticker.
+      expect(await tickers('q=rio')).toEqual(['MOLI', 'RICH', 'BHIP', 'OEST']);
+      expect(await tickers(`q=${encodeURIComponent('río')}`)).toEqual(['MOLI', 'RICH', 'BHIP', 'OEST']);
+      expect(await tickers('q=compania')).toEqual(['INTR']);
+      expect(await tickers(`q=${encodeURIComponent('Compañía')}`)).toEqual(['INTR']);
+    });
+
+    // El seed no tiene "Petróleo" ni un segundo "Pampa": instrumentos propios, solo en este bloque.
+    describe('con Petróleo Austral y Pampa Energía', () => {
+      let ids: number[] = [];
+      beforeAll(async () => {
+        const r = await admin.query<{ id: number }>(
+          `INSERT INTO app.instruments (ticker, name, type)
+           VALUES ('PETR', 'Petróleo Austral S.A.', 'ACCIONES'), ('ENRG', 'Pampa Energía S.A.', 'ACCIONES') RETURNING id`);
+        ids = r.rows.map((x) => x.id);
+      });
+      afterAll(async () => { await admin.query('DELETE FROM app.instruments WHERE id = ANY($1)', [ids]); });
+
+      it('petroleo, Petróleo y PETROLEO encuentran Petróleo Austral', async () => {
+        for (const q of ['petroleo', 'Petróleo', 'PETROLEO', 'petrolio']) {
+          expect(await tickers(`q=${encodeURIComponent(q)}`), q).toEqual(['PETR']);
+        }
+      });
+
+      it('falsos positivos: q=pampa no pone PAMP (parecido por ticker) por delante de Pampa Energía; los dos empiezan con pampa por nombre y van por ticker', async () => {
+        expect(await tickers('q=pampa')).toEqual(['ENRG', 'PAMP']);
+        expect(await tickers('q=energia')).toEqual(['ENRG']);
+      });
+    });
+
+    it('las reglas de orden de D-25 van por encima de la similitud: q=GAL como hoy; q=banco → los bancos por ticker, no por similitud', async () => {
+      expect(await tickers('q=GAL')).toEqual(['GGAL']);
+      expect(await tickers('q=gal')).toEqual(['GGAL']);
+      // Con el umbral de 0,45 "Gas Natural Ban" (banco ~ ban: 0,43) queda afuera.
+      expect(await tickers('q=banco')).toEqual(['BBAR', 'BHIP', 'BMA', 'BPAT']);
+    });
+
+    // Instrumentos propios, solo en este bloque: un ticker que empieza con q pero se le parece menos
+    // que un nombre, y dos nombres del mismo nivel donde el que contiene q se le parece menos.
+    describe('nivel contra similitud, y similitud contra pertenencia literal', () => {
+      let ids: number[] = [];
+      beforeAll(async () => {
+        const r = await admin.query<{ id: number }>(
+          `INSERT INTO app.instruments (ticker, name, type) VALUES
+             ('BANCOS', 'Fondo de prueba D-25', 'ACCIONES'), ('ZBDT', 'Banco del Test D-25', 'ACCIONES'),
+             ('ZXBX', 'Fondo xbancox', 'ACCIONES'), ('ZBCA', 'Fondo banca', 'ACCIONES'),
+             ('ZZAX', 'Fondo xzorzalx', 'ACCIONES'), ('ZZBA', 'Fondo zorzala', 'ACCIONES') RETURNING id`);
+        ids = r.rows.map((x) => x.id);
+      });
+      afterAll(async () => { await admin.query('DELETE FROM app.instruments WHERE id = ANY($1)', [ids]); });
+
+      it('un ticker que empieza con q va antes que un nombre que empieza con q, aunque el nombre se le parezca más (banco: BANCOS 0,63, "Banco del Test" 1)', async () => {
+        const r = await tickers('q=banco&limit=50');
+        expect(r[0]).toBe('BANCOS');
+        expect(r.indexOf('ZBDT')).toBeGreaterThan(0);
+      });
+
+      it('dentro de un nivel ordena la similitud, no la pertenencia literal: "Fondo banca" (0,5) antes que "Fondo xbancox" (0,27), que contiene banco', async () => {
+        const r = await tickers('q=banco&limit=50');
+        expect(r).toContain('ZXBX');
+        expect(r.indexOf('ZBCA')).toBeLessThan(r.indexOf('ZXBX'));
+        // Solos en su nivel: con limit=1 queda el parecido y no el que lo contiene.
+        expect(await tickers('q=zorzal')).toEqual(['ZZBA', 'ZZAX']);
+        expect(await tickers('q=zorzal&limit=1')).toEqual(['ZZBA']);
+      });
+    });
+
+    // unaccent convierte ％ ＿ ＼ (ancho completo) en % _ \: la búsqueda normaliza primero y escapa
+    // después, así que siguen siendo literales.
+    describe('comodines de ancho completo', () => {
+      let ids: number[] = [];
+      beforeAll(async () => {
+        const r = await admin.query<{ id: number }>(
+          `INSERT INTO app.instruments (ticker, name, type) VALUES
+             ('ZPCT', 'Prueba D-25 50% fijo', 'ACCIONES'), ('ZUND', 'Prueba D-25 A_B', 'ACCIONES'), ('ZBSL', $1, 'ACCIONES') RETURNING id`,
+          ['Prueba D-25 C\\D']);
+        ids = r.rows.map((x) => x.id);
+      });
+      afterAll(async () => { await admin.query('DELETE FROM app.instruments WHERE id = ANY($1)', [ids]); });
+
+      it('％, ＿ y ＼ encuentran solo el instrumento con %, _ o \\; como comodines encontrarían todo el catálogo', async () => {
+        expect(await tickers(`q=${encodeURIComponent('％')}`)).toEqual(['ZPCT']);
+        expect(await tickers(`q=${encodeURIComponent('＿')}`)).toEqual(['ZUND']);
+        expect(await tickers(`q=${encodeURIComponent('＼')}`)).toEqual(['ZBSL']);
+        expect(await tickers(`q=${encodeURIComponent('50％ f')}`)).toEqual(['ZPCT']);
+        // Control: el catálogo entero tiene mucho más que esos tres.
+        expect((await tickers('q=e&limit=50')).length).toBeGreaterThan(3);
+      });
+    });
+
+    // Igualdad de conjuntos: LIKE o similitud, nunca en vez de. Lo que encontraba ILIKE '%q%' (la
+    // consulta anterior, acá tal cual) sigue apareciendo, para los q de la doc y de estas pruebas.
+    const legacy = async (q: string, includeCash = false) => (await admin.query<{ ticker: string }>(
+      `SELECT ticker FROM app.instruments
+        WHERE (ticker ILIKE '%' || $1 || '%' OR name ILIKE '%' || $1 || '%') AND ($2 OR type <> 'MONEDA')`,
+      [q.replace(/[\\%_]/g, (m) => `\\${m}`), includeCash])).rows.map((r) => r.ticker).sort();
+    it('todo lo que encontraba ILIKE sigue apareciendo (LIKE o similitud)', async () => {
+      for (const q of ['pa', 'pamp', 'PATAGONIA', 'ARS', 'car', 'CAR', 'moli', 'banco', 'gal', 'rio', 'galisia', 'zzzz', '%', '_', 'PA_P', 'Q_2', 'D-25 al']) {
+        const before = await legacy(q);
+        expect(before.length, q).toBeLessThanOrEqual(50);
+        const after = await tickers(`q=${encodeURIComponent(q)}&limit=50`);
+        expect(after.filter((t: string) => before.includes(t)).sort(), q).toEqual(before);
+      }
+      expect(await legacy('ARS', true)).toEqual(['ARS']);
+      expect((await tickers('q=ARS&include_cash=true&limit=50'))).toContain('ARS');
+    });
+
+    // Escape: ILIKE interpreta % y _, la similitud no (ignora lo que no es alfanumérico). Los dos
+    // caminos dan vacío con el seed, antes y después de #14.
+    it('q=% y q=_ → [] por los dos caminos: no hay trigramas que buscar ni comodines que interpretar', async () => {
+      expect(await legacy('%')).toEqual([]);
+      expect(await tickers('q=%25&limit=50')).toEqual([]);
+      expect(await legacy('_')).toEqual([]);
+      expect(await tickers('q=_&limit=50')).toEqual([]);
+    });
+
+    // q de 1 carácter: sí tiene trigramas ("  a" y " a "), pero con el umbral de 0,45 solo alcanza
+    // en una palabra que empiece o sea esa letra, que LIKE ya encuentra. En la práctica, la similitud
+    // suma a partir de 4 caracteres; la consulta no distingue el largo de q.
+    it('q de 1 carácter: el conjunto es exactamente el de ILIKE (la similitud no suma nada)', async () => {
+      const c = await admin.connect();
+      try {
+        await c.query('BEGIN');
+        await c.query('SET LOCAL pg_trgm.strict_word_similarity_threshold = 0.45');   // el umbral del rol api, para la conexión administradora
+        for (const q of ['a', 'e', 'i', 'o', 'u', 'r', '2', 'x']) {
+          const after = (await c.query<{ ticker: string }>(SEARCH_SQL, [q, false, 1000])).rows.map((r) => r.ticker).sort();
+          expect(after, q).toEqual(await legacy(q));
+        }
+      } finally {
+        await c.query('ROLLBACK').catch(() => undefined);
+        c.release();
+      }
+    });
+
+    // Plan de pruebas 7: con 66 filas el planner recorre la tabla aunque exista el índice; con
+    // 50.000 usa los dos índices GIN, para LIKE y para la similitud (BitmapOr de cuatro lecturas).
+    // Las filas se siembran como administrador dentro de una transacción que se revierte.
+    it('con 50.000 instrumentos la consulta usa los índices GIN de ticker y name, para LIKE y para la similitud; con 66, seq scan', async () => {
+      type Plan = { 'Node Type': string; 'Index Name'?: string; 'Index Cond'?: string; Plans?: Plan[] };
+      const nodes = (p: Plan): Plan[] => [p, ...(p.Plans ?? []).flatMap(nodes)];
+      const c = await admin.connect();
+      try {
+        await c.query('BEGIN');
+        await c.query('SET LOCAL pg_trgm.strict_word_similarity_threshold = 0.45');
+        const explain = async () => nodes((await c.query<{ 'QUERY PLAN': { Plan: Plan }[] }>(
+          `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${SEARCH_SQL}`, ['galisia', false, 20])).rows[0]['QUERY PLAN'][0].Plan);
+        expect(explain().then((n) => n.map((x) => x['Node Type']))).resolves.toContain('Seq Scan');
+
+        await c.query(`INSERT INTO app.instruments (ticker, name, type)
+          SELECT upper(substr(md5(i::text), 1, 5)), 'Compañía ' || substr(md5(i::text), 6, 12) || ' S.A.', 'ACCIONES'
+            FROM generate_series(1, 50000) i`);
+        await c.query('ANALYZE app.instruments');
+        const scans = (await explain()).filter((n) => n['Node Type'] === 'Bitmap Index Scan')
+          .map((n) => `${n['Index Name']}: ${n['Index Cond']!.includes('~~') ? 'LIKE' : n['Index Cond']!.includes('%>>') || n['Index Cond']!.includes('<<%') ? 'similitud' : n['Index Cond']}`)
+          .sort();
+        expect(scans).toEqual([
+          'instruments_name_trgm: LIKE', 'instruments_name_trgm: similitud',
+          'instruments_ticker_trgm: LIKE', 'instruments_ticker_trgm: similitud',
+        ]);
+        // Y entre 50.066 filas sigue encontrando solo Galicia (md5 no tiene g, l, s ni i).
+        expect((await c.query<{ ticker: string }>(SEARCH_SQL, ['galisia', false, 20])).rows.map((r) => r.ticker)).toEqual(['GGAL']);
+      } finally {
+        await c.query('ROLLBACK').catch(() => undefined);
+        c.release();
+      }
+      await admin.query('VACUUM app.instruments');   // las 50.000 filas revertidas no quedan como tuplas muertas para las pruebas siguientes
+    }, 120_000);
   });
 
   it('query devuelve q recortado y cada resultado tiene exactamente id, ticker, name y type', async () => {
@@ -934,8 +1121,9 @@ describe('GET /instruments', () => {
     expect(r.body.results.slice(0, example.results.length)).toEqual(example.results);
   });
 
-  it('q de 50 caracteres → 200; de 51 → 400', async () => {
+  it('q de 50 caracteres → 200 (también con el limit máximo; sin resultados: 50 "a" no se parecen a nada); de 51 → 400', async () => {
     expect((await get(`/instruments?q=${'a'.repeat(50)}`)).status).toBe(200);
+    expect((await get(`/instruments?q=${'a'.repeat(50)}&limit=50`)).body).toEqual({ query: 'a'.repeat(50), results: [] });
     const r = await get(`/instruments?q=${'a'.repeat(51)}`);
     expect(r.status).toBe(400);
     expect(r.body.error).toBe('BAD_REQUEST');

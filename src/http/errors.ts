@@ -51,7 +51,13 @@ export const CONNECTION_LOST_MESSAGE = 'la conexión con la base se cortó; el r
 // contexto del error: "unnamed portal parameter $N" (o "portal "x" parameter $N"), y en ese momento
 // todavía no ejecutó nada. El mismo código dentro de la sentencia (un overflow en una cuenta, una
 // división por cero) no trae ese contexto y sigue siendo un 500: es un bug, no una entrada.
-const PARAM_CONTEXT = /^(?:unnamed portal|portal "[^"]*") parameter \$\d+/;
+// `where` lista los contextos del más interno al más externo, uno por línea, y el de la conversión
+// es el más externo: va al final, después de los del tipo (un jsonb inválido agrega antes
+// "JSON data, line 1: …"). Si log_parameter_max_length_on_error > 0, lleva el valor entre comillas
+// simples, con las del valor duplicadas, y el valor puede traer saltos de línea. Por eso se exige
+// la línea al final del texto, con el valor completo y bien citado: un texto del cliente que imite
+// el contexto en medio de otro no alcanza.
+const PARAM_CONTEXT = /(?:^|\n)(?:unnamed portal|portal "[^"\n]*") parameter \$\d+(?: = '(?:[^']|'')*')?$/;
 
 /** true si el error es un dato inválido en un parámetro de la sentencia, antes de ejecutarla. */
 export function isParamDataException(err: unknown): boolean {

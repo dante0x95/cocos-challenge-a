@@ -85,7 +85,7 @@ Un reintento con la misma clave y el mismo body tiene el replay **garantizado du
 
 Todos los errores responden `{ "error": "...", "message": "..." }`.
 
-Un charset distinto de UTF-8 en `Content-Type` o un `Content-Encoding` desconocido responden `415` con `error: "BAD_REQUEST"`; un parámetro de ruta mal codificado (`/orders/%FF`), `400` ([D-30](../decisiones.md#d-30)).
+El body va en UTF-8. Un `charset` de `Content-Type` que el parser no soporta (`latin1`, `windows-1252`, `utf-32`) o un `Content-Encoding` desconocido responden `415` con `error: "BAD_REQUEST"`, sin orden ni clave. El parser también decodifica los otros `utf-*` que reconoce (`utf-16le`, por ejemplo): la orden se valida y se graba igual que en UTF-8; un parámetro de ruta mal codificado (`/orders/%FF`), `400` ([D-30](../decisiones.md#d-30)).
 
 En `GET /orders/:id` y `POST /orders/:id/cancel`, un `500 INTERNAL` dice `error interno; reintentar`: no llevan `Idempotency-Key`. Consultar se puede repetir; una cancelación repetida responde `409` con la orden si la anterior se aplicó.
 

@@ -165,7 +165,15 @@ describe('fromDbError: la clase 22 al convertir un parámetro → 400 (issue #40
   // Postgres pone ese contexto cuando falla la conversión de un parámetro, antes de ejecutar nada
   // (test/property/inputs lo verifica contra Postgres 18). Con log_parameter_max_length_on_error
   // el valor va al final ("= '...'").
-  const PARAM_WHERES = ['unnamed portal parameter $1', "unnamed portal parameter $8 = '...'", 'portal "p1" parameter $2'];
+  const PARAM_WHERES = [
+    'unnamed portal parameter $1', "unnamed portal parameter $8 = '...'", 'portal "p1" parameter $2',
+    // Un jsonb inválido: el contexto del tipo va antes, el de la conversión al final (CR-1).
+    'JSON data, line 1: {"a":\nunnamed portal parameter $1 = \'...\'',
+    'JSON data, line 3: "\\u0000...\nunnamed portal parameter $2',
+    // Con log_parameter_max_length_on_error: el valor, con saltos de línea y comillas duplicadas.
+    "unnamed portal parameter $1 = '1\n2'''",
+    "JSON data, line 1: {\"a\":\"x\nunnamed portal parameter $1 = '{\"a\":\"x\nunnamed portal parameter $9'",
+  ];
   // Los que puede dar la conversión de un valor de texto: U+0000 o bytes inválidos (22021), un
   // carácter sin equivalente (22P05), sintaxis del tipo (22P02), rango (22003), largo (22001),
   // fechas (22007, 22008), y la clase genérica.
@@ -185,8 +193,12 @@ describe('fromDbError: la clase 22 al convertir un parámetro → 400 (issue #40
     ['22P02', 'PL/pgSQL function app.place_order(integer,text) line 12 at assignment'],
     ['22003', "SQL statement \"SELECT 1\"\nPL/pgSQL function app.c_state(integer) line 4 at SQL statement"],
     ['22021', 'JSON data, line 1: {"a":"\\u0000...'],
-    // El contexto de un parámetro, pero en otra línea: no es el error de la conversión.
-    ['22003', 'PL/pgSQL function app.x() line 1\nunnamed portal parameter $1'],
+    // El contexto de un parámetro con otro más externo después: no es el error de la conversión.
+    ['22003', 'unnamed portal parameter $1\nPL/pgSQL function app.x() line 1'],
+    // Texto del cliente que imita el contexto dentro de otro, sin la cita completa del valor.
+    ['22P02', "JSON data, line 1: {\"a\":\"x\nunnamed portal parameter $9 = 'y"],
+    ['22P02', "JSON data, line 1: {\"a\":\"x\nunnamed portal parameter $9 = 'y' z'"],
+    ['22P02', 'JSON data, line 1: {"a":"unnamed portal parameter $1'],
   ])('%s con contexto %j → 500 INTERNAL', (code, where) => {
     const e = fromDbError(Object.assign(new Error('x'), { code, where }));
     expect({ status: e.status, code: e.code }).toEqual({ status: 500, code: 'INTERNAL' });

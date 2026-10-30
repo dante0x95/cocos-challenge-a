@@ -249,14 +249,36 @@ describe(`ninguna entrada del cliente produce un 500 (${RUNS} por campo, seed ${
     expect(rejected).toBeGreaterThan(0);
   });
 
-  it('POST /orders con un charset o un Content-Encoding que body-parser no soporta → 415, no 500', async () => {
-    const body = Buffer.from(JSON.stringify({ userid: 1, side: 'CASH_IN', amount: '10' }));
-    const charset = await send('POST', '/orders', [['Content-Type', 'application/json; charset=latin1'], ['Idempotency-Key', 'k']], body);
-    expect({ status: charset.status, body: JSON.parse(charset.body) })
+  // Política (D-30): body-parser decodifica los charsets utf-* que reconoce (UTF-8, UTF-16 y sus
+  // variantes) y la orden se valida igual que en UTF-8; los demás → 415 sin orden ni clave (CR-3, CR-4).
+  it.each([
+    ['utf-8', 'utf8'],
+    ['utf-16le', 'utf16le'],
+  ] as const)('POST /orders con charset=%s y el body en esa codificación → 201, como en UTF-8', async (charset, encoding) => {
+    const u = await newUser('inputs');
+    const body = Buffer.from(JSON.stringify({ userid: u, side: 'CASH_IN', amount: '10' }), encoding);
+    const r = await send('POST', '/orders', [['Content-Type', `application/json; charset=${charset}`], ['Idempotency-Key', `cs-${charset}`]], body);
+    expect(r.status, r.body).toBe(201);
+    expect(JSON.parse(r.body)).toMatchObject({ side: 'CASH_IN', amount: '10.00', status: 'FILLED' });
+    expect(await leftovers(u)).toEqual({ orders: 1, keys: 1 });
+  });
+
+  it.each(['latin1', 'windows-1252', 'utf-32', 'utf-99'])('POST /orders con charset=%s → 415 sin orden ni clave, no 500', async (charset) => {
+    const u = await newUser('inputs');
+    const body = Buffer.from(JSON.stringify({ userid: u, side: 'CASH_IN', amount: '10' }));
+    const r = await send('POST', '/orders', [['Content-Type', `application/json; charset=${charset}`], ['Idempotency-Key', 'k']], body);
+    expect({ status: r.status, body: JSON.parse(r.body) })
       .toEqual({ status: 415, body: { error: 'BAD_REQUEST', message: 'charset no soportado: enviar el body en utf-8' } });
-    const encoding = await send('POST', '/orders', [...json, ['Content-Encoding', 'br2'], ['Idempotency-Key', 'k']], body);
-    expect({ status: encoding.status, body: JSON.parse(encoding.body) })
+    expect(await leftovers(u)).toEqual({ orders: 0, keys: 0 });
+  });
+
+  it('POST /orders con un Content-Encoding que body-parser no soporta → 415 sin orden ni clave, no 500', async () => {
+    const u = await newUser('inputs');
+    const body = Buffer.from(JSON.stringify({ userid: u, side: 'CASH_IN', amount: '10' }));
+    const r = await send('POST', '/orders', [...json, ['Content-Encoding', 'br2'], ['Idempotency-Key', 'k']], body);
+    expect({ status: r.status, body: JSON.parse(r.body) })
       .toEqual({ status: 415, body: { error: 'BAD_REQUEST', message: 'Content-Encoding no soportado' } });
+    expect(await leftovers(u)).toEqual({ orders: 0, keys: 0 });
   });
 });
 
@@ -294,12 +316,18 @@ describe('el 500 menciona Idempotency-Key solo en POST /orders (issue #40)', () 
 // La red de seguridad de src/http/errors.ts reconoce la clase 22 de un parámetro por el contexto
 // que pone Postgres. Acá se verifica ese contexto contra Postgres 18 real, no contra un fixture.
 describe('red de seguridad: la clase 22 al convertir un parámetro → 400; dentro de la sentencia, 500 (D-30)', () => {
-  async function failure(sql: string, params: unknown[]) {
+  // maxLen: log_parameter_max_length_on_error de la sesión; > 0 pone el valor en el contexto.
+  async function failure(sql: string, params: unknown[], maxLen = 0) {
+    const c = await pool.connect();
     try {
-      await pool.query(sql, params);
+      await c.query(`SET log_parameter_max_length_on_error = ${maxLen}`);
+      await c.query(sql, params);
     } catch (err) {
       const e = fromDbError(err, false);
       return { sqlstate: (err as { code: string }).code, status: e.status };
+    } finally {
+      await c.query('RESET log_parameter_max_length_on_error');
+      c.release();
     }
     throw new Error(`${sql} no falló`);
   }
@@ -310,10 +338,25 @@ describe('red de seguridad: la clase 22 al convertir un parámetro → 400; dent
       [1, 'k\u0000', 'h', 'CASH_IN', 'MARKET', null, null, '1.00', null, null], '22021', 400],
     ['sintaxis de integer', 'SELECT $1::int', ['abc'], '22P02', 400],
     ['rango de integer', 'SELECT $1::int', ['3000000000'], '22003', 400],
+    ['fecha inexistente', 'SELECT $1::date', ['2020-13-45'], '22008', 400],
+    // El contexto del tipo va antes que el de la conversión (CR-1, CR-2).
+    ['un parámetro jsonb con sintaxis inválida', 'SELECT $1::jsonb', ['{"a":'], '22P02', 400],
+    ['un parámetro jsonb con \\u0000', 'SELECT $1::jsonb', ['{"a":"\\u0000"}'], '22P05', 400],
+    ['un parámetro jsonb con \\u0000 en la tercera línea', 'SELECT $1::jsonb', ['{"a":1,\n"b":\n"\\u0000"}'], '22P05', 400],
     ['overflow en una cuenta', 'SELECT 2147483647 + $1::int', ['1'], '22003', 500],
     ['división por cero', 'SELECT $1::int / 0', ['1'], '22012', 500],
     ['U+0000 en un jsonb armado en la sentencia', `SELECT ('{"a":"\\u0000"}'::jsonb ->> 'a') = $1`, ['x'], '22P05', 500],
+    ['un jsonb inválido armado en la sentencia', `SELECT ('{"a":'::jsonb ->> 'a') = $1`, ['x'], '22P02', 500],
+    // Convertir a jsonb un text recibido es parte de la ejecución: le toca a la frontera validarlo.
+    ['un text convertido a jsonb dentro de la sentencia', 'SELECT $1::text::jsonb', ['{"a":"\\u0000"}'], '22P05', 500],
   ])('%s → %s', async (_name, sql, params, sqlstate, status) => {
     expect(await failure(sql as string, params as unknown[])).toEqual({ sqlstate, status });
+  });
+
+  it('con el valor en el contexto (log_parameter_max_length_on_error): saltos de línea, comillas y un contexto imitado no cambian la decisión', async () => {
+    expect(await failure('SELECT $1::int', ["1\n2'"], 100)).toEqual({ sqlstate: '22P02', status: 400 });
+    expect(await failure('SELECT $1::jsonb', ['{"a":"x\nunnamed portal parameter $9 = \'y\'", "b":1}'], 100)).toEqual({ sqlstate: '22P02', status: 400 });
+    // Dentro de la sentencia, el mismo texto del cliente en el contexto del tipo no la vuelve un 400.
+    expect(await failure('SELECT $1::text::jsonb', ['{"a":"x\nunnamed portal parameter $9 = \'y\'", "b":1}'], 100)).toEqual({ sqlstate: '22P02', status: 500 });
   });
 });

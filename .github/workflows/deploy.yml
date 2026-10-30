@@ -22,16 +22,15 @@ on:
 permissions:
   contents: read
 
-# Un deploy a la vez, sin cortar uno en curso: cortarlo a mitad del bootstrap no rompe nada
-# (es una transacción), pero deja un deploy fallido que hay que mirar. queue: max deja esperar
-# a todos los pendientes, en orden de llegada: con la cola por defecto (single) cada pendiente
-# nuevo cancela al anterior, y un re-run del CI de un commit viejo que llega mientras otro
-# deploy corre cancelaría el deploy pendiente de un merge más nuevo; después el gate frena al
-# viejo y ese merge queda sin desplegar.
-concurrency:
-  group: deploy
-  cancel-in-progress: false
-  queue: max
+# Concurrencia por entorno, en cada job de deploy (staging y production), no del workflow: un
+# grupo del workflow lo retendría la corrida entera, también mientras production espera la
+# aprobación, y el staging de los merges siguientes no correría hasta que alguien aprobara (o
+# rechazara) el anterior. En cada entorno, un deploy a la vez, sin cortar uno en curso: cortarlo
+# a mitad del bootstrap no rompe nada (es una transacción), pero deja un deploy fallido que hay
+# que mirar. queue: max deja esperar a todos los pendientes, en orden de llegada: con la cola
+# por defecto (single) cada pendiente nuevo cancela al anterior, y un re-run del CI de un commit
+# viejo que llega mientras otro deploy corre cancelaría el deploy pendiente de un merge más
+# nuevo; después el gate frena al viejo y ese merge queda sin desplegar.
 
 env:
   SHA: ${{ github.event.workflow_run.head_sha }}
@@ -64,6 +63,10 @@ jobs:
   staging:
     needs: image
     runs-on: ubuntu-latest
+    concurrency:
+      group: deploy-staging
+      cancel-in-progress: false
+      queue: max
     timeout-minutes: 20
     environment:
       name: staging
@@ -89,6 +92,10 @@ jobs:
   production:
     needs: staging
     runs-on: ubuntu-latest
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
+      queue: max
     timeout-minutes: 20
     environment:
       name: production

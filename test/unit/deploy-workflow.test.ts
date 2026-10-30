@@ -198,11 +198,18 @@ describe('workflow de deploy', () => {
 // corrida nueva cancela la que corre; si no, espera. Con queue: single (el valor por defecto)
 // puede haber un solo pendiente y el nuevo cancela al que esperaba; con queue: max esperan
 // todos (hasta 100) y arrancan en orden de llegada. Devuelve los commits que llegan a correr.
-function concurrencyBlock() {
-  const m = yml.match(/^concurrency:\n((?: {2}.+\n)+)/m);
-  if (!m) throw new Error('deploy.yml no tiene un bloque concurrency');
-  return Object.fromEntries([...m[1].matchAll(/^ {2}([\w-]+): (.+)$/gm)].map((e) => [e[1], e[2].trim()]));
+/** El bloque `concurrency` de un job (6 espacios de indentación), o undefined. */
+function concurrencyOf(block: string): Record<string, string> | undefined {
+  const m = block.match(/^ {4}concurrency:\n((?: {6}.+\n)+)/m);
+  if (!m) return undefined;
+  return Object.fromEntries([...m[1].matchAll(/^ {6}([\w-]+): (.+)$/gm)].map((e) => [e[1], e[2].trim()]));
 }
+const jobBlock = (name: string) => {
+  const jobsText = yml.slice(yml.indexOf('\njobs:\n') + 1);
+  const m = jobsText.match(new RegExp(`^  ${name}:\\n([\\s\\S]*?)(?=^  \\w+:\\n|$(?![\\s\\S]))`, 'm'));
+  if (!m) throw new Error(`deploy.yml no tiene el job ${name}`);
+  return m[1];
+};
 function simulateQueue(c: Record<string, string>, arrivals: string[]): string[] {
   const known = new Set(['group', 'cancel-in-progress', 'queue']);
   for (const k of Object.keys(c)) if (!known.has(k)) throw new Error(`clave de concurrency no soportada: ${k}`);
@@ -228,12 +235,21 @@ describe('concurrencia del deploy', () => {
     expect(() => simulateQueue({ group: 'deploy', otra: 'x' }, [])).toThrow(/no soportada/);
   });
 
-  it('con A desplegándose y B pendiente, un re-run del CI de un commit viejo no cancela a B', () => {
-    const c = concurrencyBlock();
-    expect(c.group).toBe('deploy');
-    // A no se corta, B llega a desplegarse, y el viejo corre después (y lo frena el gate).
-    expect(simulateQueue(c, ['A', 'B', 'viejo'])).toEqual(['A', 'B', 'viejo']);
-    expect(simulateQueue(c, ['A', 'B', 'C', 'viejo', 'D'])).toEqual(['A', 'B', 'C', 'viejo', 'D']);
+  it.each(['staging', 'production'])(
+    'en %s, con A desplegándose y B pendiente, un re-run del CI de un commit viejo no cancela a B', (name) => {
+      const c = concurrencyOf(jobBlock(name));
+      expect(c?.group).toBe(`deploy-${name}`);
+      // A no se corta, B llega a desplegarse, y el viejo corre después (y lo frena el gate).
+      expect(simulateQueue(c!, ['A', 'B', 'viejo'])).toEqual(['A', 'B', 'viejo']);
+      expect(simulateQueue(c!, ['A', 'B', 'C', 'viejo', 'D'])).toEqual(['A', 'B', 'C', 'viejo', 'D']);
+    });
+
+  // Un grupo del workflow lo retiene la corrida entera, también mientras production espera la
+  // aprobación: el staging de los merges siguientes quedaría frenado detrás de esa aprobación.
+  it('la concurrencia es por entorno: una aprobación pendiente de producción no frena el staging siguiente', () => {
+    expect(yml).not.toMatch(/^concurrency:/m);
+    expect(concurrencyOf(jobBlock('image'))).toBeUndefined();
+    expect(concurrencyOf(jobBlock('staging'))?.group).not.toBe(concurrencyOf(jobBlock('production'))?.group);
   });
 });
 

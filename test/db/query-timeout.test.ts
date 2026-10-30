@@ -10,6 +10,8 @@ import { TEST_ADMIN_URL, TEST_API_URL } from '../support/urls.js';
 
 const QUERY_TIMEOUT_MS = 1500;
 const POOL_MAX = 10;
+// Literal, no importado del código: el contrato del mensaje (resultado desconocido, D-20).
+const TIMEOUT_BODY = { error: 'TIMEOUT', message: 'la base no respondió a tiempo; el resultado es desconocido: reintentar con la misma Idempotency-Key' };
 
 /** Proxy hacia Postgres. `swallow(n)`: las próximas n consultas reciben su petición pero no su respuesta. */
 function proxy(target: { host: string; port: number }) {
@@ -66,7 +68,7 @@ const get = async (path: string) => { const r = await fetch(`${base}${path}`); r
 const post = async (u: number, key: string) => {
   const r = await fetch(`${base}/orders`, { method: 'POST', headers: { 'content-type': 'application/json', 'Idempotency-Key': key },
     body: JSON.stringify({ userid: u, side: 'CASH_IN', amount: '10.00' }) });
-  return { status: r.status, replay: r.headers.get('idempotent-replay'), body: (await r.json()) as Record<string, string> };
+  return { status: r.status, replay: r.headers.get('idempotent-replay'), retryAfter: r.headers.get('retry-after'), body: (await r.json()) as Record<string, string> };
 };
 const newUser = async () => (await admin.query<{ id: number }>(
   "INSERT INTO app.users (email, accountnumber) VALUES ($1, $2) RETURNING id", [`qt-${Date.now()}-${Math.random().toString(36).slice(2)}@test.local`, String(Date.now()).slice(-10)])).rows[0].id;
@@ -79,8 +81,7 @@ describe('query_timeout: la respuesta de la base no llega', () => {
     const t0 = Date.now();
     const r = await quiet(() => get('/portfolio/1'));
     const ms = Date.now() - t0;
-    expect(r).toMatchObject({ status: 503, retryAfter: '1', body: { error: 'TIMEOUT' } });
-    expect(r.body.message).toMatch(/desconocido.*misma Idempotency-Key/);
+    expect(r).toEqual({ status: 503, retryAfter: '1', body: TIMEOUT_BODY });
     expect(ms).toBeGreaterThanOrEqual(QUERY_TIMEOUT_MS - 50);
     expect(ms).toBeLessThan(QUERY_TIMEOUT_MS + 1000);
     expect(pool.totalCount).toBe(before - 1);                   // destruida, no devuelta
@@ -91,7 +92,7 @@ describe('query_timeout: la respuesta de la base no llega', () => {
     const u = await newUser();
     px.swallow(1);
     const r = await quiet(() => post(u, 'k'));
-    expect(r.status).toBe(503);
+    expect(r).toEqual({ status: 503, replay: null, retryAfter: '1', body: TIMEOUT_BODY });
     expect((await admin.query<{ n: number }>('SELECT count(*)::int AS n FROM app.orders WHERE userid = $1', [u])).rows[0].n).toBe(1);
     const retry = await post(u, 'k');
     expect(retry).toMatchObject({ status: 201, replay: 'true' });
@@ -101,8 +102,7 @@ describe('query_timeout: la respuesta de la base no llega', () => {
   it('con el pool entero colgado (PG_POOL_MAX requests), todas terminan en 503 al vencer el plazo y la request siguiente responde 200', async () => {
     px.swallow(POOL_MAX);
     const results = await quiet(() => Promise.all(Array.from({ length: POOL_MAX }, () => get('/portfolio/1'))));
-    expect(results.map((r) => r.status)).toEqual(Array(POOL_MAX).fill(503));
-    expect(results.every((r) => r.body.error === 'TIMEOUT')).toBe(true);
+    expect(results).toEqual(Array(POOL_MAX).fill({ status: 503, retryAfter: '1', body: TIMEOUT_BODY }));
     expect((await get('/portfolio/1')).status).toBe(200);       // el pool se recuperó solo
   }, 30_000);
 

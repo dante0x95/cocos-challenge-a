@@ -7,6 +7,7 @@ import { connectionLostPhase, errorHandler, fromDbError } from '../../src/http/e
 // El contrato con el cliente, escrito acá y no importado del código: dice que el resultado es
 // desconocido y cómo resolverlo (D-20). Nunca que la orden no se grabó.
 const CONNECTION_LOST_MESSAGE = 'la conexión con la base se cortó; el resultado es desconocido: reintentar con la misma Idempotency-Key';
+const QUERY_TIMEOUT_MESSAGE = 'la base no respondió a tiempo; el resultado es desconocido: reintentar con la misma Idempotency-Key';
 const INTERNAL_MESSAGE = 'error interno; el resultado es desconocido: reintentar con la misma Idempotency-Key';
 
 describe('fromDbError: tiempos de conexión del pool (D-20)', () => {
@@ -21,8 +22,12 @@ describe('fromDbError: tiempos de conexión del pool (D-20)', () => {
 
   it('"Query read timeout" (plazo local del driver, issue #11) → 503 TIMEOUT con la guía de resultado desconocido', () => {
     const e = fromDbError(new Error('Query read timeout'));
-    expect({ status: e.status, code: e.code, retryAfter: e.retryAfter }).toEqual({ status: 503, code: 'TIMEOUT', retryAfter: 1 });
-    expect(e.message).toMatch(/desconocido.*misma Idempotency-Key/);
+    expect({ status: e.status, code: e.code, message: e.message, retryAfter: e.retryAfter })
+      .toEqual({ status: 503, code: 'TIMEOUT', message: QUERY_TIMEOUT_MESSAGE, retryAfter: 1 });
+  });
+
+  it('"Query read timeout" con un código de Postgres no es el plazo local', () => {
+    expect(fromDbError(Object.assign(new Error('Query read timeout'), { code: 'XX000' })).code).toBe('INTERNAL');
   });
 
   it('el mismo mensaje con un código de Postgres no se toma como timeout del pool', () => {

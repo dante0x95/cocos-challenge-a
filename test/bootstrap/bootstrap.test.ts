@@ -361,12 +361,11 @@ describe('bootstrap', () => {
         .toEqual({ outcome: 'ok', status: 'CANCELLED', cancel_reason: 'USER' });
     }, 120_000);
 
-    it('el pool del bootstrap no tiene plazo local: una función que tarda más que PG_QUERY_TIMEOUT_MS se aplica igual (issue #11)', async () => {
-      process.env.PG_QUERY_TIMEOUT_MS = '1000';
-      try {
-        const r = await deployFrom(withExtraFunction('015_test_lento.sql', 'SELECT pg_sleep(2);'));
-        expect(r.functions).toContain('015_test_lento.sql');
-      } finally { delete process.env.PG_QUERY_TIMEOUT_MS; }
+    it('el pool del bootstrap no tiene plazo local: una función que tarda más que el PG_QUERY_TIMEOUT_MS por defecto (7 s) se aplica igual (issue #11)', async () => {
+      // config se carga una sola vez al importar: acá vale el default. Una sentencia de 8 s lo
+      // supera, así que heredar query_timeout de la API (o fijar cualquier plazo menor) falla.
+      const r = await deployFrom(withExtraFunction('015_test_lento.sql', 'SELECT pg_sleep(8);'));
+      expect(r.functions).toContain('015_test_lento.sql');
     }, 60_000);
 
     it('un bootstrap que falla después de la migración no deja nada aplicado: ni la columna ni las funciones nuevas, y las anteriores siguen cancelando', async () => {

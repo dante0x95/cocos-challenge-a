@@ -72,6 +72,12 @@ BEGIN
   IF p_amount IS NOT NULL AND (p_amount <= 0 OR p_amount <> round(p_amount, 2)) THEN
     RAISE EXCEPTION 'amount debe ser > 0 con a lo sumo 2 decimales' USING ERRCODE = 'APP02';
   END IF;
+  -- Tope por orden (D-14) sobre el monto: el importe (size × price) nunca supera el monto, así
+  -- que un monto por encima de 10^15 ARS no puede dar una orden válida. Antes de dividir, para
+  -- que los dos operandos de la división entera entren en bigint.
+  IF NOT is_cash AND p_amount IS NOT NULL AND p_amount > 1e15 THEN
+    RAISE EXCEPTION 'el importe de la orden supera 10^15 ARS' USING ERRCODE = 'APP05';
+  END IF;
   IF NOT EXISTS (SELECT 1 FROM app.users u WHERE u.id = p_userid) THEN
     RAISE EXCEPTION 'usuario % inexistente', p_userid USING ERRCODE = 'APP02';
   END IF;
@@ -148,7 +154,10 @@ BEGIN
   ELSIF is_cash THEN
     v_qty := p_amount * 100;
   ELSE
-    v_qty := floor(p_amount / price);
+    -- División entera exacta en centavos (D-11, D-13). `floor(p_amount / price)` no sirve: la
+    -- división numeric redondea el cociente a 16 dígitos significativos antes del floor, y con
+    -- amount = 2 × price − 0,01 daba 2 en vez de 1.
+    v_qty := div(p_amount * 100, price * 100);
     IF v_qty <= 0 THEN
       RAISE EXCEPTION 'amount % no alcanza para una acción a %', p_amount, price USING ERRCODE = 'APP02';
     END IF;

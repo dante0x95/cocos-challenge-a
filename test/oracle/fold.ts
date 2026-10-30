@@ -25,6 +25,11 @@ function roundHalfEvenDiv(a: bigint, b: bigint): bigint {
   return q % 2n === 0n ? q : q + 1n;
 }
 
+/** D-11: acciones que compra o vende `amount` a `price`, ambos en centavos: división entera, sin redondeo. */
+export function sizeFromAmount(amountCents: bigint, priceCents: bigint): bigint {
+  return amountCents / priceCents;
+}
+
 export function reservedCash(s: OracleState): bigint {
   let t = 0n;
   for (const o of s.pendingBuys.values()) t += o.size * o.priceCents;

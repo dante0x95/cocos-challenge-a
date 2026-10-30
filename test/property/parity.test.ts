@@ -104,7 +104,7 @@ describe(`paridad base == oráculo (${USERS} usuarios × ${OPS} ops, seed ${SEED
           // BUY MARKET, por size o por amount (D-11)
           const byAmount = rnd() < 0.4;
           const amount = byAmount ? fmt(BigInt(int(1, 300_000))) : null;
-          const size = byAmount ? cents(amount!) / q.closeCents : BigInt(int(1, 60));
+          const size = byAmount ? O.sizeFromAmount(cents(amount!), q.closeCents) : BigInt(int(1, 60));
           step = `BUY MARKET ${q.instrumentid} ${byAmount ? 'amount ' + amount : 'size ' + size}`;
           if (size === 0n) {
             await expect(placeOrder(pool, { userid, key, side: 'BUY', type: 'MARKET', instrumentid: q.instrumentid, amount }), step)
@@ -118,20 +118,36 @@ describe(`paridad base == oráculo (${USERS} usuarios × ${OPS} ops, seed ${SEED
             expect(BigInt(r.body.size!), step).toBe(size);
           }
         } else if (kind < 0.60) {
-          const size = BigInt(int(1, 60));
-          step = `SELL MARKET ${q.instrumentid} ${size}`;
-          const exp = O.placeOrder(s, { side: 'SELL', type: 'MARKET', instrumentid: q.instrumentid, size, priceCents: q.closeCents }, 0n);
-          const r = await placeOrder(pool, { userid, key, side: 'SELL', type: 'MARKET', instrumentid: q.instrumentid, size });
-          expect(r.body.status, step).toBe(exp);
+          // SELL MARKET, por size o por amount (D-11)
+          const byAmount = rnd() < 0.4;
+          const amount = byAmount ? fmt(BigInt(int(1, 300_000))) : null;
+          const size = byAmount ? O.sizeFromAmount(cents(amount!), q.closeCents) : BigInt(int(1, 60));
+          step = `SELL MARKET ${q.instrumentid} ${byAmount ? 'amount ' + amount : 'size ' + size}`;
+          if (size === 0n) {
+            await expect(placeOrder(pool, { userid, key, side: 'SELL', type: 'MARKET', instrumentid: q.instrumentid, amount }), step)
+              .rejects.toMatchObject({ code: 'APP02' });
+          } else {
+            const exp = O.placeOrder(s, { side: 'SELL', type: 'MARKET', instrumentid: q.instrumentid, size, priceCents: q.closeCents }, 0n);
+            const r = byAmount
+              ? await placeOrder(pool, { userid, key, side: 'SELL', type: 'MARKET', instrumentid: q.instrumentid, amount })
+              : await placeOrder(pool, { userid, key, side: 'SELL', type: 'MARKET', instrumentid: q.instrumentid, size });
+            expect(r.body.status, step).toBe(exp);
+            expect(BigInt(r.body.size!), step).toBe(size);
+          }
         } else if (kind < 0.80) {
-          // LIMIT alrededor del close (±10 %), para que a veces cruce y a veces no
+          // LIMIT alrededor del close (±10 %), para que a veces cruce y a veces no; por size o por amount
           const side = rnd() < 0.5 ? 'BUY' : 'SELL';
-          const size = BigInt(int(1, 40));
           const limitCents = (q.closeCents * BigInt(int(90, 110))) / 100n;
           const limit = fmt(limitCents);
-          step = `${side} LIMIT ${q.instrumentid} ${size} @ ${limit}`;
+          const byAmount = rnd() < 0.3;
+          const amount = byAmount ? fmt(limitCents * BigInt(int(1, 40)) + BigInt(int(0, Number(limitCents) - 1))) : null;
+          const size = byAmount ? O.sizeFromAmount(cents(amount!), limitCents) : BigInt(int(1, 40));
+          step = `${side} LIMIT ${q.instrumentid} ${byAmount ? 'amount ' + amount : 'size ' + size} @ ${limit}`;
           // el id lo asigna la DB; el oráculo lo recibe después
-          const r = await placeOrder(pool, { userid, key, side, type: 'LIMIT', instrumentid: q.instrumentid, size, limit });
+          const r = byAmount
+            ? await placeOrder(pool, { userid, key, side, type: 'LIMIT', instrumentid: q.instrumentid, amount, limit })
+            : await placeOrder(pool, { userid, key, side, type: 'LIMIT', instrumentid: q.instrumentid, size, limit });
+          expect(BigInt(r.body.size!), step).toBe(size);
           const id = BigInt(r.order_id);
           const exp = O.placeOrder(s, { side, type: 'LIMIT', instrumentid: q.instrumentid, size, priceCents: cents(limit) }, id);
           expect(r.body.status, step).toBe(exp);

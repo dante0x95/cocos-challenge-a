@@ -780,6 +780,21 @@ describe('rollback.sh', () => {
     });
   });
 
+  // Dos commits pueden dar la misma imagen (uno que solo cambia docs, que el Dockerfile no
+  // copia): la máquina ya corre la imagen anterior pero con el RELEASE rechazado. Igual se
+  // actualiza, para que /health vuelva a informar el release anterior.
+  it('restore actualiza una máquina con la imagen anterior pero otro RELEASE', () => {
+    const f = fakes([machine('m1', OLD, 'app', 'started', SHA), machine('m2', OLD, 'app', 'started', PREV)], [body(PREV)]);
+    const r = runScript('deploy/fly/rollback.sh', ['restore'], f.bin, { ...f.env, PREVIOUS_IMAGE: OLD, PREVIOUS_RELEASE: PREV });
+    expect(r.status).toBe(0);
+    expect(f.calls()).toEqual([
+      'flyctl machines list --app cocos-challenge-a-staging --json',
+      `flyctl machine update m1 --app cocos-challenge-a-staging --image ${OLD} --env RELEASE=${PREV} --yes`,
+      'curl -sS --max-time 10 https://cocos-challenge-a-staging.fly.dev/health',
+    ]);
+    rmSync(f.dir, { recursive: true, force: true });
+  });
+
   it('restore falla si después de volver /health no atiende el release anterior', () => {
     const f = fakes([machine('m1', NEW)], [body(SHA, false)]);
     const r = runScript('deploy/fly/rollback.sh', ['restore'], f.bin, { ...f.env, PREVIOUS_IMAGE: OLD, PREVIOUS_RELEASE: PREV });

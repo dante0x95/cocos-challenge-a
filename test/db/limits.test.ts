@@ -6,6 +6,7 @@ import type { Server } from 'node:http';
 import { createApp } from '../../src/app.js';
 import { pool } from '../../src/db/pool.js';
 import { executeLimits } from '../../src/repositories/ops.repo.js';
+import { OrderBody, requestHash } from '../../src/domain/orders.js';
 import { admin, apiClient, arsId, fmt, newUser, placeOrder } from '../support/db.js';
 
 const CAP_CENTS = 100_000_000_000_000_000n;   // 10¹⁵ ARS en centavos
@@ -36,8 +37,8 @@ afterAll(async () => { await admin.end(); await pool.end(); });
 
 const cash = async (u: number) =>
   BigInt((await admin.query<{ c: string }>('SELECT cash_cents::text AS c FROM app.c_state($1) WHERE kind = 0', [u])).rows[0].c);
-const reservedShares = async (u: number) =>
-  (await admin.query<{ r: string }>('SELECT reserved::text AS r FROM app.read_portfolio($1) WHERE kind = 1 AND instrumentid = $2', [u, inst])).rows[0].r;
+const reservedShares = async (u: number, iid = inst) =>
+  (await admin.query<{ r: string }>('SELECT reserved::text AS r FROM app.read_portfolio($1) WHERE kind = 1 AND instrumentid = $2', [u, iid])).rows[0].r;
 const orderRow = async (id: string) =>
   (await admin.query('SELECT status, balance_seq FROM app.orders WHERE id = $1', [id])).rows[0];
 const ordersOf = async (u: number) =>
@@ -374,7 +375,10 @@ describe('tope por orden: el importe no supera 10¹⁵ ARS en ningún estado', (
       // amount 10¹⁵ con price 6 × 10¹⁴ → size 1 → importe 6 × 10¹⁴ < amount: camino normal.
       const r = await limit(u, 'a2', 'BUY', inst, null, '600000000000000.00', ONE_E15);
       expect(r.body).toMatchObject({ status: 'REJECTED', size: '1', amount: '600000000000000.00' });
-      expect(await ordersOf(u)).toBe(1);
+      // amount por encima del tope y el mismo importe: lo que se acota es size × price, no el monto.
+      const r2 = await limit(u, 'a3', 'BUY', inst, null, '600000000000000.00', '1000000000000000.01');
+      expect(r2.body).toMatchObject({ status: 'REJECTED', size: '1', amount: '600000000000000.00' });
+      expect(await ordersOf(u)).toBe(2);
     });
 
     it('MARKET por size sobre un close de 9,5 × 10¹²: size máximo → 422 LIMIT, no 500', async () => {
@@ -428,6 +432,31 @@ describe('tope por orden: el importe no supera 10¹⁵ ARS en ningún estado', (
       } finally { await a.end(); }
     });
 
+    it('amount cuyo cociente no entra en bigint, LIMIT y MARKET por HTTP → 400, sin orden, y la clave sigue libre', async () => {
+      const server = createApp({ internalToken: 'test-token' }).listen(0);
+      try {
+        const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+        const u = await newUser('cap-quotient');
+        await placeOrder(pool, { userid: u, key: 'c', side: 'CASH_IN', type: 'MARKET', instrumentid: ars, amount: '10000.00' });
+        const post = (key: string, body: Record<string, unknown>) => fetch(`${base}/orders`, {
+          method: 'POST', headers: { 'content-type': 'application/json', 'Idempotency-Key': key },
+          body: JSON.stringify({ userid: u, side: 'BUY', instrumentid: inst, ...body }) });
+        // 10²⁰ / 1,00 y 10²³ / 5.000,00: cocientes de 10²⁰ y 2 × 10¹⁹, por encima de 2⁶³ − 1. Antes: 500 (22003).
+        for (const [key, body] of [
+          ['ql', { type: 'LIMIT', amount: '100000000000000000000.00', price: '1.00' }],
+          ['qm', { type: 'MARKET', amount: '100000000000000000000000.00' }],
+        ] as const) {
+          const r = await post(key, body);
+          expect(r.status, key).toBe(400);
+          expect(((await r.json()) as { message: string }).message, key).toMatch(/cantidad supera el máximo/);
+          const ok = await post(key, { type: 'MARKET', size: 1 });
+          expect(ok.status, key).toBe(201);
+          expect(ok.headers.get('idempotent-replay'), key).toBe('false');
+        }
+        expect(await statusAndCount(u)).toEqual([{ status: 'FILLED', n: '3' }]);   // el CASH_IN y las dos válidas
+      } finally { server.close(); }
+    });
+
     it('la clave no se consume: misma clave y mismo body → otra vez 422; otro body → 201', async () => {
       const u = await newUser('cap-key');
       await expect(limit(u, 'k', 'BUY', inst, 2, ONE_E15)).rejects.toMatchObject({ code: 'APP05' });
@@ -455,10 +484,46 @@ describe('tope por orden: el importe no supera 10¹⁵ ARS en ningún estado', (
         // El executor la cancela por el tope de cash (D-14), como a cualquier otra.
         expect(await run('execute_limit_outcome', id)).toBe('LIMIT');
         expect(await orderRow(id)).toEqual({ status: 'CANCELLED', balance_seq: null });
-        const id2 = await legacyNew(u, big, 'SELL', 1, '9500000000000.00');
+        // Otra del mismo importe, que cancela el usuario: libera su reserva.
+        const id2 = await legacyNew(u, big, 'SELL', 1000, '9500000000000.00');
+        expect(await reservedShares(u, big)).toBe('1000');
         const cancel = await fetch(`${base}/orders/${id2}/cancel`, {
           method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ userid: u }) });
         expect(cancel.status).toBe(200);
+        expect(await cancel.json()).toMatchObject({ id: id2, status: 'CANCELLED', cancel_reason: 'USER', amount: '9500000000000000.00' });
+        expect(await reservedShares(u, big)).toBe('0');
+      } finally { server.close(); }
+    });
+
+    // D-19: una clave vigente al desplegar guarda la respuesta que dio la versión anterior, que
+    // aceptaba esta orden. El mismo request tiene que seguir dando esa respuesta, no 422.
+    it('una clave grabada antes del tope sigue dando replay: 201, el mismo cuerpo, sin orden nueva', async () => {
+      const server = createApp({ internalToken: 'test-token' }).listen(0);
+      try {
+        const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+        const u = await richUser(1_000_000n, big);
+        const req = { userid: u, side: 'SELL', type: 'LIMIT', instrumentid: big, size: 1000, price: '9500000000000.00' };
+        // Lo que grabó la versión anterior: la orden NEW y su clave, con el hash del request y la
+        // respuesta del 201 (la misma forma que GET /orders/:id).
+        const id = await legacyNew(u, big, 'SELL', 1000, '9500000000000.00');
+        const original = await (await fetch(`${base}/orders/${id}?userid=${u}`)).json();
+        await admin.query(
+          `INSERT INTO app.idempotency_keys (userid, key, request_hash, order_id, http_status, response_body)
+           VALUES ($1, 'pre', $2, $3, 201, $4)`, [u, requestHash(OrderBody.parse(req)), id, original]);
+        const before = await ordersOf(u);
+        const post = (key: string, body: Record<string, unknown>) => fetch(`${base}/orders`, {
+          method: 'POST', headers: { 'content-type': 'application/json', 'Idempotency-Key': key }, body: JSON.stringify(body) });
+
+        const r = await post('pre', req);
+        expect(r.status).toBe(201);
+        expect(r.headers.get('idempotent-replay')).toBe('true');
+        expect(await r.json()).toEqual(original);
+        // La misma clave con otro body sigue siendo un conflicto de clave; una clave libre, el tope.
+        const other = await post('pre', { ...req, size: 999 });
+        expect([other.status, ((await other.json()) as { error: string }).error]).toEqual([422, 'IDEMPOTENCY_MISMATCH']);
+        const fresh = await post('nueva', req);
+        expect([fresh.status, ((await fresh.json()) as { error: string }).error]).toEqual([422, 'LIMIT']);
+        expect(await ordersOf(u)).toBe(before);
       } finally { server.close(); }
     });
   });

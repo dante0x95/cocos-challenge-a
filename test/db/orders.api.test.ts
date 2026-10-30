@@ -3,6 +3,10 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { Server } from 'node:http';
 import { readFileSync } from 'node:fs';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
+import { createServer } from 'node:net';
+import { resolve } from 'node:path';
 import { createApp } from '../../src/app.js';
 import { pool } from '../../src/db/pool.js';
 import { admin, arsId, cents, fmt, newUser, placeOrder as placeOrderDb, quotes, type Quote } from '../support/db.js';
@@ -863,6 +867,39 @@ describe('internos y salud', () => {
       await new Promise((resolve) => s.close(resolve));
     }
   });
+  // D-29: en producción RELEASE llega por el entorno y createApp() lo toma de config, sin
+  // opciones. El servidor real (src/server.ts, el mismo que arranca la imagen) con RELEASE.
+  it('el servidor real toma RELEASE del entorno: /health lo devuelve sano y en el 503', async () => {
+    const free = createServer().listen(0);
+    await once(free, 'listening');
+    const port = (free.address() as { port: number }).port;
+    await new Promise((resolve) => free.close(resolve));
+    const proc = spawn(resolve('node_modules/.bin/tsx'), [resolve('src/server.ts')], {
+      env: { ...process.env, PORT: String(port), RELEASE: 'sha-del-entorno', JOBS_ENABLED: 'false' },
+      stdio: ['ignore', 'pipe', 'inherit'],
+    });
+    try {
+      let out = '';
+      await new Promise<void>((ok, fail) => {
+        proc.stdout.on('data', (d: Buffer) => { out += d; if (out.includes('escuchando')) ok(); });
+        proc.on('exit', (code) => fail(new Error(`src/server.ts salió con ${code}: ${out}`)));
+      });
+      const health = async () => {
+        const r = await fetch(`http://127.0.0.1:${port}/health`);
+        return { status: r.status, body: await r.json() };
+      };
+      expect(await health()).toMatchObject({ status: 200, body: { ok: true, db: 'up', release: 'sha-del-entorno' } });
+      await admin.query('REVOKE EXECUTE ON FUNCTION app.health() FROM api');
+      try {
+        expect(await health()).toEqual({ status: 503, body: { ok: false, db: 'down', release: 'sha-del-entorno' } });
+      } finally {
+        await admin.query('GRANT EXECUTE ON FUNCTION app.health() TO api');
+      }
+    } finally {
+      proc.kill('SIGTERM');
+      if (proc.exitCode === null) await once(proc, 'exit');
+    }
+  }, 30_000);
   it('/internal/* sin token → 401', async () => {
     expect((await post('/internal/execute-limits', {})).status).toBe(401);
   });

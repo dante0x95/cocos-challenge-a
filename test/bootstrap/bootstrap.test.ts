@@ -112,6 +112,40 @@ describe('bootstrap', () => {
     expect(after.migrations.map((m) => m.name)).not.toContain('999_cli_falla.sql');
   }, 60_000);
 
+  // D-24, D-29: la verificación de la historia corre después de migrar. Si rechaza el bootstrap,
+  // la migración, sus efectos, las funciones nuevas y la contraseña nueva del rol api tampoco
+  // quedan: un release rechazado no deja la base cambiada debajo de la versión anterior.
+  it('un bootstrap que falla en la verificación posterior a migrar no deja nada aplicado', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cocos-db-verify-'));
+    try {
+      cpSync(resolve('db'), dir, { recursive: true });
+      writeFileSync(join(dir, 'migrations', '999_verificacion.sql'),
+        'CREATE TABLE app.test_verificacion (x int); UPDATE app.settings SET price_max_age_days = 7;');
+      writeFileSync(join(dir, 'functions', '095_test_verificacion.sql'), `CREATE OR REPLACE FUNCTION app.verify_ledger()
+        RETURNS TABLE (userid int, problem text, detail text) LANGUAGE sql AS $$ SELECT 1, 'cash', 'verificación de prueba' $$;`);
+      await expect(bootstrap({ adminUrl: url, apiPassword: 'otra-clave', dbDir: dir, ...quiet }))
+        .rejects.toThrow(/verificación de la historia falló/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+    const after = await stateOf(url);
+    expect(after).toEqual(first);
+    expect(after.migrations.map((m) => m.name)).not.toContain('999_verificacion.sql');
+    const c = new pg.Client({ connectionString: url });
+    await c.connect();
+    try {
+      expect((await c.query("SELECT to_regclass('app.test_verificacion') AS t")).rows[0].t).toBeNull();
+      expect((await c.query("SELECT pg_get_functiondef('app.verify_ledger()'::regprocedure) AS d")).rows[0].d)
+        .not.toContain('verificación de prueba');
+    } finally {
+      await c.end();
+    }
+    // El rol api sigue con su contraseña anterior.
+    const api = new pg.Client({ connectionString: dbUrl(DB, { name: 'api', password: 'api' }) });
+    await api.connect();
+    await api.end();
+  }, 60_000);
+
   it('base que ya tiene las tablas del challenge: el seed se registra sin correr (baseline)', async () => {
     await recreateDatabase(DB);
     const c = new pg.Client({ connectionString: url });

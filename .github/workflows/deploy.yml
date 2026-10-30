@@ -17,10 +17,15 @@ permissions:
   contents: read
 
 # Un deploy a la vez, sin cortar uno en curso: cortarlo a mitad del bootstrap no rompe nada
-# (es una transacción), pero deja un deploy fallido que hay que mirar.
+# (es una transacción), pero deja un deploy fallido que hay que mirar. queue: max deja esperar
+# a todos los pendientes, en orden de llegada: con la cola por defecto (single) cada pendiente
+# nuevo cancela al anterior, y un re-run del CI de un commit viejo que llega mientras otro
+# deploy corre cancelaría el deploy pendiente de un merge más nuevo; después el gate frena al
+# viejo y ese merge queda sin desplegar.
 concurrency:
   group: deploy
   cancel-in-progress: false
+  queue: max
 
 jobs:
   deploy:

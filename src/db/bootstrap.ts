@@ -11,12 +11,13 @@
 //    database.sql del challenge: si la base ya tiene las tablas del challenge (datos propios),
 //    se registra como aplicado sin correrlo.
 // 2. db/functions/*.sql, en orden, SIEMPRE (CREATE OR REPLACE): así se despliega un cambio.
-//    Los pasos 1 y 2 van en UNA transacción, con la barrera de despliegue en modo exclusivo
-//    (D-24): un escritor nunca ve el esquema nuevo con las funciones anteriores, y si algo
-//    falla a mitad de camino no queda nada aplicado.
 // 3. Contraseña del rol api desde API_DB_PASSWORD.
 // 4. Si se aplicó alguna migración: verifica la historia (app.verify_ledger) y aborta si el
 //    cash del fold no coincide con la suma directa de importes.
+// Los cuatro pasos van en UNA transacción, con la barrera de despliegue en modo exclusivo
+// (D-24): un escritor nunca ve el esquema nuevo con las funciones anteriores, y si algo falla,
+// también la verificación del paso 4, no queda nada aplicado (es el release_command del deploy,
+// D-29: un release rechazado no puede dejar la base cambiada).
 import { createHash } from 'node:crypto';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -67,7 +68,7 @@ async function run(db: pg.Pool, dbDir: string, opts: BootstrapOptions, log: (m: 
     const done = new Map((await client.query<{ name: string; checksum: string }>(
       'SELECT name, checksum FROM public.schema_migrations')).rows.map((r) => [r.name, r.checksum]));
 
-    // 1 y 2, en una transacción. La barrera exclusiva espera a las escrituras en curso y frena
+    // 1 a 4, en una transacción. La barrera exclusiva espera a las escrituras en curso y frena
     // las nuevas hasta el COMMIT. Una que ya entró a la función anterior y quedó esperando la
     // barrera sigue con ese cuerpo: si choca con el esquema nuevo, la migración tiene que hacerla
     // fallar con un error reintentable (005: APP04 → 503).
@@ -105,24 +106,24 @@ async function run(db: pg.Pool, dbDir: string, opts: BootstrapOptions, log: (m: 
         await client.query(readFileSync(join(fnDir, f), 'utf8'));
         result.functions.push(f);
       }
+      log(`funciones: ${result.functions.join(', ')}`);
+
+      // 3. Contraseña del rol api
+      if (opts.apiPassword) {
+        await client.query(`ALTER ROLE api WITH PASSWORD ${client.escapeLiteral(opts.apiPassword)}`);
+      }
+
+      // 4. Verificación de la historia
+      if (result.applied.length > 0) {
+        result.ledger = (await client.query('SELECT userid, problem, detail FROM app.verify_ledger()')).rows;
+        for (const p of result.ledger) log(`  historia: usuario ${p.userid} — ${p.problem}: ${p.detail}`);
+        const broken = result.ledger.filter((p) => p.problem !== 'short');
+        if (broken.length) throw new Error(`verificación de la historia falló para ${broken.length} usuario(s)`);
+      }
       await client.query('COMMIT');
     } catch (e) {
       await client.query('ROLLBACK').catch(() => undefined);
       throw e;
-    }
-    log(`funciones: ${result.functions.join(', ')}`);
-
-    // 3. Contraseña del rol api
-    if (opts.apiPassword) {
-      await client.query(`ALTER ROLE api WITH PASSWORD ${client.escapeLiteral(opts.apiPassword)}`);
-    }
-
-    // 4. Verificación de la historia
-    if (result.applied.length > 0) {
-      result.ledger = (await client.query('SELECT userid, problem, detail FROM app.verify_ledger()')).rows;
-      for (const p of result.ledger) log(`  historia: usuario ${p.userid} — ${p.problem}: ${p.detail}`);
-      const broken = result.ledger.filter((p) => p.problem !== 'short');
-      if (broken.length) throw new Error(`verificación de la historia falló para ${broken.length} usuario(s)`);
     }
   } finally {
     await client.query("SELECT pg_advisory_unlock(hashtext('cocos-bootstrap'))").catch(() => undefined);

@@ -54,7 +54,7 @@ deploy/fly/setup.sh                                              # apps, volumen
 fly tokens create deploy -a cocos-challenge-a-api | gh secret set FLY_API_TOKEN
 ```
 
-Los ensayos de un deploy roto (bootstrap que falla, `/health` caído, re-run del CI de un commit viejo) se corren a mano con `deploy/fly/drills.sh`; no corren en el CI. Operación: [`docs/api/operacion.md`](docs/api/operacion.md#desplegar-en-flyio).
+Los ensayos (un merge que llega a producción, un deploy roto: bootstrap que falla, `/health` caído, re-run del CI de un commit viejo; y los datos de Postgres después de redesplegar la base) se corren a mano con `deploy/fly/drills.sh`; no corren en el CI. Operación: [`docs/api/operacion.md`](docs/api/operacion.md#desplegar-en-flyio).
 
 ## Cómo está hecho, en cinco ideas
 

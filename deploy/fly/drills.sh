@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
-# Ensayos del deploy en Fly.io (D-29; issue #12, puntos 5, 6 y 7 del plan de pruebas). Dependen
-# de Fly y de GitHub, así que NO corren en el CI: se corren a mano, con flyctl y gh
-# autenticados y la API ya desplegada desde main.
+# Ensayos del deploy en Fly.io (D-29; issue #12, puntos 4 a 7 del plan de pruebas y el volumen
+# de Postgres). Dependen de Fly y de GitHub, así que NO corren en el CI: se corren a mano, con
+# flyctl y gh autenticados y la API ya desplegada desde main.
 #
-#   deploy/fly/drills.sh             # los tres
-#   deploy/fly/drills.sh bootstrap   # 5: release cuyo bootstrap falla
-#   deploy/fly/drills.sh health      # 6: release cuyo /health no responde 2xx
-#   deploy/fly/drills.sh rerun       # 7: reejecutar el ci de un commit viejo no despliega
+#   deploy/fly/drills.sh               # merge, bootstrap, health y rerun
+#   deploy/fly/drills.sh merge [sha]   # 4: el merge (por defecto, el último de origin/main)
+#                                      #    pasó por ci y deploy, y /health lo atiende
+#   deploy/fly/drills.sh bootstrap     # 5: release cuyo bootstrap falla
+#   deploy/fly/drills.sh health        # 6: release cuyo /health no responde 2xx
+#   deploy/fly/drills.sh rerun         # 7: reejecutar el ci de un commit viejo no despliega
+#   deploy/fly/drills.sh persistence   # los datos de Postgres sobreviven a redesplegar su
+#                                      #    máquina (corta la API mientras la base reinicia)
 #
 # bootstrap y health despliegan a propósito una versión rota, armada en una copia temporal del
 # commit actual, y exigen que el deploy falle por la falla inyectada (no por un error de
@@ -141,10 +145,96 @@ drill_rerun() {
   echo "== rerun: OK, el deploy del commit viejo se frenó en el gate y sigue atendiendo $before"
 }
 
+# Punto 4. Un merge a main recorre todo el camino: el ci de su push en verde, el deploy que ese
+# ci dispara en verde, con el gate y el check de /health sobre ese commit, y /health atendiéndolo
+# desde afuera. Se corre después de mergear (espera las corridas que estén en curso).
+drill_merge() {
+  local sha ci done_at deploy i
+  need_gh
+  git fetch -q origin main
+  sha="$(git rev-parse "${1:-origin/main}^{commit}")"
+  git merge-base --is-ancestor "$sha" origin/main || fail "merge: $sha no está en origin/main"
+  echo "== merge: $sha"
+
+  ci=""
+  for ((i = 1; i <= 60; i++)); do
+    ci="$(gh run list --workflow ci --branch main --event push --commit "$sha" --json databaseId --limit 1 --jq '.[0].databaseId // empty')"
+    [ -n "$ci" ] && break
+    sleep 10
+  done
+  [ -n "$ci" ] || fail "merge: no hay un ci del push de $sha a main"
+  echo "== merge: ci $ci"
+  gh run watch "$ci" --exit-status >/dev/null || fail "merge: el ci $ci de $sha no terminó en verde"
+  done_at="$(gh run view "$ci" --json updatedAt --jq .updatedAt)"
+
+  # El deploy que dispara ese ci: el primero del workflow creado después de que terminó, y su
+  # log tiene que nombrar este commit (en un workflow_run, headSha es el último de main).
+  deploy=""
+  for ((i = 1; i <= 60; i++)); do
+    deploy="$(gh run list --workflow deploy --event workflow_run --json databaseId,createdAt --limit 20 \
+                | jq -r --arg t "$done_at" '[.[] | select(.createdAt >= $t)] | last // empty | .databaseId')"
+    [ -n "$deploy" ] && break
+    sleep 10
+  done
+  [ -n "$deploy" ] || fail "merge: el ci $ci no disparó el workflow de deploy en 10 minutos"
+  echo "== merge: deploy $deploy"
+  gh run watch "$deploy" --exit-status >/dev/null || fail "merge: el deploy $deploy no terminó en verde (gh run view $deploy --log)"
+  gh run view "$deploy" --log 2>/dev/null | grep -q "atiende $sha con ok: true" \
+    || fail "merge: el deploy $deploy no verificó /health sobre $sha (gh run view $deploy --log)"
+
+  still_serving merge "$sha"
+  echo "== merge: OK, $sha pasó por el ci $ci y el deploy $deploy y /health lo atiende"
+}
+
+# Postgres 18 con volumen (D-29). El directorio de datos efectivo está dentro del montaje de
+# deploy/fly/db.toml, y un dato escrito antes de redesplegar la máquina de la base (otra imagen
+# o configuración la reemplaza igual) sigue después. Mientras la base reinicia, la API responde
+# 503; al final tiene que volver a atender el mismo release con ok: true.
+drill_persistence() {
+  local db mount dir token before n i
+  need_fly
+  db="$(sed -n 's/^app = "\(.*\)"$/\1/p' deploy/fly/db.toml)"
+  mount="$(sed -n 's/^ *destination = "\(.*\)"$/\1/p' deploy/fly/db.toml)"
+  [ -n "$db" ] && [ -n "$mount" ] || fail "persistence: no se pudo leer app y destination de deploy/fly/db.toml"
+  sql() { fly ssh console --app "$db" -C "psql -U postgres -d cocos -Atc '$1'" 2>/dev/null | tr -d '\r'; }
+  before="$(serving persistence)"
+
+  dir="$(sql 'SHOW data_directory')"
+  case "$dir" in
+    "$mount"/*) echo "== persistence: datos en $dir, dentro del volumen ($mount)" ;;
+    *) fail "persistence: el directorio de datos ($dir) no está dentro del volumen ($mount)" ;;
+  esac
+
+  token="$(date +%s)"
+  sql "CREATE TABLE IF NOT EXISTS public.drill_persistence (token bigint); INSERT INTO public.drill_persistence VALUES ($token)" >/dev/null
+  [ "$(sql "SELECT count(*) FROM public.drill_persistence WHERE token = $token")" = "1" ] \
+    || fail "persistence: no se pudo escribir el dato de prueba"
+  echo "== persistence: escrito $token; redespliega $db"
+  fly deploy --config deploy/fly/db.toml --app "$db" --ha=false || fail "persistence: falló el redeploy de $db"
+
+  n=""
+  for ((i = 1; i <= 30; i++)); do
+    n="$(sql "SELECT count(*) FROM public.drill_persistence WHERE token = $token" || true)"
+    [ -n "$n" ] && break
+    sleep 5
+  done
+  [ "$n" = "1" ] || fail "persistence: después del redeploy el dato $token no está (count: ${n:-sin respuesta})"
+  sql 'DROP TABLE public.drill_persistence' >/dev/null
+
+  for ((i = 1; i <= 30; i++)); do
+    health | jq -e '.ok == true' >/dev/null 2>&1 && break
+    sleep 5
+  done
+  still_serving persistence "$before"
+  echo "== persistence: OK, el dato sobrevivió al redeploy de la base y la API atiende $before"
+}
+
 case "${1:-all}" in
-  bootstrap) drill bootstrap break_bootstrap bootstrap_failed ;;
-  health)    drill health break_health health_failed ;;
-  rerun)     drill_rerun ;;
-  all)       drill bootstrap break_bootstrap bootstrap_failed; drill health break_health health_failed; drill_rerun ;;
-  *)         echo "uso: $0 [bootstrap|health|rerun]" >&2; exit 2 ;;
+  merge)       drill_merge "${2:-}" ;;
+  bootstrap)   drill bootstrap break_bootstrap bootstrap_failed ;;
+  health)      drill health break_health health_failed ;;
+  rerun)       drill_rerun ;;
+  persistence) drill_persistence ;;
+  all)         drill_merge; drill bootstrap break_bootstrap bootstrap_failed; drill health break_health health_failed; drill_rerun ;;
+  *)           echo "uso: $0 [merge [sha]|bootstrap|health|rerun|persistence]" >&2; exit 2 ;;
 esac

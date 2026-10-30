@@ -142,6 +142,83 @@ describe('workflow de deploy', () => {
   });
 });
 
+// La cola del grupo de concurrencia, como la documenta GitHub: con cancel-in-progress la
+// corrida nueva cancela la que corre; si no, espera. Con queue: single (el valor por defecto)
+// puede haber un solo pendiente y el nuevo cancela al que esperaba; con queue: max esperan
+// todos (hasta 100) y arrancan en orden de llegada. Devuelve los commits que llegan a correr.
+function concurrencyBlock() {
+  const m = yml.match(/^concurrency:\n((?: {2}.+\n)+)/m);
+  if (!m) throw new Error('deploy.yml no tiene un bloque concurrency');
+  return Object.fromEntries([...m[1].matchAll(/^ {2}([\w-]+): (.+)$/gm)].map((e) => [e[1], e[2].trim()]));
+}
+function simulateQueue(c: Record<string, string>, arrivals: string[]): string[] {
+  const known = new Set(['group', 'cancel-in-progress', 'queue']);
+  for (const k of Object.keys(c)) if (!known.has(k)) throw new Error(`clave de concurrency no soportada: ${k}`);
+  const queue = c.queue ?? 'single';
+  if (!['single', 'max'].includes(queue)) throw new Error(`queue no soportada: ${queue}`);
+  if (queue === 'max' && c['cancel-in-progress'] === 'true') throw new Error('queue: max con cancel-in-progress es inválido');
+  const ran: string[] = [];
+  let running: string | null = null;
+  let pending: string[] = [];
+  for (const sha of arrivals) {
+    if (running === null) { running = sha; continue; }
+    if (c['cancel-in-progress'] === 'true') { running = sha; continue; }
+    pending = queue === 'max' ? [...pending, sha].slice(0, 100) : [sha];
+  }
+  for (let r: string | undefined = running ?? undefined; r !== undefined; r = pending.shift()) ran.push(r);
+  return ran;
+}
+
+describe('concurrencia del deploy', () => {
+  it('el simulador reproduce la cola por defecto: un re-run viejo desplaza al pendiente', () => {
+    expect(simulateQueue({ group: 'deploy', 'cancel-in-progress': 'false' }, ['A', 'B', 'viejo'])).toEqual(['A', 'viejo']);
+    expect(() => simulateQueue({ group: 'deploy', 'cancel-in-progress': 'true', queue: 'max' }, [])).toThrow(/inválido/);
+    expect(() => simulateQueue({ group: 'deploy', otra: 'x' }, [])).toThrow(/no soportada/);
+  });
+
+  it('con A desplegándose y B pendiente, un re-run del CI de un commit viejo no cancela a B', () => {
+    const c = concurrencyBlock();
+    expect(c.group).toBe('deploy');
+    // A no se corta, B llega a desplegarse, y el viejo corre después (y lo frena el gate).
+    expect(simulateQueue(c, ['A', 'B', 'viejo'])).toEqual(['A', 'B', 'viejo']);
+    expect(simulateQueue(c, ['A', 'B', 'C', 'viejo', 'D'])).toEqual(['A', 'B', 'C', 'viejo', 'D']);
+  });
+});
+
+// Postgres en Fly (deploy/fly/db.toml): la misma imagen que docker compose, con el volumen
+// montado donde compose monta el suyo. En postgres:18 el directorio de datos por defecto es
+// /var/lib/postgresql/18/docker, dentro de ese montaje; un destino distinto, o un PGDATA que lo
+// saque de ahí, dejaría los datos en el disco efímero de la máquina. Que efectivamente
+// sobrevivan a reemplazarla lo ensaya deploy/fly/drills.sh persistence, a mano, contra Fly.
+describe('Postgres en Fly', () => {
+  const dbToml = readFileSync(join(ROOT, 'deploy/fly/db.toml'), 'utf8');
+  const compose = readFileSync(join(ROOT, 'docker-compose.yml'), 'utf8');
+  const section = (toml: string, name: string) => {
+    const m = toml.match(new RegExp(`^\\[${name}\\]\\n((?:[ \\t]+.+\\n)+)`, 'm'));
+    if (!m) throw new Error(`db.toml no tiene [${name}]`);
+    return Object.fromEntries([...m[1].matchAll(/^\s*(\w+) = "(.*)"$/gm)].map((e) => [e[1], e[2]]));
+  };
+
+  it('usa la imagen de docker compose, con el volumen montado donde compose monta el suyo', () => {
+    const composeDb = compose.match(/^ {2}db:\n((?: {4}.*\n)+)/m)?.[1] ?? '';
+    expect(section(dbToml, 'build').image).toBe(composeDb.match(/^ {4}image: (.+)$/m)?.[1]);
+    const composeMount = composeDb.match(/^ {6}- pgdata:(\S+)$/m)?.[1];
+    expect(composeMount).toBe('/var/lib/postgresql');
+    expect(section(dbToml, 'mounts')).toEqual({ source: 'pgdata', destination: composeMount });
+  });
+
+  it('no cambia el directorio de datos de la imagen (PGDATA), que queda dentro del volumen', () => {
+    expect(dbToml).not.toMatch(/PGDATA/);
+    expect(compose).not.toMatch(/PGDATA/);
+  });
+
+  it('el ensayo de persistencia lee el montaje de db.toml', () => {
+    const drills = readFileSync(join(ROOT, 'deploy/fly/drills.sh'), 'utf8');
+    expect(drills).toContain("sed -n 's/^ *destination = \"\\(.*\\)\"$/\\1/p' deploy/fly/db.toml");
+    expect(drills).toMatch(/^ {2}persistence\) drill_persistence ;;$/m);
+  });
+});
+
 // deploy/fly/release-check.sh con un curl simulado: responde, en orden, cada línea de
 // RESPONSES (una por llamada; una línea `!<código>` falla con ese código de salida) y cuenta
 // las llamadas en CALLS. `sleep` también se simula: anota cuánto durmió y no espera.

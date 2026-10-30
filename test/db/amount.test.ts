@@ -114,12 +114,58 @@ describe('la cantidad por monto es la división entera en centavos', () => {
   });
 });
 
+// D-13: toda división que decide una cantidad o un importe es entera. Las dos funciones que deciden
+// una escritura con cantidades e importes no tienen ninguna división `/`, salvo la de presentación
+// del amount de la respuesta (centavos enteros → pesos con 2 decimales, exacta).
+const DECIDERS = {
+  'app.place_order(int, text, text, text, text, int, int, numeric, numeric, text)': ['imp / 100'],
+  'app.execute_limit_outcome(bigint)': [],
+} as const;
+
+/** El código PL/pgSQL sin comentarios ni literales de texto ('BUY/SELL' no es una división). */
+function codeOnly(src: string): string {
+  let out = '';
+  for (let i = 0; i < src.length; i++) {
+    if (src[i] === "'") {
+      for (i++; i < src.length && !(src[i] === "'" && src[i + 1] !== "'"); i++) if (src[i] === "'") i++;
+      out += "''";
+    } else if (src[i] === '-' && src[i + 1] === '-') {
+      while (i < src.length && src[i] !== '\n') i++;
+      out += '\n';
+    } else out += src[i];
+  }
+  return out;
+}
+
+/** Cada división del código, como `operando / operando`. */
+const divisions = (src: string) =>
+  [...codeOnly(src).matchAll(/([\w.:]+|\))\s*\/\s*([\w.:]+|\()/g)].map((m) => `${m[1]} / ${m[2]}`);
+
 describe('que no vuelva', () => {
-  it('place_order no usa floor sobre una división numeric', async () => {
-    const src = (await admin.query<{ src: string }>(
-      "SELECT prosrc AS src FROM pg_proc WHERE oid = to_regprocedure('app.place_order(int, text, text, text, text, int, int, numeric, numeric, text)')")).rows[0].src;
-    const code = src.split('\n').filter((l) => !l.trim().startsWith('--')).join('\n');
+  const source = async (sig: string) =>
+    (await admin.query<{ src: string }>('SELECT prosrc AS src FROM pg_proc WHERE oid = to_regprocedure($1)', [sig])).rows[0].src;
+
+  it.each(Object.entries(DECIDERS))('%s: sin divisiones numeric que decidan, salvo las de presentación', async (sig, allowed) => {
+    expect(divisions(await source(sig))).toEqual(allowed);
+  });
+
+  it('place_order calcula la cantidad por monto con div, sin floor', async () => {
+    const code = codeOnly(await source(Object.keys(DECIDERS)[0]));
     expect(code).not.toMatch(/floor\s*\(/);
     expect(code).toMatch(/div\(p_amount \* 100, price \* 100\)/);
+  });
+
+  it('el control detecta una división nueva en cada función, aunque siga la llamada a div', async () => {
+    const [po, ex] = await Promise.all(Object.keys(DECIDERS).map(source));
+    const planted = [
+      po.replace('v_qty := div(p_amount * 100, price * 100);', 'v_qty := div(p_amount * 100, price * 100) + 0 * (p_amount / price);'),
+      ex.replace('o.size::numeric * o.price * 100 > 1e17', 'o.size::numeric * o.price / 0.01 > 1e17'),
+    ];
+    expect(planted[0]).not.toBe(po);
+    expect(planted[1]).not.toBe(ex);
+    expect(divisions(planted[0])).toEqual(['p_amount / price', 'imp / 100']);
+    expect(divisions(planted[1])).toEqual(['o.price / 0.01']);
+    // Un literal o un comentario con "/" no cuentan.
+    expect(divisions("RAISE EXCEPTION 'BUY/SELL no aplica'; -- a / b\nx := 1;")).toEqual([]);
   });
 });

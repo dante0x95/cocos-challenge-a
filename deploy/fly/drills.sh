@@ -1,26 +1,26 @@
 #!/usr/bin/env bash
 # Ensayos del deploy en Fly.io (D-29; issue #12, puntos 4 a 7 del plan de pruebas y el volumen
-# de Postgres). Dependen de Fly y de GitHub, así que NO corren en el CI: se corren a mano, con
-# flyctl y gh autenticados y la API ya desplegada desde main.
+# de Postgres; issue #30, deploy por release). Dependen de Fly y de GitHub, así que NO corren en
+# el CI: se corren a mano, con flyctl y gh autenticados y la API ya desplegada.
 #
-#   deploy/fly/drills.sh               # merge, bootstrap, health y rerun
-#   deploy/fly/drills.sh merge [sha]   # 4: el merge (por defecto, el último de origin/main)
-#                                      #    pasó por ci y deploy, y /health lo atiende
-#   deploy/fly/drills.sh bootstrap     # 5: release cuyo bootstrap falla
-#   deploy/fly/drills.sh health        # 6: release cuyo /health no responde 2xx
-#   deploy/fly/drills.sh rerun         # 7: reejecutar el ci de un commit viejo no despliega
-#   deploy/fly/drills.sh persistence   # los datos de Postgres sobreviven a redesplegar su
-#                                      #    máquina (corta la API mientras la base reinicia)
+#   deploy/fly/drills.sh                 # release, bootstrap, health y rerun
+#   deploy/fly/drills.sh release [tag]   # 4: el release (por defecto, el último publicado) pasó
+#                                        #    por el workflow de deploy y /health lo atiende
+#   deploy/fly/drills.sh bootstrap       # 5: release cuyo bootstrap falla
+#   deploy/fly/drills.sh health          # 6: release cuyo /health no responde 2xx
+#   deploy/fly/drills.sh rerun           # 7: reejecutar el deploy de un release viejo no despliega
+#   deploy/fly/drills.sh persistence     # los datos de Postgres sobreviven a redesplegar su
+#                                        #    máquina (corta la API mientras la base reinicia)
 #
 # bootstrap y health despliegan a propósito una versión rota, armada en una copia temporal del
 # commit actual, y exigen que el deploy falle por la falla inyectada (no por un error de
 # autenticación, configuración o build) y que siga atendiendo el release anterior con ok: true.
-# rerun reejecuta con gh el ci de un commit de main anterior al desplegado y exige que el
-# workflow de deploy que eso dispara se frene en el gate, sin cambiar lo que atiende.
+# rerun reejecuta con gh el workflow de deploy de un release anterior al desplegado y exige que
+# se frene en el gate de ancestría, sin cambiar lo que atiende.
 #
 # No hay nada que restaurar: un deploy fallido no cambia las máquinas que atienden, y el
 # bootstrap que falla no deja nada aplicado en la base (una transacción, D-24). El próximo
-# merge a main despliega normalmente.
+# release despliega normalmente.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
@@ -100,90 +100,72 @@ health_failed() {
   ! grep -qi 'release.command failed' "$1" && grep -Eqi 'health ?check' "$1"
 }
 
-# Punto 7. Reejecutar el ci de un commit de main anterior al desplegado dispara el workflow de
-# deploy; el gate (release-check.sh before) lo frena y /health sigue igual. Sin el gate, ese
-# commit viejo se desplegaría encima del actual.
+# Punto 7. Reejecutar el workflow de deploy de un release anterior al desplegado: el gate de
+# ancestría (release-check.sh before) lo frena y /health sigue igual. Sin el gate, ese release
+# viejo se desplegaría encima del actual.
 drill_rerun() {
-  local before old id started run conclusion i
+  local before old id attempt i conclusion
   need_gh
   before="$(serving rerun)"
   echo "== rerun: atiende $before"
   git fetch -q origin main
   git cat-file -e "$before^{commit}" 2>/dev/null || fail "rerun: el release $before no está en la historia de origin/main"
 
-  # Un commit de main anterior al desplegado, con un ci en verde que se pueda reejecutar.
+  # Un deploy terminado de un release anterior al desplegado (en un evento release, headSha es
+  # el commit del tag).
   old=""
   while read -r rid sha; do
     if [ "$sha" != "$before" ] && git merge-base --is-ancestor "$sha" "$before"; then
       id="$rid"; old="$sha"; break
     fi
-  done < <(gh run list --workflow ci --branch main --event push --status success --json databaseId,headSha --limit 50 \
+  done < <(gh run list --workflow deploy --event release --status completed --json databaseId,headSha --limit 50 \
              | jq -r '.[] | "\(.databaseId) \(.headSha)"')
-  [ -n "$old" ] || fail "rerun: no hay un ci en verde de un commit anterior a $before para reejecutar"
-  echo "== rerun: reejecuta el ci $id del commit $old"
+  [ -n "$old" ] || fail "rerun: no hay un deploy terminado de un release anterior a $before para reejecutar"
+  echo "== rerun: reejecuta el deploy $id del commit $old"
 
-  started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  # Un re-run es otro intento de la misma corrida: espera a que empiece antes de mirarla.
+  attempt="$(gh run view "$id" --json attempt --jq .attempt)"
   gh run rerun "$id"
-  # El deploy que dispara esa corrida: el primero del workflow creado después de ahora. (Su
-  # headSha no sirve para reconocerlo: en un workflow_run es el último commit de main.)
-  run=""
-  for ((i = 1; i <= 120; i++)); do
-    run="$(gh run list --workflow deploy --event workflow_run --json databaseId,createdAt --limit 5 \
-             | jq -r --arg t "$started" '[.[] | select(.createdAt >= $t)] | last // empty | .databaseId')"
-    [ -n "$run" ] && break
-    sleep 10
+  for ((i = 1; i <= 60; i++)); do
+    [ "$(gh run view "$id" --json attempt --jq .attempt)" -gt "$attempt" ] && break
+    sleep 5
   done
-  [ -n "$run" ] || fail "rerun: el ci reejecutado no disparó el workflow de deploy en 20 minutos"
-  echo "== rerun: espera el deploy $run"
-  gh run watch "$run" --exit-status >/dev/null && fail "rerun: el deploy del commit viejo terminó bien"
-  conclusion="$(gh run view "$run" --json conclusion --jq .conclusion)"
+  gh run watch "$id" --exit-status >/dev/null && fail "rerun: el deploy del release viejo terminó bien"
+  conclusion="$(gh run view "$id" --json conclusion --jq .conclusion)"
   [ "$conclusion" = "failure" ] || fail "rerun: el deploy terminó en $conclusion, no en failure"
-  gh run view "$run" --log 2>/dev/null | grep -q 'no desciende del release actual' \
-    || fail "rerun: el deploy $run falló por otro motivo (gh run view $run --log)"
+  gh run view "$id" --log 2>/dev/null | grep -q 'no desciende del release actual' \
+    || fail "rerun: el deploy $id falló por otro motivo (gh run view $id --log)"
 
   still_serving rerun "$before"
-  echo "== rerun: OK, el deploy del commit viejo se frenó en el gate y sigue atendiendo $before"
+  echo "== rerun: OK, el deploy del release viejo se frenó en el gate y sigue atendiendo $before"
 }
 
-# Punto 4. Un merge a main recorre todo el camino: el ci de su push en verde, el deploy que ese
-# ci dispara en verde, con el gate y el check de /health sobre ese commit, y /health atendiéndolo
-# desde afuera. Se corre después de mergear (espera las corridas que estén en curso).
-drill_merge() {
-  local sha ci done_at deploy i
+# Punto 4. Un release publicado recorre todo el camino: el workflow de deploy que dispara, en
+# verde (el gate del release, staging y, con la aprobación, producción, con el gate de ancestría
+# y el check de /health sobre su commit), y /health de producción atendiéndolo desde afuera. Se
+# corre después de publicar el release (espera la corrida, también la aprobación de producción).
+drill_release() {
+  local tag sha deploy i
   need_gh
-  git fetch -q origin main
-  sha="$(git rev-parse "${1:-origin/main}^{commit}")"
-  git merge-base --is-ancestor "$sha" origin/main || fail "merge: $sha no está en origin/main"
-  echo "== merge: $sha"
+  tag="${1:-$(gh release view --json tagName --jq .tagName)}"
+  git fetch -q --tags origin
+  sha="$(git rev-parse -q --verify "refs/tags/$tag^{commit}")" || fail "release: no está el tag $tag"
+  echo "== release: $tag ($sha)"
 
-  ci=""
-  for ((i = 1; i <= 60; i++)); do
-    ci="$(gh run list --workflow ci --branch main --event push --commit "$sha" --json databaseId --limit 1 --jq '.[0].databaseId // empty')"
-    [ -n "$ci" ] && break
-    sleep 10
-  done
-  [ -n "$ci" ] || fail "merge: no hay un ci del push de $sha a main"
-  echo "== merge: ci $ci"
-  gh run watch "$ci" --exit-status >/dev/null || fail "merge: el ci $ci de $sha no terminó en verde"
-  done_at="$(gh run view "$ci" --json updatedAt --jq .updatedAt)"
-
-  # El deploy que dispara ese ci: el primero del workflow creado después de que terminó, y su
-  # log tiene que nombrar este commit (en un workflow_run, headSha es el último de main).
   deploy=""
-  for ((i = 1; i <= 60; i++)); do
-    deploy="$(gh run list --workflow deploy --event workflow_run --json databaseId,createdAt --limit 20 \
-                | jq -r --arg t "$done_at" '[.[] | select(.createdAt >= $t)] | last // empty | .databaseId')"
+  for ((i = 1; i <= 30; i++)); do
+    deploy="$(gh run list --workflow deploy --event release --commit "$sha" --json databaseId --limit 1 --jq '.[0].databaseId // empty')"
     [ -n "$deploy" ] && break
     sleep 10
   done
-  [ -n "$deploy" ] || fail "merge: el ci $ci no disparó el workflow de deploy en 10 minutos"
-  echo "== merge: deploy $deploy"
-  gh run watch "$deploy" --exit-status >/dev/null || fail "merge: el deploy $deploy no terminó en verde (gh run view $deploy --log)"
+  [ -n "$deploy" ] || fail "release: $tag no disparó el workflow de deploy en 5 minutos"
+  echo "== release: deploy $deploy"
+  gh run watch "$deploy" --exit-status >/dev/null || fail "release: el deploy $deploy no terminó en verde (gh run view $deploy --log)"
   gh run view "$deploy" --log 2>/dev/null | grep -q "atiende $sha con ok: true" \
-    || fail "merge: el deploy $deploy no verificó /health sobre $sha (gh run view $deploy --log)"
+    || fail "release: el deploy $deploy no verificó /health sobre $sha (gh run view $deploy --log)"
 
-  still_serving merge "$sha"
-  echo "== merge: OK, $sha pasó por el ci $ci y el deploy $deploy y /health lo atiende"
+  still_serving release "$sha"
+  echo "== release: OK, $tag pasó por el deploy $deploy y /health atiende $sha"
 }
 
 # Postgres 18 con volumen (D-29). El directorio de datos efectivo está dentro del montaje de
@@ -230,11 +212,11 @@ drill_persistence() {
 }
 
 case "${1:-all}" in
-  merge)       drill_merge "${2:-}" ;;
+  release)     drill_release "${2:-}" ;;
   bootstrap)   drill bootstrap break_bootstrap bootstrap_failed ;;
   health)      drill health break_health health_failed ;;
   rerun)       drill_rerun ;;
   persistence) drill_persistence ;;
-  all)         drill_merge; drill bootstrap break_bootstrap bootstrap_failed; drill health break_health health_failed; drill_rerun ;;
-  *)           echo "uso: $0 [merge [sha]|bootstrap|health|rerun|persistence]" >&2; exit 2 ;;
+  all)         drill_release; drill bootstrap break_bootstrap bootstrap_failed; drill health break_health health_failed; drill_rerun ;;
+  *)           echo "uso: $0 [release [tag]|bootstrap|health|rerun|persistence]" >&2; exit 2 ;;
 esac

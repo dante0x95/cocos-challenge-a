@@ -45,9 +45,15 @@ El CI las corre en cada PR contra Postgres 18. Flujo de trabajo, formato de comm
 
 ## Desplegar
 
-Cada commit de `main` con el CI en verde se despliega en Fly.io: una imagen publicada en GHCR con el SHA, primero en `staging` y después, con aprobación manual, en producción; en cada entorno la API y Postgres 18 en dos apps, el bootstrap antes de cambiar de versión, el tráfico a la versión nueva solo si `/health` responde, y un gate que no deja desplegar un commit anterior al que atiende ([D-29](docs/decisiones.md#d-29)).
+Se despliega en Fly.io al publicar una versión, no en cada merge:
 
-La primera vez, parado en `main` y con [`flyctl`](https://fly.io/docs/flyctl/install/) autenticado:
+```bash
+gh release create vX.Y.Z --target main --generate-notes
+```
+
+El workflow de deploy verifica que el tag sea `vX.Y.Z` y que su commit esté en `main` con el CI en verde; si no, frena con el motivo. Después construye una imagen, la publica en GHCR con el SHA y la versión, y la despliega primero en `staging` y después, con aprobación manual, en producción; en cada entorno la API y Postgres 18 en dos apps, el bootstrap antes de cambiar de versión, el tráfico a la versión nueva solo si `/health` responde, un gate que no deja desplegar un commit anterior al que atiende y la vuelta a la versión anterior si `/health` no la atiende ([D-29](docs/decisiones.md#d-29)).
+
+La primera vez, antes del primer release, parado en `main` y con [`flyctl`](https://fly.io/docs/flyctl/install/) autenticado:
 
 ```bash
 deploy/fly/setup.sh                                                                        # producción
@@ -56,7 +62,9 @@ fly tokens create deploy -a cocos-challenge-a-staging | gh secret set FLY_API_TO
 fly tokens create deploy -a cocos-challenge-a-api | gh secret set FLY_API_TOKEN --env production
 ```
 
-Los ensayos (un merge que llega a producción, un deploy roto: bootstrap que falla, `/health` caído, re-run del CI de un commit viejo; y los datos de Postgres después de redesplegar la base) se corren a mano con `deploy/fly/drills.sh`; no corren en el CI. Operación: [`docs/api/operacion.md`](docs/api/operacion.md#desplegar-en-flyio).
+Y en GitHub: los environments `staging` y `production` (Settings → Environments) creados antes de los `gh secret set --env`, con **required reviewers** en `production` (sin eso, producción se despliega sola detrás de staging), y el paquete de GHCR público después del primer release, para que Fly baje la imagen. Detalle: [`docs/api/operacion.md`](docs/api/operacion.md#desplegar-en-flyio).
+
+Los ensayos (un release que llega a producción, un deploy roto: bootstrap que falla, `/health` caído, re-run del deploy de un release viejo; y los datos de Postgres después de redesplegar la base) se corren a mano con `deploy/fly/drills.sh`; no corren en el CI. Operación: [`docs/api/operacion.md`](docs/api/operacion.md#desplegar-en-flyio).
 
 ## Cómo está hecho, en cinco ideas
 

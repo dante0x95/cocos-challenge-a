@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Primer despliegue en Fly.io (D-29): crea la app de la base con su volumen, la app de la API,
 # los secretos de las dos, y despliega. Se corre una sola vez, con flyctl autenticado y parado
-# en el commit de main que se quiere desplegar (el workflow exige después que cada commit
-# nuevo descienda del desplegado: un commit de otra rama lo frenaría):
+# en el commit de main que se quiere desplegar (el workflow exige después que el commit de cada
+# release descienda del desplegado: un commit de otra rama, o anterior, lo frenaría):
 #
 #   git switch main && git pull
 #   fly auth login
@@ -14,10 +14,11 @@
 # no se imprimen, no pasan por la línea de comandos y no quedan en el repo. Para leer el token
 # interno después: fly ssh console -a cocos-challenge-a-api -C 'printenv INTERNAL_TOKEN'.
 #
-# Después de esto, cada merge a main despliega solo (.github/workflows/deploy.yml), con el
-# secreto FLY_API_TOKEN de cada environment de GitHub: un token de deploy por app, porque un
-# token de deploy de Fly se acota a una sola (fly tokens create deploy -a <app>, que con el
-# CONFIG de staging es cocos-challenge-a-staging, y gh secret set FLY_API_TOKEN --env <entorno>).
+# Después de esto, cada release publicado (gh release create vX.Y.Z --target main
+# --generate-notes) se despliega solo (.github/workflows/deploy.yml), con el secreto
+# FLY_API_TOKEN de cada environment de GitHub: un token de deploy por app, porque un token de
+# deploy de Fly se acota a una sola (fly tokens create deploy -a <app>, que con el CONFIG de
+# staging es cocos-challenge-a-staging, y gh secret set FLY_API_TOKEN --env <entorno>).
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 

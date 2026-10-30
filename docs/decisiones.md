@@ -125,7 +125,7 @@ La migración impone una cotización por instrumento y día (`UNIQUE (instrument
 <a id="d-13"></a>
 ### D-13 — Números: se rechaza la escala de más; todo sale como string
 
-- **Entrada:** precios y montos con a lo sumo 2 decimales, como string o como entero JSON. `1.005` responde `400`: **se rechaza, no se redondea**. Un número JSON con decimales también se rechaza, porque un float no garantiza la escala. Lo aceptado se canoniza a 2 decimales (`100` → `"100.00"`) antes de seguir, también para el hash de idempotencia ([D-19](#d-19)).
+- **Entrada:** precios y montos con a lo sumo 2 decimales, como string o como entero JSON. `1.005` responde `400`: **se rechaza, no se redondea**. Un número JSON con decimales también se rechaza, porque un float no garantiza la escala. Como número JSON solo se aceptan enteros dentro de ±2⁵³ (el rango que `JSON.parse` representa exacto): `9007199254740993` llegaría como `9007199254740992` y pasaría alterado en silencio, así que responde `400` y pide el valor como string; cualquier magnitud mayor va como string (`"9007199254740993"`). Lo aceptado se canoniza a 2 decimales (`100` → `"100.00"`) antes de seguir, también para el hash de idempotencia ([D-19](#d-19)): `100` y `"100.00"` siguen siendo el mismo request. Los ids del body (`userid`, `instrumentid`) y `size` son `integer` en Postgres y se acotan a 2³¹ − 1 en la API, como los de la ruta.
 - **Salida:** importes, precios, costos, porcentajes, cantidades e ids viajan como **string** con escala fija. Un entero mayor que 2⁵³ no sobrevive a `JSON.parse` como número.
 - **En la API:** `BigInt` para todo dinero. node-postgres entrega `numeric` e `int8` como string y no se registra ningún parser que los convierta a `Number`. Un test lo verifica.
 

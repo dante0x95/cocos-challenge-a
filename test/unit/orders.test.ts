@@ -15,6 +15,57 @@ describe('OrderBody (zod)', () => {
   it('type por defecto es MARKET', () => expect(parse({ userid: 1, side: 'CASH_IN', amount: '1' }).data?.type).toBe('MARKET'));
 });
 
+// Issue #8: un entero JSON fuera de ±2⁵³ ya llega redondeado desde JSON.parse; como number solo se
+// acepta dentro de ese rango, y la magnitud mayor va como string. Los ids del body tienen el tope de int4.
+describe('OrderBody (zod) — enteros JSON fuera de ±2⁵³ y topes de los ids (issue #8)', () => {
+  const RANGE = 'entero fuera del rango exacto de JSON (±2^53); enviarlo como string';
+  const limit = (price: unknown) => parse({ userid: 1, side: 'BUY', type: 'LIMIT', instrumentid: 1, size: 1, price });
+  const cash = (amount: unknown) => parse({ userid: 1, side: 'CASH_IN', amount });
+  const messageOf = (r: ReturnType<typeof parse>, path: string) =>
+    r.error?.issues.filter((i) => i.path.join('.') === path).map((i) => i.message);
+
+  it('price 9007199254740993 y amount 12345678901234567890 como número → rechazados con el mensaje de rango', () => {
+    const p = limit(9007199254740993);
+    expect(p.success).toBe(false);
+    expect(messageOf(p, 'price')).toEqual([RANGE]);
+    const a = cash(12345678901234567890);
+    expect(a.success).toBe(false);
+    expect(messageOf(a, 'amount')).toEqual([RANGE]);
+  });
+  it('los mismos valores como string → aceptados exactos', () => {
+    expect(limit('9007199254740993').data?.price).toBe('9007199254740993.00');
+    expect(cash('12345678901234567890').data?.amount).toBe('12345678901234567890.00');
+  });
+  it('price 9007199254740991 (2⁵³ − 1) → "9007199254740991.00"; 9007199254740992 (2⁵³) → rechazado', () => {
+    expect(limit(9007199254740991).data?.price).toBe('9007199254740991.00');
+    const r = limit(9007199254740992);
+    expect(r.success).toBe(false);
+    expect(messageOf(r, 'price')).toEqual([RANGE]);
+  });
+  it('price 1e3 → "1000.00"; price 1e21 → el mensaje de rango, no el de formato', () => {
+    expect(limit(1e3).data?.price).toBe('1000.00');
+    const r = limit(1e21);
+    expect(r.success).toBe(false);
+    expect(messageOf(r, 'price')).toEqual([RANGE]);
+  });
+  it('userid e instrumentid: 2147483647 se acepta, 2147483648 se rechaza', () => {
+    const base = { side: 'BUY', type: 'MARKET', size: 1 };
+    expect(parse({ ...base, userid: 2_147_483_647, instrumentid: 2_147_483_647 }).success).toBe(true);
+    const u = parse({ ...base, userid: 2_147_483_648, instrumentid: 1 });
+    expect(u.success).toBe(false);
+    expect(u.error?.issues.map((i) => i.path.join('.'))).toEqual(['userid']);
+    const i = parse({ ...base, userid: 1, instrumentid: 2_147_483_648 });
+    expect(i.success).toBe(false);
+    expect(i.error?.issues.map((i) => i.path.join('.'))).toEqual(['instrumentid']);
+  });
+  it('size 1e9 se acepta; 1e10 se rechaza por el tope', () => {
+    expect(parse({ userid: 1, side: 'BUY', instrumentid: 1, size: 1e9 }).data?.size).toBe(1_000_000_000);
+    const r = parse({ userid: 1, side: 'BUY', instrumentid: 1, size: 1e10 });
+    expect(r.success).toBe(false);
+    expect(r.error?.issues.map((i) => i.path.join('.'))).toEqual(['size']);
+  });
+});
+
 describe('validateOrder', () => {
   const base = { userid: 1, side: 'BUY', type: 'MARKET', instrumentid: 47 } as const;
   it('size y amount a la vez → error', () => expect(validateOrder({ ...base, size: 1, amount: '1' })).toMatch(/exactamente uno/));
@@ -49,6 +100,12 @@ describe('requestHash', () => {
   it('amount y price quedan canonizados a 2 decimales', () => {
     expect(parse({ userid: 1, side: 'CASH_IN', amount: ' 007.5 ' }).data?.amount).toBe('7.50');
     expect(parse({ userid: 1, side: 'BUY', type: 'LIMIT', instrumentid: 1, size: 1, price: 900 }).data?.price).toBe('900.00');
+  });
+  it('price 100 y "100.00", y 9007199254740991 y "9007199254740991", siguen dando el mismo hash (issue #8)', () => {
+    const limit = (price: unknown) => hashOf({ userid: 1, side: 'BUY', type: 'LIMIT', instrumentid: 1, size: 1, price });
+    expect(limit(100)).toBe(limit('100.00'));
+    expect(limit(9007199254740991)).toBe(limit('9007199254740991'));
+    expect(limit(9007199254740991)).not.toBe(limit('9007199254740990'));
   });
   it('otro monto sigue dando otro hash', () =>
     expect(hashOf({ userid: 1, side: 'CASH_IN', amount: '100.00' })).not.toBe(hashOf({ userid: 1, side: 'CASH_IN', amount: '100.01' })));

@@ -6,9 +6,14 @@ import { z } from 'zod';
 import { MAX_CASH_MOVE_CENTS, MoneyError, fromCents, toCents } from './money.js';
 
 // Decimal con a lo sumo 2 decimales, como string. Se rechaza, no se redondea (D-13).
-// Un number solo se acepta si es entero: 100.5 como number no garantiza la escala.
+// Un number solo se acepta si es entero: 100.5 como number no garantiza la escala. Y solo dentro de
+// ±2⁵³ − 1: un entero mayor ya llega redondeado desde JSON.parse (9007199254740993 → …992), así que
+// se rechaza y se pide como string (issue #8).
 // Sale canonizado a 2 decimales (100, "100.0" → "100.00"): el mismo monto da el mismo hash de idempotencia (D-19).
-const Decimal2 = z.union([z.string(), z.number().int()]).transform((v, ctx) => {
+const Decimal2 = z.union([
+  z.string(),
+  z.number().int().safe('entero fuera del rango exacto de JSON (±2^53); enviarlo como string'),
+]).transform((v, ctx) => {
   const s = typeof v === 'number' ? String(v) : v.trim();
   try {
     const cents = toCents(s);
@@ -20,11 +25,15 @@ const Decimal2 = z.union([z.string(), z.number().int()]).transform((v, ctx) => {
   }
 });
 
+// Los ids y size son integer en Postgres: el tope es el de parseId (2³¹ − 1); sin él, un id mayor
+// llegaba a app.place_order y respondía 500 (22003) en vez de 400 (issue #8).
+export const Int4Id = z.number().int().positive().max(2_147_483_647);
+
 export const OrderBody = z.object({
-  userid: z.number().int().positive(),
+  userid: Int4Id,
   side: z.enum(['BUY', 'SELL', 'CASH_IN', 'CASH_OUT']),
   type: z.enum(['MARKET', 'LIMIT']).default('MARKET'),
-  instrumentid: z.number().int().positive().optional(),
+  instrumentid: Int4Id.optional(),
   size: z.number().int().positive().max(2_147_483_647).optional(),
   amount: Decimal2.optional(),   // pesos (D-11)
   price: Decimal2.optional(),    // solo LIMIT

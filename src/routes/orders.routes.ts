@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { HttpError, badRequest, notFound, route } from '../http/errors.js';
-import { OrderBody, legacyRequestHash, orderView, requestHash, validateOrder } from '../domain/orders.js';
+import { Int4Id, OrderBody, legacyRequestHash, orderView, requestHash, validateOrder } from '../domain/orders.js';
 import { cancelOrder, findOrder, placeOrder } from '../repositories/orders.repo.js';
 import { parseId } from './portfolio.routes.js';
 import { z } from 'zod';
@@ -51,7 +51,7 @@ ordersRouter.get('/orders/:id', route(async (req, res) => {
 }));
 
 // POST /orders/:id/cancel — body { userid } (D-26)
-const CancelBody = z.object({ userid: z.number().int().positive() }).strict();
+const CancelBody = z.object({ userid: Int4Id }).strict();
 
 ordersRouter.post('/orders/:id/cancel', route(async (req, res) => {
   const id = parseId(req.params.id, 'id');

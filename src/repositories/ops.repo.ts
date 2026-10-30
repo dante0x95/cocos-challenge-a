@@ -17,7 +17,8 @@ export interface ExecuteReport {
   // sus demás candidatas del lote no se intentaron.
   skipped_instruments: string[];
   // Cursor para la corrida siguiente (`after_id`); null cuando el lote se agotó y la próxima
-  // empieza de cero.
+  // empieza de cero. Si quedan candidatas y no se procesó ninguna, es el mismo cursor recibido
+  // ('0' incluido): null es solo agotamiento.
   after_id: string | null;
   // Candidatas del lote que no se intentaron porque venció `max_ms`.
   remaining: number;
@@ -89,10 +90,7 @@ export async function executeLimits(opts: ExecuteOptions = {}): Promise<ExecuteR
     }
   }
   report.remaining = batch.length - i;
-  if (more || report.remaining > 0) {
-    const last = i > 0 ? batch[i - 1].order_id : afterId;
-    report.after_id = last === '0' ? null : last;
-  }
+  if (more || report.remaining > 0) report.after_id = i > 0 ? batch[i - 1].order_id : afterId;
   return report;
 }
 

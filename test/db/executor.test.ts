@@ -2,7 +2,7 @@
 // cotización por instrumento, reparto por usuario, cursor, cabeza de línea (un usuario con el
 // lock tomado, un instrumento que se quedó sin cotización), presupuesto de tiempo, dos corridas
 // concurrentes sobre el mismo lote y validación de los parámetros del endpoint.
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { Server } from 'node:http';
 import { createApp } from '../../src/app.js';
 import { pool } from '../../src/db/pool.js';
@@ -282,20 +282,77 @@ describe('presupuesto de tiempo', () => {
   });
 });
 
+/** Demora la selección `ms` después de que Postgres responde (simula una selección más lenta que el presupuesto). */
+function slowSelection(ms: number) {
+  const original = pool.query.bind(pool) as (...a: unknown[]) => Promise<unknown>;
+  return vi.spyOn(pool, 'query').mockImplementation((async (...args: unknown[]) => {
+    const r = await original(...args);
+    if (String(args[0]).includes('app.limit_candidates')) await new Promise((ok) => setTimeout(ok, ms));
+    return r;
+  }) as never);
+}
+
+describe('presupuesto agotado durante la selección', () => {
+  it('la selección tarda más que max_ms → ninguna ejecución, remaining = el lote, after_id reanudable (el mismo cursor, también "0") y la corrida siguiente las ejecuta', async () => {
+    await drain();
+    const inst = await instrument('EX9SEL', '100.00');
+    try {
+      const ids: string[] = [];
+      for (let k = 0; k < 3; k++) ids.push(...(await sellLimits(await holder(inst, 1, 'ex9-sel'), inst, 1, '90.00')));
+      let spy = slowSelection(30);
+      let r: Awaited<ReturnType<typeof executeLimits>>;
+      try { r = await executeLimits({ max: 500, maxMs: 10 }); } finally { spy.mockRestore(); }
+      expect(r).toMatchObject({ candidates: 3, executed: [], not_crossed: [], errors: [], remaining: 3, after_id: '0' });
+      expect([...(await statuses(ids)).values()]).toEqual(['NEW', 'NEW', 'NEW']);
+      // Seguir el cursor que devolvió: las ejecuta y el lote se agota.
+      expect(await executeLimits({ max: 500, afterId: r.after_id! })).toMatchObject({ executed: ids, remaining: 0, after_id: null });
+
+      // Desde un cursor distinto de 0, el mismo caso devuelve ese cursor.
+      const more = await sellLimits(await holder(inst, 1, 'ex9-sel'), inst, 1, '90.00');
+      spy = slowSelection(30);
+      let r2: Awaited<ReturnType<typeof executeLimits>>;
+      try { r2 = await executeLimits({ max: 500, maxMs: 10, afterId: ids[2] }); } finally { spy.mockRestore(); }
+      expect(r2).toMatchObject({ candidates: 1, executed: [], remaining: 1, after_id: ids[2] });
+      expect((await executeLimits({ max: 500, afterId: r2.after_id! })).executed).toEqual(more);
+    } finally { await retire(inst); }
+  });
+});
+
 describe('dos corridas concurrentes sobre el mismo lote', () => {
-  it('cada orden se ejecuta exactamente una vez; en la otra corrida queda como no cruzada o fuera del lote', async () => {
+  it('las dos seleccionan el mismo lote (barrera con el lock del primer usuario): cada orden queda una vez en executed y una vez en not_crossed', async () => {
+    await drain();
     const inst = await instrument('EX9TWO', '100.00');
+    const users: number[] = [];
     const ids: string[] = [];
-    for (let k = 0; k < 20; k++) ids.push(...(await sellLimits(await holder(inst, 1, 'ex9-two'), inst, 1, '90.00')));
-    const [a, b] = await Promise.all([executeLimits({ max: 500 }), executeLimits({ max: 500 })]);
-    for (const r of [a, b]) {
-      expect(r.errors).toEqual([]);
-      expect(r.cancelled).toEqual([]);
-      expect(r.executed.length + r.not_crossed.length).toBe(r.candidates);
+    for (let k = 0; k < 20; k++) {
+      users.push(await holder(inst, 1, 'ex9-two'));
+      ids.push(...(await sellLimits(users[k], inst, 1, '90.00')));
     }
+    const lock = await apiClient();
+    let a: Awaited<ReturnType<typeof executeLimits>>;
+    let b: Awaited<ReturnType<typeof executeLimits>>;
+    try {
+      await lock.query('BEGIN');
+      await lock.query(userLock, [users[0]]);
+      let failed: unknown = null;
+      const runs = [executeLimits({ max: 500 }), executeLimits({ max: 500 })].map((p) => p.catch((e) => { failed = e; throw e; }));
+      runs.forEach((p) => p.catch(() => undefined));
+      // Las dos ya eligieron sus candidatas y esperan el lock de la primera orden.
+      for (;;) {
+        if (failed) throw failed;
+        const w = await admin.query<{ n: number }>(
+          "SELECT count(*)::int AS n FROM pg_stat_activity WHERE query LIKE 'SELECT app.execute_limit_outcome%' AND wait_event_type = 'Lock' AND wait_event = 'advisory'");
+        if (w.rows[0].n === 2) break;
+        await new Promise((r) => setTimeout(r, 5));
+      }
+      await lock.query('COMMIT');
+      [a, b] = await Promise.all(runs);
+    } finally { await lock.end(); }
+    for (const r of [a, b]) expect(r).toMatchObject({ candidates: 20, errors: [], cancelled: [], skipped_users: [], remaining: 0 });
     expect([...a.executed, ...b.executed].sort()).toEqual([...ids].sort());
-    for (const id of a.executed) expect(b.executed).not.toContain(id);
+    expect([...a.not_crossed, ...b.not_crossed].sort()).toEqual([...ids].sort());
     expect([...(await statuses(ids)).values()]).toEqual(Array(20).fill('FILLED'));
+    await retire(inst);
   });
 });
 
@@ -312,13 +369,57 @@ describe('POST /internal/execute-limits: parámetros', () => {
     return { status: r.status, body: (await r.json()) as Record<string, unknown> };
   };
 
-  it('max, after_id, max_ms y per_user inválidos o repetidos → 400', async () => {
-    for (const q of ['?max=1.5', '?max=abc', '?max=5&max=6', '?max=0', '?max=', '?after_id=-1', '?after_id=1.0',
-      '?max_ms=0', '?max_ms=abc', '?per_user=0', '?per_user=x', '?otro=1']) {
+  it('max, after_id, max_ms y per_user inválidos, repetidos o desconocidos → 400 con el motivo en español', async () => {
+    const cases: [string, string][] = [
+      ['?max=1.5', 'max: entero sin signo'], ['?max=abc', 'max: entero sin signo'], ['?max=', 'max: entero sin signo'],
+      ['?max=5&max=6', 'max: un solo valor por parámetro'], ['?max=0', 'max: mínimo 1'], ['?max=10001', 'max: máximo 10000'],
+      ['?after_id=-1', 'after_id: entero sin signo'], ['?after_id=1.0', 'after_id: entero sin signo'],
+      ['?max_ms=0', 'max_ms: mínimo 1'], ['?max_ms=600001', 'max_ms: máximo 600000'], ['?max_ms=abc', 'max_ms: entero sin signo'],
+      ['?per_user=0', 'per_user: mínimo 1'], ['?per_user=x', 'per_user: entero sin signo'],
+      ['?otro=1', 'parámetro desconocido: otro'],
+      // Después del corte de 1000 parámetros del parser de Express: igual se ven.
+      ['?max=5' + '&'.repeat(1000) + '&max=6', 'max: un solo valor por parámetro'],
+      ['?max=5' + '&'.repeat(1000) + '&otro=1', 'parámetro desconocido: otro'],
+    ];
+    for (const [q, message] of cases) {
       const r = await post(q);
-      expect(r.status, q).toBe(400);
-      expect(r.body.error, q).toBe('BAD_REQUEST');
+      expect(r.status, q.slice(0, 40)).toBe(400);
+      expect(r.body, q.slice(0, 40)).toEqual({ error: 'BAD_REQUEST', message });
     }
+  });
+
+  it('con candidatas, cada parámetro se aplica: max, after_id, per_user y max_ms', async () => {
+    await drain();
+    const inst = await instrument('EX9HTTP', '100.00');
+    try {
+      // Tres usuarios con una orden cada uno: max=2 y después el cursor.
+      const ids: string[] = [];
+      for (let k = 0; k < 3; k++) ids.push(...(await sellLimits(await holder(inst, 1, 'ex9-http'), inst, 1, '90.00')));
+      expect((await post('?max=2')).body).toMatchObject({ candidates: 2, executed: ids.slice(0, 2), after_id: ids[1] });
+      expect((await post(`?max=2&after_id=${ids[1]}`)).body).toMatchObject({ candidates: 1, executed: [ids[2]], after_id: null });
+
+      // Un usuario con tres: per_user=1 toma una sola.
+      const own = await sellLimits(await holder(inst, 3, 'ex9-http'), inst, 3, '90.00');
+      expect((await post('?per_user=1')).body).toMatchObject({ candidates: 1, executed: [own[0]], after_id: null });
+      await post('');   // las otras dos
+
+      // max_ms: cada ejecución tarda 50 ms (trigger); con 1 ms de presupuesto, a lo sumo una.
+      const h = await holder(inst, 3, 'ex9-http-slow');
+      const slow = await sellLimits(h, inst, 3, '90.00');
+      await admin.query(`CREATE FUNCTION app.test_slow_http() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN PERFORM pg_sleep(0.05); RETURN NEW; END $$`);
+      await admin.query(`CREATE TRIGGER test_slow_http BEFORE UPDATE ON app.orders
+        FOR EACH ROW WHEN (NEW.userid = ${h}) EXECUTE FUNCTION app.test_slow_http()`);
+      try {
+        const r4 = (await post('?max_ms=1')).body as { candidates: number; executed: string[]; remaining: number; after_id: string | null };
+        expect(r4.candidates).toBe(3);
+        expect(r4.executed.length).toBeLessThanOrEqual(1);
+        expect(r4.remaining).toBe(3 - r4.executed.length);
+        expect(r4.after_id).toBe(r4.executed.length ? slow[0] : '0');
+      } finally {
+        await admin.query('DROP TRIGGER test_slow_http ON app.orders; DROP FUNCTION app.test_slow_http()');
+      }
+    } finally { await retire(inst); }
   });
 
   it('válidos → 200 con el reporte completo', async () => {

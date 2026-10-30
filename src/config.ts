@@ -8,6 +8,9 @@ const Env = z.object({
   PG_POOL_MAX: z.coerce.number().int().positive().default(10),
   // Espera máxima por una conexión libre del pool; al vencer, 503 TIMEOUT (D-20).
   PG_CONNECT_TIMEOUT_MS: z.coerce.number().int().positive().default(2000),
+  // Plazo local de cada consulta en el driver, por encima del statement_timeout de 5 s de la base:
+  // solo actúa cuando la respuesta no puede llegar (D-20, issue #11).
+  PG_QUERY_TIMEOUT_MS: z.coerce.number().int().positive().default(7000),
   INTERNAL_TOKEN: z.string().min(1).optional(),
   // Commit desplegado: lo fija el deploy (D-29) y GET /health lo devuelve como `release`.
   RELEASE: z.string().min(1).optional(),

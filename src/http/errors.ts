@@ -54,6 +54,11 @@ export function fromDbError(err: unknown): HttpError {
   if (!e.code && POOL_TIMEOUTS.has(msg)) {
     return new HttpError(503, 'TIMEOUT', 'no hubo una conexión libre con la base a tiempo; reintentar (en POST /orders, con la misma Idempotency-Key)', 1);
   }
+  // query_timeout del driver (issue #11): la respuesta no llegó en el plazo local. La base pudo
+  // haber ejecutado la sentencia: resultado desconocido (D-20). La conexión se descarta.
+  if (!e.code && msg === 'Query read timeout') {
+    return new HttpError(503, 'TIMEOUT', 'la base no respondió a tiempo; el resultado es desconocido: reintentar con la misma Idempotency-Key', 1);
+  }
   if (connectionLostPhase(err)) return new HttpError(503, 'CONNECTION_LOST', CONNECTION_LOST_MESSAGE, 1);
   switch (e.code) {
     case 'APP01': return new HttpError(422, 'NO_PRICE', msg);

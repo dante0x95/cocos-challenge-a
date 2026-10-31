@@ -1,4 +1,5 @@
-# Tipos, tests unitarios, tests contra Postgres 18 real y build de la imagen (docs/testing.md).
+# Tipos, tests unitarios, tests contra Postgres 18 real, compatibilidad con el release anterior y
+# build de la imagen (docs/testing.md).
 # El check "ci" es obligatorio para mergear en main, y tiene que estar en verde antes de
 # correr la revisión de Codex (CONTRIBUTING.md).
 name: ci
@@ -35,6 +36,9 @@ jobs:
       TEST_PG_URL: postgresql://postgres:postgres@localhost:5432/postgres
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # La historia y los tags: la compatibilidad con el release anterior lo busca.
+          fetch-depth: 0
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
@@ -45,6 +49,9 @@ jobs:
       - name: server_version de Postgres
         run: psql "$TEST_PG_URL" -Atc 'show server_version'
       - run: pnpm test:db
+      # La API del último release vX.Y.Z escribe sobre la base que deja HEAD (D-24, issue #39).
+      - name: Compatibilidad con el release anterior
+        run: scripts/previous-release.sh
       # Desde el checkout limpio: la imagen se arma solo con lo versionado.
       - name: Imagen de Docker
         run: docker build .

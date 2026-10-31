@@ -10,6 +10,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import pg from 'pg';
 import { bootstrap } from '../../src/db/bootstrap.js';
+import { API_CONTRACT } from '../../src/db/contract.js';
 import { recreateDatabase } from '../support/global-setup.js';
 import { dbUrl, SERVER_URL } from '../support/urls.js';
 import { requestHash } from '../../src/domain/orders.js';
@@ -199,8 +200,10 @@ describe('bootstrap', () => {
         'app.place_order(int, text, text, text, text, int, int, numeric, numeric)');
       writeFileSync(join(dir, 'functions', '090_privileges.sql'), f090);
 
+      // Su contrato (issue #39): la API anterior llamaba place_order con 9 argumentos.
+      const contract9 = API_CONTRACT.map((s) => s.replace('numeric,numeric,text)', 'numeric,numeric)'));
       await recreateDatabase(DB);
-      await bootstrap({ adminUrl: url, apiPassword: 'api', dbDir: dir, ...quiet });
+      await bootstrap({ adminUrl: url, apiPassword: 'api', dbDir: dir, contract: contract9, ...quiet });
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

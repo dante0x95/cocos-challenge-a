@@ -1066,7 +1066,7 @@ describe.each(['staging', 'production'])('el job %s contra el servidor simulado'
       `docker pull -q ${I2}`,
       `docker image inspect ${I2}`,
       `docker compose up -d --wait --wait-timeout 7 db ${tag}`,
-      `docker compose run --rm -T --no-deps migrate ${tag}`,
+      `docker compose run --rm -T --no-deps -e RELEASE=${s.shas[2]} -e SERVING_RELEASE=${s.shas[0]} migrate ${tag}`,
       `docker compose up -d --wait --wait-timeout 7 --no-deps api ${tag}`,
     ]);
     expect(docker.slice(3).every((c) => c.includes(` -p cocos-${name} --project-directory ${join(s.root, name)} `))).toBe(true);
@@ -1089,6 +1089,28 @@ describe.each(['staging', 'production'])('el job %s contra el servidor simulado'
       expect.stringMatching(new RegExp(`up -d --wait --wait-timeout 7 --no-deps api \\[IMAGE=${ere(I0)} RELEASE=${s.shas[0]}\\]$`)),
     ]);
     expect(after.filter((c) => c.startsWith('curl')).at(-1)).toBe(`curl ${URLS[name]}/health`);
+  });
+
+  // Issue #39, plan de pruebas 4: el contrato que exige el bootstrap es el del release que
+  // atiende (SERVING_RELEASE, de release.env), no el del último bootstrap. Después de una vuelta
+  // atrás, el release siguiente se verifica contra el restaurado; test/bootstrap/contract prueba
+  // con Postgres real que ese contrato sigue registrado y que el restaurado sigue escribiendo.
+  it('después de una vuelta atrás, el bootstrap siguiente recibe como SERVING_RELEASE el release restaurado, no el que falló', () => {
+    const s = fresh();
+    const migrate = () => s.calls().filter((c) => / run --rm .* migrate /.test(c))
+      .map((c) => /-e RELEASE=(\S*) -e SERVING_RELEASE=(\S*) migrate /.exec(c)!.slice(1));
+    execJob(s, name, s.shas[0], I0);
+    expect(migrate()).toEqual([[s.shas[0], '']]);   // primer deploy: no atiende ninguno
+
+    s.clearCalls();
+    expect(execJob(s, name, s.shas[1], I1, { BROKEN: s.shas[1] }).status).toBe('failure');
+    expect(migrate()).toEqual([[s.shas[1], s.shas[0]]]);
+    expect(s.running(name)).toBe(`${I0} ${s.shas[0]}`);
+
+    s.clearCalls();
+    expect(execJob(s, name, s.shas[2], I2).status).toBe('success');
+    expect(migrate()).toEqual([[s.shas[2], s.shas[0]]]);
+    expect(s.running(name)).toBe(`${I2} ${s.shas[2]}`);
   });
 
   it('si la API nueva no queda sana al cambiar, vuelve a la anterior', () => {

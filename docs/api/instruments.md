@@ -6,7 +6,7 @@ Busca activos por ticker y/o nombre ([D-25](../decisiones.md#d-25)).
 
 | Parámetro | Reglas |
 |---|---|
-| `q` | obligatorio, 1 a 50 caracteres después de recortar los espacios de los extremos (solo espacios cuenta como vacío). Encuentra lo que contiene `q` en `ticker` o en `name`, y también lo que se le parece (un error de tipeo en una palabra casi completa: `galisia` → Galicia). Sin distinguir mayúsculas ni acentos: `petroleo`, `Petróleo` y `PETROLEO` buscan lo mismo. `%` y `_` se buscan literalmente. |
+| `q` | obligatorio, 1 a 50 caracteres después de recortar los espacios de los extremos (solo espacios cuenta como vacío), sin caracteres de control ([D-30](../decisiones.md#d-30)). Encuentra lo que contiene `q` en `ticker` o en `name`, y también lo que se le parece (un error de tipeo en una palabra casi completa: `galisia` → Galicia). Sin distinguir mayúsculas ni acentos: `petroleo`, `Petróleo` y `PETROLEO` buscan lo mismo. `%` y `_` se buscan literalmente. |
 | `include_cash` | `true` para incluir la moneda (ARS) o `false`; ningún otro valor. Por defecto `false`. |
 | `limit` | entero de 1 a 50; por defecto 20 |
 
@@ -39,4 +39,8 @@ El orden es: ticker exacto, ticker que empieza con `q`, nombre que empieza con `
 
 ## Errores
 
-`400 BAD_REQUEST` si falta `q`, viene vacío o solo con espacios, supera los 50 caracteres, `limit` no es un entero de 1 a 50 o `include_cash` no es `true` ni `false`.
+`400 BAD_REQUEST` si falta `q`, viene vacío o solo con espacios, supera los 50 caracteres, `limit` no es un entero de 1 a 50 o `include_cash` no es `true` ni `false`, o si `q` tiene un carácter de control: C0 (U+0000–U+001F), DEL (U+007F) o C1 (U+0080–U+009F), con el mensaje `q: q no admite caracteres de control` y sin consultar la base. El recorte de los extremos va antes: un tab o un salto de línea al principio o al final se quitan como un espacio; en el medio, `400`.
+
+El resto de lo que puede traer una URL responde `200` o `400`, nunca `500` ([D-30](../decisiones.md#d-30)): una secuencia de UTF-8 inválida o incompleta (`%FF`, `%C3`, `%ED%A0%80`) llega como U+FFFD y se busca como texto; los no-caracteres, los combinantes, las marcas de dirección (U+202E) y los de ancho cero (U+200B), también. Los 50 caracteres se cuentan sobre `q` recortado y antes de normalizar: `Æ` cuenta uno aunque `unaccent` lo convierta en `AE`. Se cuentan en unidades UTF-16, como `length` en JavaScript: un emoji o un carácter fuera del plano básico cuenta dos.
+
+`500 INTERNAL` es un error no previsto (un bug): `error interno; reintentar`. Una búsqueda es una lectura; no lleva `Idempotency-Key`.

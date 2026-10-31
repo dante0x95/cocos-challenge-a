@@ -1248,6 +1248,111 @@ describe('GET /instruments', () => {
     }
     expect((await get('/instruments?q=ARS&include_cash=false')).body.results).toEqual([]);
   });
+
+  // Issue #40: ninguna q produce un 500. `pa%00mp` llegaba a Postgres, que no admite U+0000 en
+  // text (22021), y respondía 500 pidiendo reintentar con una Idempotency-Key. Los controles se
+  // rechazan en la frontera; el resto de lo que puede traer una URL responde 200 o 400.
+  describe('caracteres de q (issue #40)', () => {
+    const CONTROL = 'q: q no admite caracteres de control';
+    const pct = (cp: number) => encodeURIComponent(String.fromCodePoint(cp));
+    const range = (from: number, to: number) => Array.from({ length: to - from + 1 }, (_, i) => from + i);
+    // Los que String.prototype.trim quita de los extremos: solos, q queda vacío.
+    const TRIMMED = new Set([0x09, 0x0a, 0x0b, 0x0c, 0x0d]);
+
+    async function noQueries<T>(fn: () => Promise<T>): Promise<T> {
+      const spy = vi.spyOn(pool, 'query');
+      try {
+        const r = await fn();
+        expect(spy).not.toHaveBeenCalled();
+        return r;
+      } finally {
+        spy.mockRestore();
+      }
+    }
+
+    it('cada control C0 (U+0000–U+001F) y DEL, en medio de texto válido y solo → 400 sin consultar la base', async () => {
+      await noQueries(async () => {
+        for (const cp of [...range(0x00, 0x1f), 0x7f]) {
+          const hex = `U+${cp.toString(16).padStart(4, '0')}`;
+          const mid = await get(`/instruments?q=pa${pct(cp)}mp`);
+          expect({ status: mid.status, body: mid.body }, `${hex} en medio`).toEqual({ status: 400, body: { error: 'BAD_REQUEST', message: CONTROL } });
+          const alone = await get(`/instruments?q=${pct(cp)}`);
+          expect({ status: alone.status, body: alone.body }, `${hex} solo`).toEqual({
+            status: 400, body: { error: 'BAD_REQUEST', message: TRIMMED.has(cp) ? 'q: q es obligatorio' : CONTROL },
+          });
+        }
+      });
+    });
+
+    it('cada control C1 (U+0080–U+009F), en medio de texto válido y solo → 400 sin consultar la base', async () => {
+      await noQueries(async () => {
+        for (const cp of range(0x80, 0x9f)) {
+          for (const q of [`pa${pct(cp)}mp`, pct(cp)]) {
+            const r = await get(`/instruments?q=${q}`);
+            expect({ status: r.status, body: r.body }, q).toEqual({ status: 400, body: { error: 'BAD_REQUEST', message: CONTROL } });
+          }
+        }
+      });
+    });
+
+    it('en los extremos: lo que trim quita (tab, saltos de línea) se recorta como un espacio; los demás controles → 400', async () => {
+      expect((await get('/instruments?q=%09pamp%0D%0A')).body).toEqual({ query: 'pamp', results: [{ id: 47, ticker: 'PAMP', name: 'Pampa Holding S.A.', type: 'ACCIONES' }] });
+      for (const q of ['%00pamp', 'pamp%00', '%7Fpamp', 'pamp%C2%85']) {
+        expect((await get(`/instruments?q=${q}`)).body, q).toEqual({ error: 'BAD_REQUEST', message: CONTROL });
+      }
+    });
+
+    // Node decodifica la query con reemplazo: una secuencia inválida llega como U+FFFD, que es texto.
+    it('UTF-8 inválido o incompleto, sustitutos sueltos, no-caracteres y U+FFFD → 200 o 400, nunca 500', async () => {
+      const raw = [
+        '%ED%A0%80',      // sustituto suelto (U+D800) codificado en UTF-8: inválido
+        '%ED%BF%BF',      // sustituto bajo (U+DFFF)
+        '%C3',            // secuencia incompleta
+        '%E2%82',         // incompleta, de tres bytes
+        '%FF',            // byte que nunca aparece en UTF-8
+        '%C0%AF',         // forma larga de "/"
+        '%F4%90%80%80',   // por encima de U+10FFFF
+        '%EF%BF%BE',      // U+FFFE, no-carácter
+        '%EF%BF%BF',      // U+FFFF, no-carácter
+        '%F4%8F%BF%BF',   // U+10FFFF, no-carácter
+        '%EF%BF%BD',      // U+FFFD
+      ];
+      for (const s of raw) {
+        for (const q of [s, `pa${s}mp`, `${s}${s}${s}`]) {
+          const r = await get(`/instruments?q=${q}`);
+          expect([200, 400], q).toContain(r.status);
+          if (r.status === 200) expect(Array.isArray(r.body.results), q).toBe(true);
+        }
+      }
+    });
+
+    it('combinantes, U+202E, U+200B y lo que unaccent expande → 200 o 400, nunca 500', async () => {
+      const samples = [
+        'pámp', 'pampä', 'é́́',       // combinantes, también apilados
+        '‮pamp', 'pa‭mp', '‏pamp',                 // RTL/LTR override y marca RTL
+        'pa​mp', '‍pamp', '﻿pamp',                 // ancho cero y BOM
+        'Æ', 'ß', '½', 'ﬁ', 'Œuvre', '㎏', 'Ǆ', '…',            // unaccent los expande a más de un carácter
+        '\u{1F600}', 'pa\u{1D400}mp',                             // fuera del plano básico
+      ];
+      for (const s of samples) {
+        const r = await get(`/instruments?q=${encodeURIComponent(s)}`);
+        expect([200, 400], s).toContain(r.status);
+        if (r.status === 200) expect(r.body.query, s).toBe(s.trim());   // trim quita el BOM (U+FEFF)
+      }
+    });
+
+    it('el máximo de 50 se cuenta sobre q recortado, antes de unaccent: 50 "Æ" (100 letras después) → 200; 51 → 400', async () => {
+      const expanded = (await admin.query<{ u: string }>('SELECT app.unaccent_immutable($1) AS u', ['Æ'.repeat(50)])).rows[0].u;
+      expect(expanded.length).toBe(100);   // la expansión existe: el test no es trivial
+      const ok = await get(`/instruments?q=%20${encodeURIComponent('Æ'.repeat(50))}%20`);
+      expect({ status: ok.status, query: ok.body.query }).toEqual({ status: 200, query: 'Æ'.repeat(50) });
+      expect((await get(`/instruments?q=${encodeURIComponent('Æ'.repeat(51))}`)).status).toBe(400);
+      // Un combinante cuenta como un carácter más.
+      const comb = `${'a'.repeat(49)}́`;
+      expect((await get(`/instruments?q=%20%20${encodeURIComponent(comb)}%20%20`)).body.query).toBe(comb);
+      expect((await get(`/instruments?q=${encodeURIComponent(comb + '́')}`)).status).toBe(400);
+    });
+  });
 });
 
 describe('internos y salud', () => {

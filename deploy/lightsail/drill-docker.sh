@@ -31,11 +31,13 @@
 # Al terminar borra solo lo que esta corrida creó, por su id o por un nombre que es solo suyo: el
 # proyecto (`down -v`, desde su directorio temporal; después exige que no quede ningún contenedor
 # ni volumen del proyecto), el Postgres del paso 0 y su volumen de secretos, la red cocos-edge si
-# la creó, las etiquetas de imagen que construyó y, al final, el registro (con su volumen).
-# remote.sh usa el proyecto fijo cocos-staging, y `down -v` borraría su volumen aunque no fuera de
-# este ensayo: si en este Docker ya hay algo de ese proyecto (contenedores o volúmenes, también sin
-# contenedores, como deja un `down` sin -v) o lo del paso 0 (su volumen y su Postgres), no empieza
-# ni crea nada más que el registro, que borra. Si no puede consultar Docker, tampoco.
+# la creó, sus etiquetas de imagen (<nombre>-<id de la corrida>: una etiqueta que ya estaba no se
+# pisa ni se borra) y, al final, el registro (con su volumen).
+# remote.sh corre con COCOS_PROJECT=cocos (aunque el entorno traiga otro): el proyecto es
+# cocos-staging, y `down -v` borraría su volumen aunque no fuera de este ensayo. Si en este Docker
+# ya hay algo de ese proyecto (contenedores o volúmenes, también sin contenedores, como deja un
+# `down` sin -v) o lo del paso 0 (su volumen y su Postgres), no empieza ni crea nada más que el
+# registro, que borra. Si no puede consultar Docker, tampoco.
 # El registro es el candado: lo crea primero con `docker create --name`, que falla si ya hay un
 # cocos-drill-registry (otro ensayo, o lo que dejó uno anterior); en ese caso no sigue ni toca
 # nada. Si algo no se pudo borrar, el registro queda (los ensayos siguientes se rechazan). Todo
@@ -54,7 +56,8 @@ SHA_HEALTH="$(printf 'c%.0s' {1..40})"
 fail() { echo "ENSAYO FALLIDO: $*" >&2; exit 1; }
 remote() { bash deploy/lightsail/remote.sh "$@"; }
 
-# Antes de crear nada más que el candado: lo que este ensayo borraría al terminar no puede existir antes.
+# Antes de crear nada más que el candado: lo que este ensayo borraría al terminar no puede
+# existir antes.
 refuse() { echo "NO SE ENSAYA: $*" >&2; exit 2; }
 absent() {   # descripción, comando de docker que lista; vacío = no hay
   local what="$1" out; shift
@@ -64,8 +67,11 @@ absent() {   # descripción, comando de docker que lista; vacío = no hay
 
 # Lo que esta corrida creó, por id: la limpieza no toca nada más.
 ROOT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/cocos-drill.XXXXXX")"
+RUN="${ROOT_DIR##*.}"   # de esta corrida: sus etiquetas de imagen y su volumen no son de nadie más
 REGISTRY_ID=""; PG_ID=""; EDGE_ID=""; SECRETS_VOLUME=""; BUILT=()
-export COCOS_ROOT="$ROOT_DIR" COMPOSE_WAIT_TIMEOUT="${COMPOSE_WAIT_TIMEOUT:-90}"
+# COCOS_PROJECT fijo: el proyecto que despliega remote.sh es el que se comprueba y se limpia,
+# aunque el entorno traiga otro.
+export COCOS_ROOT="$ROOT_DIR" COCOS_PROJECT=cocos COMPOSE_WAIT_TIMEOUT="${COMPOSE_WAIT_TIMEOUT:-90}"
 DIR="$ROOT_DIR/staging"
 
 # Lo compartido primero y el candado al final: mientras algo quede, otro ensayo se rechaza.
@@ -117,28 +123,28 @@ absent "un volumen cocos-drill-secrets" docker volume ls -q --filter name=cocos-
 
 echo "== imágenes"
 docker start "$REGISTRY_ID" >/dev/null || fail "no arrancó el registro local (¿el puerto $PORT está ocupado?)"
-docker build -q -t "$REG:good" . >/dev/null
-BUILT+=("$REG:good")
+docker build -q -t "$REG:good-$RUN" . >/dev/null
+BUILT+=("$REG:good-$RUN")
 ctx="$ROOT_DIR/build"
 mkdir -p "$ctx"
 cat > "$ctx/999_drill.sql" <<'SQL'
 DO $$ BEGIN RAISE EXCEPTION 'ensayo: bootstrap fallido'; END $$;
 SQL
-docker build -q -t "$REG:bad-boot" -f - "$ctx" >/dev/null <<EOF
-FROM $REG:good
+docker build -q -t "$REG:bad-boot-$RUN" -f - "$ctx" >/dev/null <<EOF
+FROM $REG:good-$RUN
 COPY 999_drill.sql db/migrations/999_drill.sql
 EOF
-BUILT+=("$REG:bad-boot")
-docker build -q -t "$REG:bad-health" - >/dev/null <<EOF
-FROM $REG:good
+BUILT+=("$REG:bad-boot-$RUN")
+docker build -q -t "$REG:bad-health-$RUN" - >/dev/null <<EOF
+FROM $REG:good-$RUN
 CMD ["node", "-e", "require('http').createServer((q, s) => { s.statusCode = 503; s.end('{}'); }).listen(3000)"]
 EOF
-BUILT+=("$REG:bad-health")
+BUILT+=("$REG:bad-health-$RUN")
 digest() {
   docker push -q "$REG:$1" >/dev/null
   docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$REG:$1" | grep "^$REG@sha256:" | head -1
 }
-GOOD="$(digest good)"; BOOT="$(digest bad-boot)"; HEALTH="$(digest bad-health)"
+GOOD="$(digest "good-$RUN")"; BOOT="$(digest "bad-boot-$RUN")"; HEALTH="$(digest "bad-health-$RUN")"
 
 echo "== 0. permisos de los secretos, como los deja setup.sh"
 # Los escribe root en un contenedor, en un volumen (un sistema de archivos de Linux en cualquier
@@ -146,7 +152,7 @@ echo "== 0. permisos de los secretos, como los deja setup.sh"
 # por la ruta del volumen, como compose monta un secreto de archivo: un bind mount.
 p0="$(openssl rand -hex 24)"; t0="$(openssl rand -hex 24)"
 # Con un nombre de esta corrida: `docker volume create` no falla si el volumen ya existe.
-SECRETS_VOLUME="$(docker volume create "cocos-drill-secrets-${ROOT_DIR##*.}")" || { SECRETS_VOLUME=""; fail "0: no se pudo crear el volumen de los secretos"; }
+SECRETS_VOLUME="$(docker volume create "cocos-drill-secrets-$RUN")" || { SECRETS_VOLUME=""; fail "0: no se pudo crear el volumen de los secretos"; }
 docker run --rm -u 0 -v "$SECRETS_VOLUME:/s" -e P0="$p0" -e T0="$t0" --entrypoint sh "$GOOD" -ec '
   cd /s
   printf %s "$P0" > postgres_password; printf %s "$T0" > internal_token; printf %s "$T0" > control

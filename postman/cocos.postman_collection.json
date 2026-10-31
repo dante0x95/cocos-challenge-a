@@ -1461,7 +1461,7 @@
                 "exec": [
                   "    pm.test('200 con el resultado de la corrida', () => {",
                   "      pm.response.to.have.status(200);",
-                  "      pm.expect(pm.response.json()).to.have.all.keys('candidates', 'executed', 'not_crossed', 'cancelled', 'errors', 'skipped_users', 'skipped_instruments', 'after_id', 'remaining');",
+                  "      pm.expect(pm.response.json()).to.have.all.keys('candidates', 'executed', 'not_crossed', 'cancelled', 'errors', 'skipped_users', 'overflow_users', 'skipped_instruments', 'after_id', 'remaining');",
                   "    });"
                 ]
               }

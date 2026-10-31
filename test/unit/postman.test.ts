@@ -183,6 +183,18 @@ describe('colección de Postman', () => {
     expect(missingRoutes(apiRoutes(), requests.map((r) => r.request))).toEqual([]);
   });
 
+  // `to.have.all.keys` falla con un campo nuevo: la verificación del executor sigue a ExecuteReport.
+  it('el executor se verifica con los campos de ExecuteReport', () => {
+    const repo = readFileSync(resolve(ROOT, 'src/repositories/ops.repo.ts'), 'utf8');
+    const body = repo.match(/export interface ExecuteReport \{\n([\s\S]*?)\n\}/)?.[1];
+    expect(body, 'ExecuteReport en src/repositories/ops.repo.ts').toBeTruthy();
+    const fields = [...body!.matchAll(/^ {2}(\w+):/gm)].map((m) => m[1]).sort();
+    expect(fields).toContain('overflow_users');
+    const script = scriptsOf(byName('Ejecutar las LIMIT que cruzan').item, 'test').flat().join('\n');
+    const keys = script.match(/have\.all\.keys\(([^)]*)\)/)?.[1].match(/'(\w+)'/g)?.map((k) => k.slice(1, -1)).sort();
+    expect(keys).toEqual(fields);
+  });
+
   it('no lleva secretos: el token interno sale del environment', () => {
     const text = JSON.stringify(collection);
     expect(text).not.toContain(envValue(environments.local, 'internalToken'));

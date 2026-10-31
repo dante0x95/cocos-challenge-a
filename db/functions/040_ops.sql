@@ -49,6 +49,11 @@ END $$;
 --              MONEDA. Solo puede venir de una base preexistente (D-24): place_order no las crea.
 --              El bootstrap las cancela con cancel_reason = 'UNBACKED' (cancel_unbacked) y lo
 --              registra, en vez de abortar; una NEW es una decisión pendiente, no un hecho (D-12).
+--   'tope'     una NEW con importe (size × price) por encima de 10^15 ARS (D-14, issue #41): una
+--              por fila. Tampoco la crea place_order. El bootstrap la cancela con cancel_reason =
+--              'LIMIT' (cancel_over_cap) y lo registra, sin abortar. Se señala antes que el fold,
+--              así que también para un usuario con 'overflow', y no cuenta en 'reserva': se
+--              cancela antes de cancel_unbacked y no le quita respaldo a las demás.
 CREATE OR REPLACE FUNCTION app.verify_ledger()
 RETURNS TABLE (userid int, problem text, detail text)
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, app, pg_temp AS $$
@@ -57,6 +62,12 @@ DECLARE u int; fold_cash bigint; sum_cash bigint; res_cash numeric; r record; sh
 BEGIN
   FOR u IN SELECT DISTINCT o.userid FROM app.orders o WHERE o.status IN ('FILLED', 'NEW') ORDER BY 1 LOOP
     fold_cash := NULL; shorts := '{}'; a_inst := '{}'; a_qty := '{}';
+    FOR r IN SELECT o.id, o.size::numeric * o.price AS amount FROM app.orders o
+              WHERE o.userid = u AND o.status = 'NEW' AND o.size::numeric * o.price > 1e15 ORDER BY o.id LOOP
+      userid := u; problem := 'tope';
+      detail := format('orden %s pendiente con importe %s ARS > 10^15 ARS: no se ejecuta (D-14)', r.id, r.amount);
+      RETURN NEXT;
+    END LOOP;
     BEGIN
       FOR r IN SELECT s.kind, s.instrumentid, s.qty, s.cash_cents FROM app.c_state(u) s LOOP
         IF r.kind = 0 THEN
@@ -86,7 +97,8 @@ BEGIN
     END LOOP;
     -- Reservas de las NEW (issue #6), contra el cash y las posiciones de la misma pasada del fold.
     SELECT COALESCE(sum(o.size::numeric * o.price * 100), 0) INTO res_cash
-      FROM app.orders o WHERE o.userid = u AND o.status = 'NEW' AND o.side = 'BUY';
+      FROM app.orders o WHERE o.userid = u AND o.status = 'NEW' AND o.side = 'BUY'
+                          AND o.size::numeric * o.price <= 1e15;
     -- Sin compras NEW no hay nada que respaldar, aunque el cash heredado sea negativo.
     IF res_cash > 0 AND res_cash > fold_cash THEN
       userid := u; problem := 'reserva';
@@ -96,7 +108,8 @@ BEGIN
     END IF;
     FOR r IN SELECT x.instrumentid, x.reserved, COALESCE(p.q, 0) AS qty
                FROM (SELECT o.instrumentid, sum(o.size) AS reserved FROM app.orders o
-                      WHERE o.userid = u AND o.status = 'NEW' AND o.side = 'SELL' GROUP BY o.instrumentid) x
+                      WHERE o.userid = u AND o.status = 'NEW' AND o.side = 'SELL'
+                        AND o.size::numeric * o.price <= 1e15 GROUP BY o.instrumentid) x
                LEFT JOIN unnest(a_inst, a_qty) AS p(i, q) ON p.i = x.instrumentid
               WHERE x.reserved > COALESCE(p.q, 0) ORDER BY 1 LOOP
       userid := u; problem := 'reserva';
@@ -104,7 +117,8 @@ BEGIN
       RETURN NEXT;
     END LOOP;
     FOR r IN SELECT o.id, i.ticker FROM app.orders o JOIN app.instruments i ON i.id = o.instrumentid
-              WHERE o.userid = u AND o.status = 'NEW' AND i.type = 'MONEDA' ORDER BY o.id LOOP
+              WHERE o.userid = u AND o.status = 'NEW' AND i.type = 'MONEDA'
+                AND o.size::numeric * o.price <= 1e15 ORDER BY o.id LOOP
       userid := u; problem := 'reserva';
       detail := format('orden %s pendiente sobre la moneda %s: BUY/SELL no aplica sobre una moneda', r.id, r.ticker);
       RETURN NEXT;
@@ -148,6 +162,26 @@ BEGIN
       RETURN NEXT;
     END IF;
   END LOOP;
+END $$;
+
+-- Cancela las NEW de un usuario con importe (size × price) por encima de 10^15 ARS
+-- (cancel_reason = 'LIMIT', D-14, issue #41) y devuelve sus ids, en orden de id. Lo llama el
+-- bootstrap para cada usuario que verify_ledger señala con 'tope', dentro de su transacción y
+-- antes de cancel_unbacked: así lo que reservaban no cuenta al decidir el respaldo de las demás.
+-- No lee el fold: el tope es de la orden, y una historia con 'overflow' no impide cancelarla.
+-- Su clave de idempotencia, si la tiene, sigue dando su 201 original (D-19).
+CREATE OR REPLACE FUNCTION app.cancel_over_cap(p_userid int)
+RETURNS TABLE (order_id bigint)
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, app, pg_temp SET lock_timeout = '2s' AS $$
+BEGIN
+  PERFORM app.deploy_barrier();
+  PERFORM app.lock_user(p_userid);
+  RETURN QUERY
+    WITH c AS (
+      UPDATE app.orders x SET status = 'CANCELLED', cancel_reason = 'LIMIT'
+       WHERE x.userid = p_userid AND x.status = 'NEW' AND x.size::numeric * x.price > 1e15
+      RETURNING x.id)
+    SELECT c.id::bigint FROM c ORDER BY c.id;
 END $$;
 
 -- Estado para GET /health.

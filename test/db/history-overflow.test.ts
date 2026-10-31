@@ -57,7 +57,10 @@ const countOf = async (sql: string, u: number) => (await admin.query<{ n: number
 const postOrder = async (key: string, body: Record<string, unknown>) => {
   const r = await fetch(`${base}/orders`, {
     method: 'POST', headers: { 'content-type': 'application/json', 'Idempotency-Key': key }, body: JSON.stringify(body) });
-  return { status: r.status, retryAfter: r.headers.get('retry-after'), body: (await r.json()) as Record<string, string> };
+  return {
+    status: r.status, retryAfter: r.headers.get('retry-after'), replay: r.headers.get('idempotent-replay'),
+    body: (await r.json()) as Record<string, string>,
+  };
 };
 
 beforeAll(async () => {
@@ -113,9 +116,34 @@ describe('historia fuera de los tipos: un estado conocido, no un 500', () => {
     expect(await countOf('SELECT count(*)::int AS n FROM app.idempotency_keys WHERE userid = $1', u)).toBe(0);
   });
 
-  it('el executor saltea al usuario (overflow_users, una vez), no lo anota en errors, deja sus NEW intactas y ejecuta las de los demás', async () => {
+  it('una clave grabada antes de que la historia desborde sigue dando su replay idéntico; una clave nueva → 409', async () => {
+    const u = await newUser('ovf57-replay');
+    const req = { userid: u, side: 'CASH_IN', amount: '1.00' };
+    const first = await postOrder('dep', req);
+    expect({ status: first.status, replay: first.replay }).toEqual({ status: 201, replay: 'false' });
+    const key = async () => (await admin.query(
+      'SELECT request_hash, created_at, http_status, response_body, order_id FROM app.idempotency_keys WHERE userid = $1', [u])).rows;
+    const keyBefore = await key();
+    // Después, la historia pasa a desbordar (balance_seq 2, después del depósito).
+    await filled(u, inst, 'BUY', 2_147_483_647, '9999999999999999.99', 2);
+    await expect(admin.query('SELECT * FROM app.c_state($1)', [u])).rejects.toMatchObject({ code: 'APP07' });
+    const orders = await countOf('SELECT count(*)::int AS n FROM app.orders WHERE userid = $1', u);
+
+    const again = await postOrder('dep', req);
+    expect({ status: again.status, replay: again.replay, body: again.body }).toEqual({ status: 201, replay: 'true', body: first.body });
+    expect(await key()).toEqual(keyBefore);
+    const fresh = await postOrder('dep2', req);
+    expect({ status: fresh.status, error: fresh.body.error }).toEqual({ status: 409, error: 'HISTORY_OVERFLOW' });
+    expect(await countOf('SELECT count(*)::int AS n FROM app.orders WHERE userid = $1', u)).toBe(orders);
+    expect(await countOf('SELECT count(*)::int AS n FROM app.idempotency_keys WHERE userid = $1', u)).toBe(1);
+  });
+
+  it('el executor saltea a cada usuario con overflow (overflow_users, todos y una vez cada uno), no los anota en errors, deja sus NEW intactas y ejecuta las de los demás', async () => {
     const u = await overflowUser();
-    const mine = await pending(u, inst, 'BUY', 3, 1, '100.00');
+    const u2 = await overflowUser();
+    // Intercaladas por id: u, u2, u, u2, u. Después de la primera de cada uno, las demás se saltean.
+    const mine: string[] = [];
+    for (const who of [u, u2, u, u2, u]) mine.push(...await pending(who, inst, 'BUY', 1, 1, '100.00'));
     // Otro usuario con cash, con una NEW posterior que cruza en el mismo instrumento.
     const other = await newUser('ovf57-other');
     await filled(other, ars, 'CASH_IN', 100_000, '0.01', 1);
@@ -123,8 +151,9 @@ describe('historia fuera de los tipos: un estado conocido, no un 500', () => {
 
     for (let run = 0; run < 2; run++) {
       const r = await executeLimits({ max: 10_000, perUser: 10_000, maxMs: 60_000 });
-      expect(r.overflow_users, `corrida ${run}`).toEqual([String(u)]);
+      expect(r.overflow_users, `corrida ${run}`).toEqual([String(u), String(u2)]);
       expect(r.skipped_users, `corrida ${run}`).not.toContain(String(u));
+      expect(r.skipped_users, `corrida ${run}`).not.toContain(String(u2));
       expect(r.errors.filter((e) => mine.includes(e.order_id)), `corrida ${run}`).toEqual([]);
       expect(r.cancelled.filter((c) => mine.includes(c.order_id)), `corrida ${run}`).toEqual([]);
       if (run === 0) expect(r.executed).toContain(theirs);

@@ -1093,11 +1093,13 @@ describe('bootstrap de un release anterior sobre una base que migró uno posteri
       await expect(bootstrap({ adminUrl: url, apiPassword: 'otra-clave', release: 'a', servingRelease: 'a', ...quiet }))
         .rejects.toThrow(message);
       // La CLI, que es lo que corre el deploy: sale con 1 y el deploy se corta antes del cambio de
-      // versión. Con una escritura en curso, porque frena antes de tomar la barrera.
+      // versión. Con una escritura en curso, porque frena antes de tomar la barrera. Si la tomara,
+      // esperaría al escritor: spawnSync bloquea el hilo de la prueba (ni el COMMIT ni el plazo de
+      // vitest corren), así que el plazo lo pone el propio spawnSync, que termina la CLI.
       await writer.query('BEGIN');
       await writer.query("SELECT pg_advisory_xact_lock_shared(hashtext('deploy'))");
       const cli = spawnSync(resolve('node_modules/.bin/tsx'), [resolve('src/db/bootstrap.ts')], {
-        encoding: 'utf8',
+        encoding: 'utf8', timeout: 20_000,
         env: { ...process.env, DATABASE_ADMIN_URL: url, API_DB_PASSWORD: 'otra-clave', DB_DIR: resolve('db'), RELEASE: 'a', SERVING_RELEASE: 'a' },
       });
       expect(cli.status, cli.stderr).toBe(1);

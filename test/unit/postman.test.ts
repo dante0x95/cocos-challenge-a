@@ -85,7 +85,7 @@ const fill = (s: State, text: string) =>
   text.replace(/\{\{([^}]+)\}\}/g, (all, key: string) => resolveVar(s, key) ?? all);
 
 /** Corre un script de la colección; devuelve si pidió saltear el request. */
-function runScript(exec: string[], s: State, response?: unknown): boolean {
+function runScript(exec: string[], s: State, response?: unknown, code = 200): boolean {
   let skipped = false;
   const pm = {
     environment: { get: (k: string) => s.env[k] },
@@ -98,7 +98,7 @@ function runScript(exec: string[], s: State, response?: unknown): boolean {
     execution: { skipRequest: () => { skipped = true; } },
     // Las aserciones no se evalúan acá (eso lo hace newman); sí lo que el script guarda.
     test: () => {},
-    response: { json: () => response, headers: { get: () => null } },
+    response: { code, json: () => response, headers: { get: () => null } },
   };
   runInNewContext(exec.join('\n'), { pm, console: { log: () => {} }, JSON });
   return skipped;
@@ -114,8 +114,8 @@ const prerequest = (r: Located, s: State, root: Collection = collection) => {
     .flatMap((i) => scriptsOf(i, 'prerequest'))
     .reduce((skipped, exec) => runScript(exec, s) || skipped, false);
 };
-const testScript = (r: Located, s: State, response: unknown) => {
-  for (const exec of scriptsOf(r.item, 'test')) runScript(exec, s, response);
+const testScript = (r: Located, s: State, response: unknown, code = 200) => {
+  for (const exec of scriptsOf(r.item, 'test')) runScript(exec, s, response, code);
 };
 
 const requests = requestsOf(collection);
@@ -126,6 +126,14 @@ const byName = (name: string, list = requests) => {
 };
 const idempotencyKey = (r: Located, s: State) =>
   fill(s, r.request.header.find((h) => h.key === 'Idempotency-Key')?.value ?? '');
+/** Corre Órdenes en orden, como el Runner: cada request no salteado recibe una respuesta con `code`. */
+const fullRun = (
+  s: State, list = requests, root: Collection = collection, code: (r: Located) => number = () => 201,
+) => {
+  for (const r of list.filter((x) => x.parents.some((p) => p.name === 'Órdenes'))) {
+    if (!prerequest(r, s, root)) testScript(r, s, { id: '15', status: 'NEW', positions: [], cash: {} }, code(r));
+  }
+};
 /** Una copia de la colección con un script cambiado por `edit`, para los controles. */
 const mutated = (edit: (json: string) => string) => {
   const copy = JSON.parse(edit(JSON.stringify(collection))) as Collection;
@@ -275,11 +283,50 @@ describe('scripts de la colección', () => {
   });
 
   it('una corrida completa termina con runId vacío: la siguiente usa claves nuevas', () => {
-    const { s, first } = depositKeys(requests, collection);
-    testScript(byName('Portfolio después de operar'), s, { positions: [], cash: {} });
+    const s = newState(environments.local);
+    fullRun(s);
     expect(s.collection.get('runId')).toBe('');
     const deposit = byName('Depositar pesos (CASH_IN)');
     prerequest(deposit, s);
+    const next = idempotencyKey(deposit, s);
+    fullRun(s);
+    prerequest(deposit, s);
+    expect(idempotencyKey(deposit, s)).not.toBe(next);
+  });
+
+  // El cierre no borra la clave de una escritura cuyo resultado no se conoce: ni un portfolio
+  // consultado suelto después de un depósito sin respuesta, ni una corrida con un 5xx.
+  it('una consulta suelta después de un depósito sin respuesta conserva la clave', () => {
+    const { s, first } = depositKeys(requests, collection);
+    testScript(byName('Portfolio después de operar'), s, { positions: [], cash: {} });
+    expect(s.collection.get('runId')).not.toBe('');
+    const deposit = byName('Depositar pesos (CASH_IN)');
+    prerequest(deposit, s);
+    expect(idempotencyKey(deposit, s)).toBe(first);
+  });
+
+  it('una corrida con un 5xx en el depósito conserva la clave para reenviarlo', () => {
+    const s = newState(environments.local);
+    const deposit = byName('Depositar pesos (CASH_IN)');
+    // El depósito y su replay (la misma clave) responden 503: el resultado sigue sin conocerse.
+    const replay = byName('Repetir el depósito → replay');
+    fullRun(s, requests, collection, (r) => (r === deposit || r === replay ? 503 : 201));
+    expect(s.collection.get('runId')).not.toBe('');
+    prerequest(deposit, s);
+    const key = idempotencyKey(deposit, s);
+    // El reenvío responde 201: la corrida siguiente ya puede cerrar.
+    testScript(deposit, s, { id: '1' }, 201);
+    expect(idempotencyKey(deposit, s)).toBe(key);
+    testScript(byName('Portfolio después de operar'), s, { positions: [], cash: {} });
+    expect(s.collection.get('runId')).toBe('');
+  });
+
+  it('control: un cierre incondicional borra la clave del depósito sin respuesta', () => {
+    const eager = mutated((j) => j.replace('if (pending.length === 0) {', 'if (true) {'));
+    const { s, first } = depositKeys(eager.list, eager.copy);
+    testScript(byName('Portfolio después de operar', eager.list), s, { positions: [], cash: {} });
+    const deposit = byName('Depositar pesos (CASH_IN)', eager.list);
+    prerequest(deposit, s, eager.copy);
     expect(idempotencyKey(deposit, s)).not.toBe(first);
   });
 
@@ -299,7 +346,7 @@ describe('scripts de la colección', () => {
     'Consultar la LIMIT', 'Consultar la LIMIT como otro usuario → 404', 'Consultar sin userid → 400',
     'Cancelar la LIMIT', 'Cancelar otra vez → 409',
   ];
-  const afterLimit = (list: Located[], root: Collection) => {
+  const afterLimit = (list: Located[], root: Collection): State => {
     const s = newState(environments.local);
     prerequest(byName('Comprar LIMIT (queda NEW)', list), s, root);
     testScript(byName('Comprar LIMIT (queda NEW)', list), s, { id: '15', status: 'NEW' });
@@ -325,12 +372,28 @@ describe('scripts de la colección', () => {
   });
 
   it('después de una corrida completa, la LIMIT anterior no se reusa', () => {
-    const s = afterLimit(requests, collection);
-    testScript(byName('Portfolio después de operar'), s, { positions: [], cash: {} });
+    const s = newState(environments.local);
+    fullRun(s);
+    expect(s.collection.get('limitOrder')).toBe('');
     expect(sentWith(requests, collection, s)).toEqual([]);
     // Ni con una variable limitId que quedó de antes.
     s.collection.set('limitId', '15');
     expect(sentWith(requests, collection, s)).toEqual([]);
+  });
+
+  it('otra corrida en el mismo environment y con el mismo userid no usa la LIMIT de la anterior', () => {
+    const s = afterLimit(requests, collection);
+    // Otra intención: runId vaciado a mano y la colección crea uno nuevo.
+    s.collection.set('runId', '');
+    expect(sentWith(requests, collection, s)).toEqual([]);
+    expect(s.collection.get('runId')).not.toBe('');
+  });
+
+  it('control: un guard que no compara runId envía la LIMIT de la corrida anterior', () => {
+    const blind = mutated((j) => j.replaceAll(`limit.runId === pm.collectionVariables.get('runId')`, 'true'));
+    const s = afterLimit(blind.list, blind.copy);
+    s.collection.set('runId', '');
+    expect(sentWith(blind.list, blind.copy, s)).toEqual(LIMIT_DEPENDENTS);
   });
 
   it('control: un guard que no mira el environment envía el id a staging', () => {

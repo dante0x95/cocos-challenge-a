@@ -2,7 +2,7 @@
   "info": {
     "_postman_id": "6f1d3a52-49c0-4c6e-9a49-2d6c0c0c0049",
     "name": "Cocos challenge — API",
-    "description": "Los endpoints de la API con verificaciones (docs/api/). Se corre entera con el Collection Runner o con newman, contra uno de los environments de postman/:\n\n- local: docker compose up (http://localhost:3000, token de desarrollo).\n- staging: el token interno va vacío; se completa como valor actual (no se exporta) o el folder Interno se saltea.\n- production: solo lecturas (allowWrites = \"false\"): Órdenes e Interno se saltean.\n\nLas claves de idempotencia llevan runId: un request reenviado (por ejemplo, después de un timeout) usa la misma clave y recupera el resultado. Una corrida completa de Órdenes vacía runId al terminar, así que la siguiente usa claves nuevas; después de una corrida cortada, vaciar runId para empezar otra intención.",
+    "description": "Los endpoints de la API con verificaciones (docs/api/). Se corre entera con el Collection Runner o con newman, contra uno de los environments de postman/:\n\n- local: docker compose up (http://localhost:3000, token de desarrollo).\n- staging: el token interno va vacío; se completa como valor actual (no se exporta) o el folder Interno se saltea.\n- production: solo lecturas (allowWrites = \"false\"): Órdenes e Interno se saltean.\n\nLas claves de idempotencia llevan runId: un request reenviado (por ejemplo, después de un timeout) usa la misma clave y recupera el resultado. Al final de Órdenes, runId se vacía solo si cada escritura con clave tuvo una respuesta definitiva (no 5xx) en esa corrida, así que la siguiente usa claves nuevas; si alguna quedó sin resultado, se conserva. Para empezar otra intención después de una corrida cortada, vaciar runId.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "event": [
@@ -25,6 +25,10 @@
     },
     {
       "key": "limitOrder",
+      "value": ""
+    },
+    {
+      "key": "settled",
       "value": ""
     },
     {
@@ -427,7 +431,20 @@
                   "      const o = pm.response.json();",
                   "      pm.expect([o.size, o.price, o.amount]).to.eql(['10000000', '0.01', '100000.00']);",
                   "    });",
-                  "    pm.collectionVariables.set('cashInId', pm.response.json().id);"
+                  "    pm.collectionVariables.set('cashInId', pm.response.json().id);",
+                  "  ",
+                  "",
+                  "// Respuesta definitiva (no 5xx): el resultado de la clave cash-in ya se conoce.",
+                  "if (pm.response.code < 500) {",
+                  "  const runId = pm.collectionVariables.get('runId');",
+                  "  let settled = { runId, keys: [] };",
+                  "  try {",
+                  "    const prev = JSON.parse(pm.collectionVariables.get('settled') || 'null');",
+                  "    if (prev && prev.runId === runId && Array.isArray(prev.keys)) settled = prev;",
+                  "  } catch (e) { /* se reemplaza */ }",
+                  "  if (!settled.keys.includes('cash-in')) settled.keys.push('cash-in');",
+                  "  pm.collectionVariables.set('settled', JSON.stringify(settled));",
+                  "}"
                 ]
               }
             }
@@ -476,7 +493,19 @@
                   "      pm.response.to.have.status(201);",
                   "      pm.expect(pm.response.json().id).to.eql(pm.collectionVariables.get('cashInId'));",
                   "      pm.expect(pm.response.headers.get('Idempotent-Replay')).to.eql('true');",
-                  "    });"
+                  "    });",
+                  "  ",
+                  "// Respuesta definitiva (no 5xx): el resultado de la clave cash-in ya se conoce.",
+                  "if (pm.response.code < 500) {",
+                  "  const runId = pm.collectionVariables.get('runId');",
+                  "  let settled = { runId, keys: [] };",
+                  "  try {",
+                  "    const prev = JSON.parse(pm.collectionVariables.get('settled') || 'null');",
+                  "    if (prev && prev.runId === runId && Array.isArray(prev.keys)) settled = prev;",
+                  "  } catch (e) { /* se reemplaza */ }",
+                  "  if (!settled.keys.includes('cash-in')) settled.keys.push('cash-in');",
+                  "  pm.collectionVariables.set('settled', JSON.stringify(settled));",
+                  "}"
                 ]
               }
             }
@@ -634,7 +663,20 @@
                   "      const o = pm.response.json();",
                   "      pm.expect(o.size).to.eql('10');",
                   "      pm.expect(o.instrumentid).to.eql('47');",
-                  "    });"
+                  "    });",
+                  "  ",
+                  "",
+                  "// Respuesta definitiva (no 5xx): el resultado de la clave buy-size ya se conoce.",
+                  "if (pm.response.code < 500) {",
+                  "  const runId = pm.collectionVariables.get('runId');",
+                  "  let settled = { runId, keys: [] };",
+                  "  try {",
+                  "    const prev = JSON.parse(pm.collectionVariables.get('settled') || 'null');",
+                  "    if (prev && prev.runId === runId && Array.isArray(prev.keys)) settled = prev;",
+                  "  } catch (e) { /* se reemplaza */ }",
+                  "  if (!settled.keys.includes('buy-size')) settled.keys.push('buy-size');",
+                  "  pm.collectionVariables.set('settled', JSON.stringify(settled));",
+                  "}"
                 ]
               }
             }
@@ -697,7 +739,20 @@
                   "      const cents = (s) => BigInt(s.replace('.', ''));",
                   "      pm.expect(cents(o.amount) <= 500000n).to.eql(true);",
                   "      pm.expect(cents(o.amount) + cents(o.price) > 500000n).to.eql(true);",
-                  "    });"
+                  "    });",
+                  "  ",
+                  "",
+                  "// Respuesta definitiva (no 5xx): el resultado de la clave buy-amount ya se conoce.",
+                  "if (pm.response.code < 500) {",
+                  "  const runId = pm.collectionVariables.get('runId');",
+                  "  let settled = { runId, keys: [] };",
+                  "  try {",
+                  "    const prev = JSON.parse(pm.collectionVariables.get('settled') || 'null');",
+                  "    if (prev && prev.runId === runId && Array.isArray(prev.keys)) settled = prev;",
+                  "  } catch (e) { /* se reemplaza */ }",
+                  "  if (!settled.keys.includes('buy-amount')) settled.keys.push('buy-amount');",
+                  "  pm.collectionVariables.set('settled', JSON.stringify(settled));",
+                  "}"
                 ]
               }
             }
@@ -761,7 +816,20 @@
                   "      baseUrl: pm.environment.get('baseUrl'),",
                   "      userid: pm.environment.get('userid'),",
                   "      runId: pm.collectionVariables.get('runId'),",
-                  "    }));"
+                  "    }));",
+                  "  ",
+                  "",
+                  "// Respuesta definitiva (no 5xx): el resultado de la clave buy-limit ya se conoce.",
+                  "if (pm.response.code < 500) {",
+                  "  const runId = pm.collectionVariables.get('runId');",
+                  "  let settled = { runId, keys: [] };",
+                  "  try {",
+                  "    const prev = JSON.parse(pm.collectionVariables.get('settled') || 'null');",
+                  "    if (prev && prev.runId === runId && Array.isArray(prev.keys)) settled = prev;",
+                  "  } catch (e) { /* se reemplaza */ }",
+                  "  if (!settled.keys.includes('buy-limit')) settled.keys.push('buy-limit');",
+                  "  pm.collectionVariables.set('settled', JSON.stringify(settled));",
+                  "}"
                 ]
               }
             }
@@ -1131,7 +1199,19 @@
                   "  const o = pm.response.json();",
                   "  pm.expect(pm.response.headers.get('Location')).to.eql(`/orders/${o.id}?userid=${o.userid}`);",
                   "  pm.expect(pm.response.headers.get('Idempotent-Replay')).to.eql('false');",
-                  "});"
+                  "});",
+                  "",
+                  "// Respuesta definitiva (no 5xx): el resultado de la clave sell ya se conoce.",
+                  "if (pm.response.code < 500) {",
+                  "  const runId = pm.collectionVariables.get('runId');",
+                  "  let settled = { runId, keys: [] };",
+                  "  try {",
+                  "    const prev = JSON.parse(pm.collectionVariables.get('settled') || 'null');",
+                  "    if (prev && prev.runId === runId && Array.isArray(prev.keys)) settled = prev;",
+                  "  } catch (e) { /* se reemplaza */ }",
+                  "  if (!settled.keys.includes('sell')) settled.keys.push('sell');",
+                  "  pm.collectionVariables.set('settled', JSON.stringify(settled));",
+                  "}"
                 ]
               }
             }
@@ -1188,7 +1268,19 @@
                   "  const o = pm.response.json();",
                   "  pm.expect(pm.response.headers.get('Location')).to.eql(`/orders/${o.id}?userid=${o.userid}`);",
                   "  pm.expect(pm.response.headers.get('Idempotent-Replay')).to.eql('false');",
-                  "});"
+                  "});",
+                  "",
+                  "// Respuesta definitiva (no 5xx): el resultado de la clave sell-too-much ya se conoce.",
+                  "if (pm.response.code < 500) {",
+                  "  const runId = pm.collectionVariables.get('runId');",
+                  "  let settled = { runId, keys: [] };",
+                  "  try {",
+                  "    const prev = JSON.parse(pm.collectionVariables.get('settled') || 'null');",
+                  "    if (prev && prev.runId === runId && Array.isArray(prev.keys)) settled = prev;",
+                  "  } catch (e) { /* se reemplaza */ }",
+                  "  if (!settled.keys.includes('sell-too-much')) settled.keys.push('sell-too-much');",
+                  "  pm.collectionVariables.set('settled', JSON.stringify(settled));",
+                  "}"
                 ]
               }
             }
@@ -1245,7 +1337,19 @@
                   "  const o = pm.response.json();",
                   "  pm.expect(pm.response.headers.get('Location')).to.eql(`/orders/${o.id}?userid=${o.userid}`);",
                   "  pm.expect(pm.response.headers.get('Idempotent-Replay')).to.eql('false');",
-                  "});"
+                  "});",
+                  "",
+                  "// Respuesta definitiva (no 5xx): el resultado de la clave cash-out ya se conoce.",
+                  "if (pm.response.code < 500) {",
+                  "  const runId = pm.collectionVariables.get('runId');",
+                  "  let settled = { runId, keys: [] };",
+                  "  try {",
+                  "    const prev = JSON.parse(pm.collectionVariables.get('settled') || 'null');",
+                  "    if (prev && prev.runId === runId && Array.isArray(prev.keys)) settled = prev;",
+                  "  } catch (e) { /* se reemplaza */ }",
+                  "  if (!settled.keys.includes('cash-out')) settled.keys.push('cash-out');",
+                  "  pm.collectionVariables.set('settled', JSON.stringify(settled));",
+                  "}"
                 ]
               }
             }
@@ -1295,7 +1399,19 @@
                   "  const body = pm.response.json();",
                   "  pm.expect(body.error).to.eql('BAD_REQUEST');",
                   "  pm.expect(body.message).to.be.a('string');",
-                  "});"
+                  "});",
+                  "",
+                  "// Respuesta definitiva (no 5xx): el resultado de la clave error-price ya se conoce.",
+                  "if (pm.response.code < 500) {",
+                  "  const runId = pm.collectionVariables.get('runId');",
+                  "  let settled = { runId, keys: [] };",
+                  "  try {",
+                  "    const prev = JSON.parse(pm.collectionVariables.get('settled') || 'null');",
+                  "    if (prev && prev.runId === runId && Array.isArray(prev.keys)) settled = prev;",
+                  "  } catch (e) { /* se reemplaza */ }",
+                  "  if (!settled.keys.includes('error-price')) settled.keys.push('error-price');",
+                  "  pm.collectionVariables.set('settled', JSON.stringify(settled));",
+                  "}"
                 ]
               }
             }
@@ -1345,7 +1461,19 @@
                   "  const body = pm.response.json();",
                   "  pm.expect(body.error).to.eql('BAD_REQUEST');",
                   "  pm.expect(body.message).to.be.a('string');",
-                  "});"
+                  "});",
+                  "",
+                  "// Respuesta definitiva (no 5xx): el resultado de la clave error-float ya se conoce.",
+                  "if (pm.response.code < 500) {",
+                  "  const runId = pm.collectionVariables.get('runId');",
+                  "  let settled = { runId, keys: [] };",
+                  "  try {",
+                  "    const prev = JSON.parse(pm.collectionVariables.get('settled') || 'null');",
+                  "    if (prev && prev.runId === runId && Array.isArray(prev.keys)) settled = prev;",
+                  "  } catch (e) { /* se reemplaza */ }",
+                  "  if (!settled.keys.includes('error-float')) settled.keys.push('error-float');",
+                  "  pm.collectionVariables.set('settled', JSON.stringify(settled));",
+                  "}"
                 ]
               }
             }
@@ -1396,9 +1524,24 @@
                   "      pm.expect(p.positions.some((x) => x.ticker === 'PAMP')).to.eql(true);",
                   "      pm.expect(p.cash.reservado).to.be.a('string');",
                   "    });",
-                  "    // Fin de una corrida completa: la próxima usa claves nuevas y su propia LIMIT.",
-                  "    pm.collectionVariables.set('runId', '');",
-                  "    pm.collectionVariables.set('limitOrder', '');"
+                  "    // Fin de la corrida: runId se vacía solo si cada escritura con clave tuvo una respuesta",
+                  "    // definitiva en esta corrida. Si alguna quedó sin resultado (5xx, timeout) o no se envió",
+                  "    // (este request suelto), se conserva para reenviarla con la misma clave.",
+                  "    const RUN_KEYS = ['cash-in','buy-size','buy-amount','buy-limit','sell','sell-too-much','cash-out','error-price','error-float'];",
+                  "    const runId = pm.collectionVariables.get('runId');",
+                  "    let done = [];",
+                  "    try {",
+                  "      const settled = JSON.parse(pm.collectionVariables.get('settled') || 'null');",
+                  "      if (settled && settled.runId === runId && Array.isArray(settled.keys)) done = settled.keys;",
+                  "    } catch (e) { done = []; }",
+                  "    const pending = RUN_KEYS.filter((k) => !done.includes(k));",
+                  "    if (pending.length === 0) {",
+                  "      pm.collectionVariables.set('runId', '');",
+                  "      pm.collectionVariables.set('limitOrder', '');",
+                  "      pm.collectionVariables.set('settled', '');",
+                  "    } else {",
+                  "      console.log('runId se conserva: sin respuesta definitiva para ' + pending.join(', '));",
+                  "    }"
                 ]
               }
             }

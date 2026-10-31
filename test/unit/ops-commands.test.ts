@@ -4,7 +4,8 @@
 // puntos del destino de scp, y un `#` después de un comando no es un comentario (INTERACTIVE_COMMENTS
 // viene apagado), así que `LIGHTSAIL_KEY=… # …` no define la clave. Esta suite corre los bloques que
 // hablan con el servidor en `zsh -f -i` y en bash, con ssh, scp, gh y git simulados (anotan sus
-// argumentos, no conectan ni escriben), y exige los argumentos efectivos. Los controles verifican que
+// argumentos, no conectan ni escriben; ssh devuelve una clave de host conocida), y exige los
+// argumentos efectivos, también el cuerpo completo de LIGHTSAIL_KNOWN_HOSTS. Los controles verifican que
 // cada una de esas tres variantes la hace fallar.
 import { spawnSync } from 'node:child_process';
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -16,6 +17,7 @@ const ROOT = resolve(import.meta.dirname, '../..');
 const DOC = readFileSync(resolve(ROOT, 'docs/api/operacion.md'), 'utf8');
 const README = readFileSync(resolve(ROOT, 'README.md'), 'utf8');
 const IP = '18.227.203.30';
+const HOST_KEY = 'ssh-ed25519 AAAAC3NzaClaveDeHostDePrueba';
 const SHELLS = ['zsh', 'bash'] as const;
 type Shell = (typeof SHELLS)[number];
 
@@ -44,7 +46,9 @@ function run(shell: Shell, md: string): { calls: string[][]; stderr: string } {
   for (const cmd of ['ssh', 'scp', 'gh', 'git']) {
     const stub = join(bin, cmd);
     // Una línea por llamada, los argumentos separados por un carácter que no aparece en ellos.
-    writeFileSync(stub, `#!/bin/sh\n{ printf '%s' '${cmd}'; for a in "$@"; do printf '\\037%s' "$a"; done; printf '\\n'; } >> "$CALLS_LOG"\n`);
+    // ssh devuelve una clave de host conocida si se le pide (el paso que arma KNOWN).
+    const hostKey = cmd === 'ssh' ? `case "$*" in *ssh_host_ed25519_key.pub*) echo '${HOST_KEY} root@cocos';; esac\n` : '';
+    writeFileSync(stub, `#!/bin/sh\n{ printf '%s' '${cmd}'; for a in "$@"; do printf '\\037%s' "$a"; done; printf '\\n'; } >> "$CALLS_LOG"\n${hostKey}`);
     chmodSync(stub, 0o755);
   }
   const script = serverBlocks(md).join('\n');
@@ -77,8 +81,11 @@ function problems({ calls, stderr }: { calls: string[][]; stderr: string }): str
   const hostSecrets = calls.filter((c) => c[0] === 'gh' && c[3] === 'LIGHTSAIL_HOST');
   if (hostSecrets.length !== 2) out.push(`LIGHTSAIL_HOST se fija ${hostSecrets.length} veces, no 2`);
   for (const c of hostSecrets) if (c[c.indexOf('--body') + 1] !== IP) out.push(`LIGHTSAIL_HOST = "${c[c.indexOf('--body') + 1]}"`);
-  for (const c of calls.filter((c) => c[0] === 'gh' && c[3] === 'LIGHTSAIL_KNOWN_HOSTS')) {
-    if (!c[c.indexOf('--body') + 1]?.startsWith(`${IP} `)) out.push(`LIGHTSAIL_KNOWN_HOSTS = "${c[c.indexOf('--body') + 1]}"`);
+  const knownHosts = calls.filter((c) => c[0] === 'gh' && c[3] === 'LIGHTSAIL_KNOWN_HOSTS');
+  if (knownHosts.length !== 2) out.push(`LIGHTSAIL_KNOWN_HOSTS se fija ${knownHosts.length} veces, no 2`);
+  for (const c of knownHosts) {
+    const body = c[c.indexOf('--body') + 1];
+    if (body !== `${IP} ${HOST_KEY}`) out.push(`LIGHTSAIL_KNOWN_HOSTS = "${body}"`);
   }
   return out;
 }
@@ -117,6 +124,12 @@ describe('comandos de operación (docs/api/operacion.md)', () => {
       const mutated = DOC.replaceAll('"ubuntu@${LIGHTSAIL_HOST}:cocos-setup"', '"ubuntu@$LIGHTSAIL_HOST:cocos-setup"');
       expect(mutated).not.toBe(DOC);
       expect(problems(run('zsh', mutated))).toContain(`scp hacia "ubuntu@${IP}ocos-setup"`);
+    });
+
+    it('con KNOWN sin la clave del host, falla', () => {
+      const mutated = DOC.replace(/^KNOWN=.*$/m, 'KNOWN="${LIGHTSAIL_HOST} "');
+      expect(mutated).not.toBe(DOC);
+      expect(problems(run('zsh', mutated))).toContain(`LIGHTSAIL_KNOWN_HOSTS = "${IP} "`);
     });
 
     it('con un comentario después de LIGHTSAIL_KEY, la clave no se define', () => {

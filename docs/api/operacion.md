@@ -24,8 +24,9 @@ Recorrer todas las pendientes:
 
 ```bash
 curl -s -X POST -H "X-Internal-Token: $INTERNAL_TOKEN" 'http://localhost:3000/internal/execute-limits?max=500&max_ms=10000'
-# → { ..., "after_id": "1234", "remaining": 0 }: repetir con ?after_id=1234 hasta que after_id sea null
 ```
+
+Responde `{ ..., "after_id": "1234", "remaining": 0 }`: repetir con `?after_id=1234` hasta que `after_id` sea `null`.
 
 ## Cuando la base se reinicia
 
@@ -40,8 +41,10 @@ El executor de LIMIT no tiene job ([D-28](../decisiones.md#d-28)): en producció
 ## Desplegar un cambio en las funciones
 
 ```bash
-pnpm db:bootstrap      # o: docker compose run --rm migrate
+pnpm db:bootstrap
 ```
+
+(o `docker compose run --rm migrate`)
 
 Aplica las migraciones pendientes y reaplica `db/functions` en una sola transacción, con la barrera de despliegue: se puede correr con la API activa; las escrituras esperan hasta el `COMMIT` (o responden `503` y se reintentan) y, si algo falla, no queda nada aplicado. Una migración nueva va en un archivo nuevo de `db/migrations`; nunca se edita una ya aplicada ([D-24](../decisiones.md#d-24)). Si aplicó alguna, verifica la historia: un corto heredado ([D-01](../decisiones.md#d-01)) o una historia fuera de los tipos ([D-14](../decisiones.md#d-14)) se informan, y una LIMIT `NEW` sin respaldo se cancela con `cancel_reason: "UNBACKED"` y se informa en el log (`historia: usuario N — reserva: …`, `orden N cancelada`), bajo el lock de ese usuario ([D-24](../decisiones.md#d-24)). Solo un cash que no cierra aborta el despliegue.
 
@@ -73,17 +76,19 @@ Qué versión atiende cada entorno: Settings → Environments (el último deploy
 
 Una sola vez, antes del primer release, desde la raíz del repo parado en `main`, con `gh` autenticado y la clave por defecto de la instancia que se baja de la consola de Lightsail (Account → SSH keys). Nada de esto lo hace el workflow.
 
-**Ya se hizo** para este servidor, antes de v0.1.0. Para verificar que sigue preparado, sin cambiar nada:
+**Ya se hizo** para este servidor, antes de v0.1.0. Para verificar que sigue preparado, sin cambiar nada: la clave de deploy entra y lista Caddy y los entornos, y cada environment tiene `LIGHTSAIL_HOST`, `LIGHTSAIL_SSH_KEY` y `LIGHTSAIL_KNOWN_HOSTS`.
 
 ```bash
-ssh -i ~/.ssh/cocos-deploy -o IdentitiesOnly=yes deploy@18.227.203.30 docker ps   # la clave de deploy entra y lista Caddy y los entornos
-for env in staging production; do gh secret list --env "$env"; done              # LIGHTSAIL_HOST, LIGHTSAIL_SSH_KEY y LIGHTSAIL_KNOWN_HOSTS en cada uno
+ssh -i ~/.ssh/cocos-deploy -o IdentitiesOnly=yes deploy@18.227.203.30 docker ps
+for env in staging production; do gh secret list --env "$env"; done
 ```
+
+`LIGHTSAIL_KEY` es la ruta de esa clave por defecto, con el nombre con que se guardó: reemplazar `TU-CLAVE-DE-LIGHTSAIL.pem`. Los bloques de esta sección no llevan comentarios: en zsh interactivo (la terminal de macOS) un `#` después de un comando no es un comentario.
 
 ```bash
 git switch main && git pull
 LIGHTSAIL_HOST=18.227.203.30
-LIGHTSAIL_KEY=~/.ssh/TU-CLAVE-DE-LIGHTSAIL.pem   # la clave por defecto que se descarga de la consola de Lightsail, con el nombre con que se guardó
+LIGHTSAIL_KEY=~/.ssh/TU-CLAVE-DE-LIGHTSAIL.pem
 ```
 
 La primera conexión SSH a la instancia (el primer comando del paso 2) pide aceptar la huella de la clave del host. Antes de aceptarla, compararla con la que muestra `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` en la consola de Lightsail (Connect using SSH, en el navegador): el paso 3 lee la clave del host por esa conexión y la fija en Actions, así que una huella aceptada sin verificar es la que el deploy va a dar por buena.

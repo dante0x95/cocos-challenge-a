@@ -46,6 +46,9 @@ jobs:
       - run: corepack enable
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
+      # test/unit/ops-commands corre los comandos de operación en zsh, la terminal de macOS.
+      - name: zsh para test/unit/ops-commands
+        run: command -v zsh || { sudo apt-get update -q && sudo apt-get install -y -q zsh; }
       - run: pnpm test:unit
       - name: server_version de Postgres
         run: psql "$TEST_PG_URL" -Atc 'show server_version'

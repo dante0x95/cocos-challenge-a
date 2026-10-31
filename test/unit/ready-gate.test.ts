@@ -213,9 +213,12 @@ describe('ready-gate: errores de la API', () => {
     expect(r.stdout).not.toContain('El PR volvió a borrador');
   });
 
-  it('el token no tiene contents: write: la conversión falla y sale con 2', () => {
+  it.each([
+    ['contents: write', 'contents=read,pull-requests=write,statuses=read'],
+    ['pull-requests: write', 'contents=write,pull-requests=read,statuses=read'],
+  ])('al token le falta %s: la conversión falla y sale con 2', (_, permissions) => {
     arrange({ pulls: [{ head: A }], statuses: { [A]: review('failure') } });
-    const r = exec(['bash', SCRIPT], { ...ENV, FAKE_PERMISSIONS: 'contents=read,pull-requests=write,statuses=read' });
+    const r = exec(['bash', SCRIPT], { ...ENV, FAKE_PERMISSIONS: permissions });
     expect(r.code).toBe(2);
     expect(r.mutations).toHaveLength(3);
     expect(r.stderr).toContain('Resource not accessible by integration');

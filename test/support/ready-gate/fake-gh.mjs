@@ -8,6 +8,9 @@
 //   failPulls / failStatuses   cuántas lecturas fallan (código 1) antes de responder.
 //   failPullsFrom   desde qué lectura del PR (contando desde 0) fallan todas.
 //   mutation   'ok' (isDraft true), 'not-draft' (isDraft false) o 'fail' (código 1).
+//
+// FAKE_PERMISSIONS (opcional), los permisos del token como "contents=write,pull-requests=write":
+// la mutación falla como en GitHub si no tiene contents y pull-requests en write.
 import { spawnSync } from 'node:child_process';
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -63,7 +66,9 @@ if ((m = /^repos\/([^/]+\/[^/]+)\/pulls\/(\d+)$/.exec(endpoint))) {
   const statuses = state.statuses?.[m[1]] ?? [];
   respond({ sha: m[1], state: 'pending', statuses });
 } else if (endpoint === 'graphql' && /^\s*mutation/.test(fields.query ?? '')) {
-  if (state.mutation === 'fail') fail('GraphQL: Resource not accessible by integration');
+  const perms = process.env.FAKE_PERMISSIONS?.split(',');
+  const canConvert = !perms || ['contents=write', 'pull-requests=write'].every((p) => perms.includes(p));
+  if (state.mutation === 'fail' || !canConvert) fail('GraphQL: Resource not accessible by integration');
   respond({ data: { convertPullRequestToDraft: { pullRequest: { isDraft: state.mutation !== 'not-draft' } } } });
 } else {
   fail(`llamada no prevista: ${args.join(' ')}`);

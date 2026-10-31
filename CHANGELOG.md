@@ -12,6 +12,10 @@ Nada.
 
 - **Volver a correr un deploy cortado ya no borra el último release sano** ([#65](https://github.com/dante0x95/cocos-challenge-a/pull/65)): el cambio de versión queda sin confirmar hasta que pasan `/health` y el smoke (`switch.pending`, que borra el paso nuevo `Confirmar el cambio`). Si el job se corta antes (cancelado, runner perdido, timeout), el re-run toma como lo que atiende el último release confirmado, no pisa su respaldo y, si vuelve a fallar en cualquier paso, vuelve a él. Antes, el re-run tomaba el release roto como el anterior y la vuelta atrás no tenía a dónde volver. No borrar `switch.pending` a mano ([operación](docs/api/operacion.md#operación)).
 
+### Proceso
+
+- **`ready-gate` vuelve a devolver a borrador un PR marcado ready sin `codex/review`** ([#59](https://github.com/dante0x95/cocos-challenge-a/pull/59)): el `GITHUB_TOKEN` del workflow no podía convertirlo ("Resource not accessible by integration") porque `convertPullRequestToDraft` exige `contents: write` además de `pull-requests: write`. El merge ya lo frenaba el ruleset; ahora también vuelve a valer la regla de CONTRIBUTING.
+
 ### Documentación
 
 - **Los comandos del servidor funcionan en zsh** ([#55](https://github.com/dante0x95/cocos-challenge-a/pull/55)): `docs/api/operacion.md` y el README llaman `LIGHTSAIL_HOST` a la IP del servidor y la escriben `${LIGHTSAIL_HOST}`: en zsh, `HOST` ya existe (el nombre de la Mac), así que si no se definía los comandos apuntaban en silencio a la propia máquina, y `$HOST:c` se comía los dos puntos del `scp`, que copiaba en local. La clave de Lightsail queda como marcador. v0.2.0 queda con su fecha.

@@ -22,14 +22,21 @@
 --   qty ≤ 0 → costo = 0.
 -- Unidades: cash en centavos, costo en micro-ARS (10^-6 ARS), todo entero en numeric.
 --
--- La versión anterior de c_state y read_portfolio devolvía cost_total como bigint. CREATE OR
--- REPLACE no puede cambiar el tipo de una columna de salida (42P13): se borran antes, dentro de
--- la transacción del bootstrap, y 090_privileges.sql vuelve a dar los permisos.
+-- Una historia que no entra en los tipos (un importe fuera de numeric(20,0), el cash fuera de
+-- bigint, el costo fuera de numeric(24,0): 22003 en alguna cuenta) es un estado conocido, no un
+-- bug: solo puede venir de una base preexistente (D-24) y necesita corrección manual. c_state lo
+-- traduce a APP07 (409 HISTORY_OVERFLOW, issue #57), así lo heredan todos los que pliegan:
+-- read_portfolio, place_order y execute_limit_outcome. verify_ledger lo informa como 'overflow'.
+--
+-- Las versiones anteriores de c_state y read_portfolio devolvían cost_total como bigint, y
+-- read_portfolio también reserved (issue #57). CREATE OR REPLACE no puede cambiar el tipo de una
+-- columna de salida (42P13): se borran antes, dentro de la transacción del bootstrap, y
+-- 090_privileges.sql vuelve a dar los permisos.
 DO $$
 DECLARE f text;
 BEGIN
   FOREACH f IN ARRAY ARRAY['app.read_portfolio(int)', 'app.c_state(int)'] LOOP
-    IF pg_get_function_result(to_regprocedure(f)) LIKE '%cost_total bigint%' THEN
+    IF pg_get_function_result(to_regprocedure(f)) ~ '(cost_total|reserved) bigint' THEN
       EXECUTE format('DROP FUNCTION %s', f);
     END IF;
   END LOOP;
@@ -50,68 +57,78 @@ DECLARE
   bad      boolean := false;
   imp      numeric;
 BEGIN
-  FOR r IN
-    SELECT o.instrumentid, o.balance_seq AS seq, o.side, o.size, o.price
-      FROM app.orders o
-     WHERE o.userid = p_userid AND o.status = 'FILLED'
-    ORDER BY instrumentid, seq
-  LOOP
-    n_filled := n_filled + 1;
-    IF r.seq > seen THEN seen := r.seq; END IF;
-    imp := (r.size::numeric * r.price * 100)::numeric(20,0);      -- centavos; price tiene 2 decimales
-    IF r.side IN ('CASH_IN','SELL') THEN cash := cash + imp; ELSE cash := cash - imp; END IF;
-    IF r.side IN ('CASH_IN','CASH_OUT') THEN CONTINUE; END IF;    -- el cash no es una posición
+  BEGIN
+    FOR r IN
+      SELECT o.instrumentid, o.balance_seq AS seq, o.side, o.size, o.price
+        FROM app.orders o
+       WHERE o.userid = p_userid AND o.status = 'FILLED'
+      ORDER BY instrumentid, seq
+    LOOP
+      n_filled := n_filled + 1;
+      IF r.seq > seen THEN seen := r.seq; END IF;
+      imp := (r.size::numeric * r.price * 100)::numeric(20,0);      -- centavos; price tiene 2 decimales
+      IF r.side IN ('CASH_IN','SELL') THEN cash := cash + imp; ELSE cash := cash - imp; END IF;
+      IF r.side IN ('CASH_IN','CASH_OUT') THEN CONTINUE; END IF;    -- el cash no es una posición
 
-    IF cur_i IS DISTINCT FROM r.instrumentid THEN
-      IF cur_i IS NOT NULL AND q <> 0 THEN
-        kind := 1; instrumentid := cur_i; qty := q; cost_total := c::numeric(24,0); inconsistent := bad;
-        cash_cents := NULL; last_seq := NULL; filled_count := NULL;
-        RETURN NEXT;
+      IF cur_i IS DISTINCT FROM r.instrumentid THEN
+        IF cur_i IS NOT NULL AND q <> 0 THEN
+          kind := 1; instrumentid := cur_i; qty := q; cost_total := c::numeric(24,0); inconsistent := bad;
+          cash_cents := NULL; last_seq := NULL; filled_count := NULL;
+          RETURN NEXT;
+        END IF;
+        cur_i := r.instrumentid; q := 0; c := 0; bad := false;
       END IF;
-      cur_i := r.instrumentid; q := 0; c := 0; bad := false;
-    END IF;
 
-    IF r.side = 'BUY' THEN
-      IF q < 0 THEN
-        c := GREATEST(r.size + q, 0) * r.price * 100 * 10000;   -- cubrir el corto no lleva costo (D-03)
+      IF r.side = 'BUY' THEN
+        IF q < 0 THEN
+          c := GREATEST(r.size + q, 0) * r.price * 100 * 10000;   -- cubrir el corto no lleva costo (D-03)
+        ELSE
+          c := c + imp * 10000;
+        END IF;
+        q := q + r.size;
+        IF q <= 0 THEN c := 0; END IF;
+      ELSIF r.size > q THEN                                       -- venta sin tenencia: solo historia heredada (D-01)
+        any_bad := true; q := q - r.size; c := 0;
       ELSE
-        c := c + imp * 10000;
+        c := app.div_half_even(c * (q - r.size), q);
+        q := q - r.size;
+        IF q = 0 THEN c := 0; END IF;
       END IF;
-      q := q + r.size;
-      IF q <= 0 THEN c := 0; END IF;
-    ELSIF r.size > q THEN                                       -- venta sin tenencia: solo historia heredada (D-01)
-      any_bad := true; q := q - r.size; c := 0;
-    ELSE
-      c := app.div_half_even(c * (q - r.size), q);
-      q := q - r.size;
-      IF q = 0 THEN c := 0; END IF;
+      bad := q < 0;
+    END LOOP;
+    IF cur_i IS NOT NULL AND q <> 0 THEN
+      kind := 1; instrumentid := cur_i; qty := q; cost_total := c::numeric(24,0); inconsistent := bad;
+      cash_cents := NULL; last_seq := NULL; filled_count := NULL;
+      RETURN NEXT;
     END IF;
-    bad := q < 0;
-  END LOOP;
-  IF cur_i IS NOT NULL AND q <> 0 THEN
-    kind := 1; instrumentid := cur_i; qty := q; cost_total := c::numeric(24,0); inconsistent := bad;
-    cash_cents := NULL; last_seq := NULL; filled_count := NULL;
-    RETURN NEXT;
-  END IF;
 
-  kind := 0; instrumentid := NULL; qty := NULL; cost_total := NULL; inconsistent := any_bad;
-  cash_cents := cash::bigint; last_seq := seen; filled_count := n_filled;
-  RETURN NEXT;
+    kind := 0; instrumentid := NULL; qty := NULL; cost_total := NULL; inconsistent := any_bad;
+    cash_cents := cash::bigint; last_seq := seen; filled_count := n_filled;
+    RETURN NEXT;
+  EXCEPTION WHEN numeric_value_out_of_range THEN
+    -- Las filas ya emitidas no llegan a nadie: la excepción aborta la sentencia que llama.
+    RAISE EXCEPTION 'la historia del usuario % supera los tipos del cálculo (D-14): no puede operar hasta que se corrija; no reintentar', p_userid
+      USING ERRCODE = 'APP07', DETAIL = SQLERRM;
+  END;
 END $$;
 
 -- Lectura del portfolio. Sin lock: una sentencia, una foto MVCC de las órdenes (la función
 -- es STABLE: todo lo que lee adentro usa la foto de la sentencia que la llama).
 -- Columnas tipadas (sin JSON); la API arma la respuesta con BigInt (src/domain/portfolio.ts).
---   kind 0: qty = cash en centavos; reserved = centavos reservados por BUY NEW;
+--   kind 0: qty = cash en centavos; reserved = centavos reservados por BUY NEW (numeric sin
+--           decimales: las NEW heredadas sin respaldo que el bootstrap no canceló, de un usuario
+--           con 'overflow' o cargadas después de la última verificación, pueden sumar más que
+--           un bigint; issue #57);
 --           inconsistent = la historia tuvo alguna venta sin tenencia.
 --   kind 1: una fila por posición; reserved = acciones reservadas por SELL NEW; close,
 --           previousclose y price_date de la última cotización válida (NULL si no hay).
 -- Usuario inexistente → APP06. c_state emite la fila kind 0 (cash 0) también para un id que
 -- no existe; sin este chequeo, la API necesitaría otra consulta para responder 404 (issue #5).
+-- Historia fuera de los tipos → APP07, desde c_state (issue #57).
 CREATE OR REPLACE FUNCTION app.read_portfolio(p_userid int)
 RETURNS TABLE (kind smallint, instrumentid int, ticker text, name text,
                qty bigint, cost_total numeric, inconsistent boolean,
-               reserved bigint, close numeric, previousclose numeric, price_date date)
+               reserved numeric, close numeric, previousclose numeric, price_date date)
 LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = pg_catalog, app, pg_temp AS $$
 #variable_conflict use_column
 BEGIN
@@ -122,14 +139,14 @@ BEGIN
   WITH f AS (SELECT * FROM app.c_state(p_userid)),
        res AS (
          SELECT o.instrumentid,
-                sum(CASE WHEN o.side = 'BUY'  THEN (o.size::numeric * o.price * 100) ELSE 0 END)::bigint AS cash_cents,
-                sum(CASE WHEN o.side = 'SELL' THEN o.size ELSE 0 END)::bigint AS shares
+                trunc(sum(CASE WHEN o.side = 'BUY'  THEN (o.size::numeric * o.price * 100) ELSE 0 END)) AS cash_cents,
+                sum(CASE WHEN o.side = 'SELL' THEN o.size ELSE 0 END)::numeric AS shares
            FROM app.orders o
           WHERE o.userid = p_userid AND o.status = 'NEW'
           GROUP BY o.instrumentid)
   SELECT 0::smallint, NULL::int, NULL::text, NULL::text,
          f.cash_cents, 0::numeric, f.inconsistent,
-         COALESCE((SELECT sum(cash_cents) FROM res), 0)::bigint, NULL::numeric, NULL::numeric, NULL::date
+         COALESCE((SELECT sum(cash_cents) FROM res), 0), NULL::numeric, NULL::numeric, NULL::date
     FROM f WHERE f.kind = 0
   UNION ALL
   SELECT 1::smallint, f.instrumentid, i.ticker::text, i.name::text,

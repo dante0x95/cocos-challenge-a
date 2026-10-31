@@ -864,7 +864,7 @@ describe('actualización a cost_total numeric', () => {
     }
   }, 120_000);
 
-  it('historia con un costo de 10¹³ y otra fuera de numeric(20,0): el bootstrap termina, informa solo el overflow y los demás operan', async () => {
+  it('historia con un costo de 10¹³ y otra fuera de numeric(20,0) con una LIMIT NEW: el bootstrap termina, informa solo el overflow, deja la NEW y los demás operan', async () => {
     await recreateDatabase(DB);
     // Una migración más con la historia heredada: así el bootstrap la verifica, como al desplegar sobre datos reales.
     const r = await deployFrom((dir) => writeFileSync(join(dir, 'migrations', '999_test_historia.sql'), `
@@ -886,6 +886,11 @@ describe('actualización a cost_total numeric', () => {
             VALUES (inst, u, CASE i WHEN 0 THEN 10000000 ELSE 2147483647 END,
                     CASE i WHEN 0 THEN 1000000.00 ELSE 9999999999999999.99 END, 'MARKET', 'BUY', 'FILLED', timezone('UTC', now()), 2);
           END IF;
+          -- historia-1 también tiene una LIMIT NEW (sin respaldo: sin fold no se revisa, issue #57).
+          IF i = 1 THEN
+            INSERT INTO app.orders (instrumentid, userid, size, price, type, side, status, datetime)
+            VALUES (inst, u, 1, 1.00, 'LIMIT', 'BUY', 'NEW', timezone('UTC', now()));
+          END IF;
           i := i + 1;
         END LOOP;
       END $$;`));
@@ -905,6 +910,13 @@ describe('actualización a cost_total numeric', () => {
           "SELECT app.place_order($1, 'dep', 'h', 'CASH_IN', 'MARKET', $2, NULL, 1.00, NULL, NULL) AS r", [u, ars])).rows[0].r;
         expect(res.status, `usuario ${u}`).toBe(201);
       }
+      // El de overflow (issue #57): su NEW sigue NEW, sin cancel_reason, y la API le responde APP07
+      // (409 HISTORY_OVERFLOW) en el portfolio y en una orden, no 22003 (500).
+      expect((await adminDb.query("SELECT status, cancel_reason FROM app.orders WHERE userid = $1 AND type = 'LIMIT'", [ids[1]])).rows)
+        .toEqual([{ status: 'NEW', cancel_reason: null }]);
+      await expect(api.query('SELECT * FROM app.read_portfolio($1)', [ids[1]])).rejects.toMatchObject({ code: 'APP07' });
+      await expect(api.query("SELECT app.place_order($1, 'dep', 'h', 'CASH_IN', 'MARKET', $2, NULL, 1.00, NULL, NULL)", [ids[1], ars]))
+        .rejects.toMatchObject({ code: 'APP07' });
     } finally {
       await api.end();
       await adminDb.end();

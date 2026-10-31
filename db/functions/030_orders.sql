@@ -181,7 +181,9 @@ BEGIN
   END IF;
   imp := (v_size::numeric * price * 100)::numeric(20,0);
 
-  -- Estado bajo el lock: una pasada del fold y las reservas.
+  -- Estado bajo el lock: una pasada del fold y las reservas. Una historia fuera de los tipos
+  -- falla acá con APP07 (409, issue #57): la transacción se revierte con el reclamo de la clave,
+  -- y una clave grabada antes sigue dando su replay (el bloque de idempotencia no pliega).
   SELECT max(s.cash_cents) FILTER (WHERE s.kind = 0),
          max(s.last_seq)   FILTER (WHERE s.kind = 0),
          COALESCE(max(s.qty) FILTER (WHERE s.kind = 1 AND s.instrumentid = p_instrumentid), 0),
@@ -281,6 +283,9 @@ $$;
 --              importe > 10^15 ARS; BUY: posición + size > 2^62 acciones o costo + importe >
 --              10^17 ARS): la canceló con cancel_reason = 'LIMIT'.
 -- En los dos casos la orden sale del executor, libera su reserva y el motivo queda en ella.
+-- Si la historia del usuario no entra en los tipos, el fold falla con APP07 (issue #57) y la
+-- orden sigue NEW: sin fold no se puede decidir el respaldo, y corregir la historia podría
+-- dejarla válida. El executor saltea al usuario (overflow_users).
 -- El respaldo y D-14 se revalidan bajo el lock, con una sola lectura del estado. Una BUY con
 -- respaldo no puede dejar el cash negativo ni una SELL la posición: de D-14 solo quedan por
 -- validar el cash de una SELL y la posición y el costo de una BUY.

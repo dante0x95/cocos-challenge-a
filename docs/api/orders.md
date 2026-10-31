@@ -79,6 +79,7 @@ Un reintento con la misma clave y el mismo body tiene el replay **garantizado du
 | `422` | `NO_PRICE` | MARKET sin cotización válida | no; la clave queda libre |
 | `422` | `IDEMPOTENCY_MISMATCH` | misma clave con otro body | no |
 | `422` | `LIMIT` | el resultado saldría de ±10¹⁵ ARS o 2⁶² acciones, o el importe de la orden (`size × price`) supera 10¹⁵ ARS, o el costo de la posición superaría 10¹⁷ ARS ([D-14](../decisiones.md#d-14)) | no |
+| `409` | `HISTORY_OVERFLOW` | la historia del usuario no entra en los tipos del cálculo (solo una base heredada, [D-24](../decisiones.md#d-24)): no puede operar hasta que se corrija. **No se reintenta**: da lo mismo hasta la corrección | no; la clave queda libre |
 | `503` | `LOCK_TIMEOUT` · `TIMEOUT` · `VERSION_MISMATCH` | el usuario tenía otra operación en curso, se venció el tiempo (de la escritura o de la espera por una conexión con la base), o hay un despliegue en curso | no, o resultado desconocido: **reintentar con la misma clave** ([D-20](../decisiones.md#d-20)) |
 | `503` | `CONNECTION_LOST` | la conexión con la base se cortó (reinicio de Postgres, failover, red), antes o después de enviar la escritura | resultado desconocido: **reintentar con la misma clave** |
 | `503` | `DEADLOCK` | Postgres eligió la escritura como víctima de un deadlock (SQLSTATE `40P01`). No debería ocurrir: si pasa, reportarlo | no: Postgres revierte la escritura entera; **reintentar con la misma clave** |

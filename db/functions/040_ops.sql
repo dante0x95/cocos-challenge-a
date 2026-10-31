@@ -41,9 +41,11 @@ END $$;
 --   'cash'     el cash del fold no coincide con una suma directa de importes (cálculo
 --              independiente del fold). El bootstrap aborta.
 --   'short'    una posición queda en corto (historia heredada, D-01). Se tolera y se señala.
---   'overflow' la historia no entra en los tipos (22003 en el fold: importe, cash o costo por
+--   'overflow' la historia no entra en los tipos (APP07 del fold: importe, cash o costo por
 --              encima de los tipos, D-14). Se informa en vez de abortar el bootstrap entero: ese
---              usuario no puede operar hasta que se corrija su historia; los demás, sí.
+--              usuario no puede operar hasta que se corrija su historia (la API le responde 409
+--              HISTORY_OVERFLOW y el executor lo saltea, issue #57); los demás, sí. Sin fold no
+--              se revisan sus reservas: sus NEW quedan como están.
 --   'reserva'  las LIMIT NEW no tienen respaldo: cash reservado por compras > cash del fold,
 --              acciones reservadas por ventas de un instrumento > tenencia, o una NEW sobre una
 --              MONEDA. Solo puede venir de una base preexistente (D-24): place_order no las crea.
@@ -58,7 +60,7 @@ CREATE OR REPLACE FUNCTION app.verify_ledger()
 RETURNS TABLE (userid int, problem text, detail text)
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, app, pg_temp AS $$
 DECLARE u int; fold_cash bigint; sum_cash bigint; res_cash numeric; r record; shorts text[];
-        a_inst int[]; a_qty bigint[];
+        a_inst int[]; a_qty bigint[]; cause text;
 BEGIN
   FOR u IN SELECT DISTINCT o.userid FROM app.orders o WHERE o.status IN ('FILLED', 'NEW') ORDER BY 1 LOOP
     fold_cash := NULL; shorts := '{}'; a_inst := '{}'; a_qty := '{}';
@@ -79,8 +81,9 @@ BEGIN
           END IF;
         END IF;
       END LOOP;
-    EXCEPTION WHEN numeric_value_out_of_range THEN
-      userid := u; problem := 'overflow'; detail := SQLERRM;
+    EXCEPTION WHEN SQLSTATE 'APP07' THEN
+      GET STACKED DIAGNOSTICS cause = PG_EXCEPTION_DETAIL;
+      userid := u; problem := 'overflow'; detail := format('%s (%s)', SQLERRM, cause);
       RETURN NEXT;
       CONTINUE;
     END;

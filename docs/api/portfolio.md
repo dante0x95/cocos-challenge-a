@@ -93,6 +93,7 @@ Los redondeos son half-even sobre la fracción exacta, siempre al final.
 |---|---|
 | `400 BAD_REQUEST` | `userid` no es un entero > 0, o viene mal codificado (`%FF`) |
 | `404 NOT_FOUND` | el usuario no existe |
+| `409 HISTORY_OVERFLOW` | la historia del usuario no entra en los tipos del cálculo (solo una base heredada, [D-24](../decisiones.md#d-24)): hasta que se corrija, sin `Retry-After` y sin reintentar |
 | `503 TIMEOUT` | la lectura superó 5 s; incluye `Retry-After` |
 | `500 INTERNAL` | un error no previsto: `error interno; reintentar` (es una lectura, sin `Idempotency-Key`) |
 

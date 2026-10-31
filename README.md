@@ -19,7 +19,7 @@ curl -s localhost:3000/portfolio/1
 
 Levanta Postgres 18, corre el bootstrap (carga el `database.sql` del challenge, migra, instala funciones y verifica) y arranca la API en `:3000` cuando todo terminó bien.
 
-Para operar a mano está [`rest-client/cocos.http`](rest-client/cocos.http) (extensión REST Client de VS Code), con un request por caso: depósito, replay, compra por cantidad y por monto, LIMIT, cancelación, venta rechazada y errores.
+Para operar a mano está [`rest-client/cocos.http`](rest-client/cocos.http) (extensión REST Client de VS Code), con un request por caso: depósito, replay, compra por cantidad y por monto, LIMIT, cancelación, venta rechazada y errores. Los mismos casos, con verificaciones, están en la colección de Postman de [`postman/`](postman), con un environment para `local`, `staging` y `production`: cómo importarla y de dónde sale el token interno, en [`docs/api/operacion.md`](docs/api/operacion.md#colección-de-postman).
 
 **Sin Docker para la API** (con un Postgres propio; necesita las extensiones `pg_trgm` y `unaccent`, que vienen con Postgres — paquete `contrib` en algunas distribuciones — y las instala el bootstrap):
 
@@ -123,7 +123,8 @@ src/
   jobs/           limpieza periódica de claves de idempotencia
 test/             unit · db · concurrency · property · bootstrap · oracle (fold independiente)
 docs/             decisiones · benchmark del balance · pruebas · contratos de la API
-rest-client/      colección de requests
+rest-client/      colección de requests (REST Client de VS Code)
+postman/          colección de Postman y sus environments: local · staging · production
 deploy/           gate del workflow, verificaciones y ensayos · lightsail/: el servidor (compose, Caddy, setup y deploy)
 scripts/          revisión de Codex · formato de commits y PRs (y su hook) · ready-gate
                   versión anterior sobre la base nueva (CI)

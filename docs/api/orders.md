@@ -165,4 +165,4 @@ curl -s 'localhost:3000/orders/15?userid=2'
 curl -s localhost:3000/orders/15/cancel -H 'content-type: application/json' -d '{"userid":2}'
 ```
 
-La colección completa está en [`rest-client/cocos.http`](../../rest-client/cocos.http).
+La colección completa está en [`rest-client/cocos.http`](../../rest-client/cocos.http) y, con verificaciones, en la [colección de Postman](operacion.md#colección-de-postman).

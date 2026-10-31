@@ -28,6 +28,31 @@ curl -s -X POST -H "X-Internal-Token: $INTERNAL_TOKEN" 'http://localhost:3000/in
 
 Responde `{ ..., "after_id": "1234", "remaining": 0 }`: repetir con `?after_id=1234` hasta que `after_id` sea `null`.
 
+## Colección de Postman
+
+[`postman/`](../../postman) tiene la colección (`cocos.postman_collection.json`: cada endpoint, con sus casos de error y una verificación por request) y un environment por entorno. En Postman: **Import** de los cuatro archivos, elegir el environment y correr la colección con el Collection Runner, o un request suelto. Sin Postman, con newman:
+
+```bash
+pnpm dlx newman run postman/cocos.postman_collection.json -e postman/local.postman_environment.json
+```
+
+| Environment | `baseUrl` | Qué corre |
+|---|---|---|
+| `local` | `http://localhost:3000` (`docker compose up`) | Todo. `internalToken` es el de desarrollo de docker compose (`dev-internal-token`). |
+| `staging` | `https://staging.18-227-203-30.sslip.io` | Todo, salvo los requests de Interno que llevan el token mientras `internalToken` esté vacío. |
+| `production` | `https://18-227-203-30.sslip.io` | Solo lecturas: con `allowWrites` en `false`, los folders Órdenes e Interno se saltean. |
+
+Órdenes opera con el `userid` del environment (el 2 en local y staging): deposita, compra por cantidad y por monto, crea una LIMIT, la consulta y la cancela, vende y retira. Las claves de idempotencia llevan `runId`, nuevo en cada corrida, así que la colección se puede repetir. En staging deja esas órdenes del usuario 2 en la base de staging; el smoke del deploy usa su propio usuario y no lo ve.
+
+**El token interno.** Los environments de staging y producción se versionan con `internalToken` vacío. El de cada entorno se lee del servidor (ver "Token interno" en [Operación](#operación)) y se pega como valor actual (*current value*) del environment en Postman, que no se exporta ni se sincroniza, o se pasa a newman sin escribirlo en un archivo:
+
+```bash
+pnpm dlx newman run postman/cocos.postman_collection.json -e postman/staging.postman_environment.json \
+  --env-var internalToken="$(ssh -i ~/.ssh/cocos-deploy deploy@18.227.203.30 cat /opt/cocos/staging/secrets/internal_token)"
+```
+
+Para cambiar la colección: editarla en Postman y exportarla (Collection v2.1) sobre el mismo archivo, con los environments sin el token. `test/unit/postman` falla si un environment de staging o producción tiene un token, si un request no va contra `{{baseUrl}}`, si una escritura queda fuera de los folders que se saltean sin `allowWrites` o si un endpoint de `src/routes` no tiene request.
+
 ## Cuando la base se reinicia
 
 Un reinicio de Postgres (mantenimiento, failover, `pg_terminate_backend`) corta todas las conexiones del pool. Las ociosas se descartan solas (el pool recibe el evento `error`, lo registra con `scope: "pg-pool-idle"` y sigue); la siguiente request abre una conexión nueva. Este listener protege solo a las conexiones ociosas. Una request cuya consulta estaba en vuelo recibe el error de la conexión cortada y responde `503 CONNECTION_LOST` con `Retry-After` ([errores de `POST /orders`](orders.md#errores)): su resultado es desconocido (la escritura pudo confirmarse) y `POST /orders` se reintenta con la misma `Idempotency-Key`, que devuelve la orden si existe ([D-20](../decisiones.md#d-20)). El proceso no se reinicia. `GET /health` responde `503` con `db: "down"` mientras la base no contesta y vuelve a `200` sola.

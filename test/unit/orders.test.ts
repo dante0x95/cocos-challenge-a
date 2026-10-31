@@ -1,7 +1,11 @@
 // Validación de forma de POST /orders, hash de idempotencia y guard de parsers de pg.
-import { describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import type { Server } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { OrderBody, legacyRequestHash, orderView, requestHash, validateOrder } from '../../src/domain/orders.js';
-import { parserFor } from '../../src/db/pool.js';
+import { parserFor, pool } from '../../src/db/pool.js';
+import { createApp } from '../../src/app.js';
+import { NUMBER_LITERAL_MESSAGE, NumberLiteralError, integerLiteralsOnly } from '../../src/http/json-body.js';
 
 const parse = (b: unknown) => OrderBody.safeParse(b);
 
@@ -156,4 +160,125 @@ describe('orderView', () => {
 describe('guard de parsers de node-postgres (D-13)', () => {
   it('int8 (OID 20) llega como string intacto', () => expect(parserFor(20)('9007199254740993')).toBe('9007199254740993'));
   it('numeric (OID 1700) llega como string intacto', () => expect(parserFor(1700)('1.10')).toBe('1.10'));
+});
+
+// Issue #42: la validación miraba el number después de JSON.parse, y un literal con decimales que el
+// double redondea a entero (999999999999999.99 → 1000000000000000) pasaba como ese entero. Ahora decide
+// el literal: por HTTP, todo número con punto o exponente → 400, en cualquier campo, antes de la base.
+describe('POST /orders — el número se valida por su literal, no por el double (issue #42)', () => {
+  let server: Server;
+  let base: string;
+  beforeAll(() => {
+    server = createApp({ internalToken: 'test-token', release: 'test' }).listen(0);
+    base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  });
+  afterAll(() => { server.close(); });
+
+  const send = async (path: string, text: string) => {
+    const r = await fetch(`${base}${path}`, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'Idempotency-Key': 'k-42' }, body: text,
+    });
+    return { status: r.status, body: (await r.json()) as Record<string, unknown> };
+  };
+  /** Body de una SELL LIMIT con `field` puesto como el literal tal cual, sin pasar por JSON.stringify. */
+  const bodyWith = (field: string, literal: string) => {
+    const fields: Record<string, string> = {
+      userid: '1', side: '"SELL"', type: '"LIMIT"', instrumentid: '47', amount: '"1000.00"', price: '"500.00"',
+    };
+    if (field === 'size') delete fields.amount;
+    fields[field] = literal;
+    return `{${Object.entries(fields).map(([k, v]) => `"${k}":${v}`).join(',')}}`;
+  };
+  const FIELDS = ['amount', 'price', 'size', 'userid', 'instrumentid'];
+  const LITERALS = ['100.0', '1e2', '1E2', '1E+2', '1.0000000000000001', '999999999999999.99', '-0.0', '1e-2', '100.50', '0.5'];
+
+  it.each(FIELDS.flatMap((f) => LITERALS.map((l) => [f, l])))('%s: %s como número → 400 que lo pide sin punto ni exponente, sin tocar la base', async (field, literal) => {
+    const spy = vi.spyOn(pool, 'query');
+    try {
+      const r = await send('/orders', bodyWith(field, literal));
+      expect(r.status).toBe(400);
+      expect(r.body).toEqual({ error: 'BAD_REQUEST', message: `${field}: ${NUMBER_LITERAL_MESSAGE}` });
+      expect(spy).not.toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('también en el cancel (userid 1.0) y en cualquier número del body', async () => {
+    expect((await send('/orders/1/cancel', '{"userid":1.0}')).body).toEqual({ error: 'BAD_REQUEST', message: `userid: ${NUMBER_LITERAL_MESSAGE}` });
+    expect((await send('/orders', '{"userid":1,"side":"CASH_IN","amount":"1","extra":[2.5]}')).body)
+      .toEqual({ error: 'BAD_REQUEST', message: `0: ${NUMBER_LITERAL_MESSAGE}` });
+  });
+
+  // El middleware nuevo reenvía los demás errores del parser sin tocarlos: también el status (413, no 400).
+  it('JSON inválido (400) y body demasiado grande (413) siguen como antes', async () => {
+    const invalid = await send('/orders', '{"amount": 1.}');
+    expect(invalid.status).toBe(400);
+    expect(invalid.body).toEqual({ error: 'BAD_REQUEST', message: 'JSON inválido' });
+    const tooLarge = await send('/orders', `{"a":"${'x'.repeat(17 * 1024)}"}`);
+    expect(tooLarge.status).toBe(413);
+    expect(tooLarge.body).toEqual({ error: 'BAD_REQUEST', message: 'body demasiado grande' });
+  });
+
+  // El camino de un body aceptado: el mismo reviver que usa la app y después OrderBody.
+  const parseText = (text: string) => OrderBody.safeParse(JSON.parse(text, integerLiteralsOnly));
+
+  it('enteros como número siguen como hoy: 100 y 2⁵³ − 1 en amount y price, 100 y 2³¹ − 1 en ids y size; -0 llega a la regla de > 0', () => {
+    for (const field of ['amount', 'price'] as const) {
+      expect(parseText(bodyWith(field, '100')).data?.[field]).toBe('100.00');
+      expect(parseText(bodyWith(field, '9007199254740991')).data?.[field]).toBe('9007199254740991.00');
+      expect(parseText(bodyWith(field, '9007199254740992')).success).toBe(false);   // issue #8
+    }
+    for (const field of ['size', 'userid', 'instrumentid'] as const) {
+      expect(parseText(bodyWith(field, '100')).data?.[field]).toBe(100);
+      expect(parseText(bodyWith(field, '2147483647')).data?.[field]).toBe(2_147_483_647);
+    }
+    expect(parseText(bodyWith('userid', '-0')).error?.issues.map((i) => i.message)).toEqual(['debe ser > 0']);
+  });
+
+  it('strings siguen como hoy: "100.0" y "999999999999999.99" exactos; "1e2" se rechaza por formato', () => {
+    expect(parseText(bodyWith('price', '"100.0"')).data?.price).toBe('100.00');
+    expect(parseText(bodyWith('amount', '"999999999999999.99"')).data?.amount).toBe('999999999999999.99');
+    expect(parseText(bodyWith('amount', '"1e2"')).success).toBe(false);
+  });
+
+  // Generativa, con semilla fija: montos de 2 decimales entre 10¹³ y 10¹⁵, la zona donde la separación
+  // entre doubles se acerca a los centavos y la supera (desde ~2,8 × 10¹⁴).
+  function mulberry32(seed: number) {
+    let a = seed >>> 0;
+    return () => {
+      a = (a + 0x6d2b79f5) >>> 0;
+      let t = a;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  /** n montos "ddd.cc": parte entera en [10¹³, 10¹⁵) (exacta: < 2⁵³) y centavos de 01 a 99, siempre con decimales. */
+  function amounts(seed: number, n: number): string[] {
+    const rnd = mulberry32(seed);
+    return Array.from({ length: n }, () => {
+      const whole = 1e13 + Math.floor(rnd() * (1e15 - 1e13));
+      const cents = 1 + Math.floor(rnd() * 99);
+      return `${whole}.${String(cents).padStart(2, '0')}`;
+    });
+  }
+  const SAMPLE = amounts(42, 2000);
+
+  it('generativa: amount y price con 2 decimales entre 10¹³ y 10¹⁵ como número → nunca aceptados; como string → exactos', () => {
+    for (const field of ['amount', 'price'] as const) {
+      for (const a of SAMPLE) {
+        expect(() => JSON.parse(bodyWith(field, a), integerLiteralsOnly), `${field} ${a}`).toThrow(NumberLiteralError);
+        expect(parseText(bodyWith(field, `"${a}"`)).data?.[field], `${field} "${a}"`).toBe(a);
+      }
+    }
+  });
+
+  it('la muestra cubre el defecto: sin el reviver, una parte pasaría por OrderBody con otro monto', () => {
+    const altered = SAMPLE.filter((a) => {
+      const r = OrderBody.safeParse(JSON.parse(bodyWith('amount', a)));
+      return r.success && r.data.amount !== a;
+    });
+    expect(altered.length).toBeGreaterThan(0);
+  });
 });

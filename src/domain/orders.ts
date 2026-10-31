@@ -9,6 +9,8 @@ import { MAX_CASH_MOVE_CENTS, MoneyError, fromCents, toCents } from './money.js'
 // Un number solo se acepta si es entero: 100.5 como number no garantiza la escala. Y solo dentro de
 // ±2⁵³ − 1: un entero mayor ya llega redondeado desde JSON.parse (9007199254740993 → …992), así que
 // se rechaza y se pide como string (issue #8). El tope de magnitud lo pone place_order (D-14).
+// Que el number sea entero no alcanza: 999999999999999.99 también llega entero. Por HTTP, el literal
+// con punto o exponente ya lo rechazó el reviver de src/http/json-body.ts (issue #42).
 // Sale canonizado a 2 decimales (100, "100.0" → "100.00"): el mismo monto da el mismo hash de idempotencia (D-19).
 const Decimal2 = z.union([
   z.string(),

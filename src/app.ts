@@ -1,6 +1,7 @@
 import express from 'express';
 import { config } from './config.js';
 import { HttpError, errorHandler } from './http/errors.js';
+import { jsonBody } from './http/json-body.js';
 import { requestLog } from './http/request-log.js';
 import { portfolioRouter } from './routes/portfolio.routes.js';
 import { ordersRouter } from './routes/orders.routes.js';
@@ -14,7 +15,7 @@ export function createApp(
   app.disable('x-powered-by');
   app.set('query parser', 'simple');
   app.use(requestLog);
-  app.use(express.json({ limit: '16kb' }));
+  app.use(jsonBody({ limit: '16kb' }));   // números: solo enteros por su literal (D-13, issue #42)
   app.use(healthRouter(opts.release));
   app.use(portfolioRouter);
   app.use(instrumentsRouter);

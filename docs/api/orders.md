@@ -81,6 +81,7 @@ Un reintento con la misma clave y el mismo body tiene el replay **garantizado du
 | `422` | `LIMIT` | el resultado saldría de ±10¹⁵ ARS o 2⁶² acciones, o el importe de la orden (`size × price`) supera 10¹⁵ ARS, o el costo de la posición superaría 10¹⁷ ARS ([D-14](../decisiones.md#d-14)) | no |
 | `503` | `LOCK_TIMEOUT` · `TIMEOUT` · `VERSION_MISMATCH` | el usuario tenía otra operación en curso, se venció el tiempo (de la escritura o de la espera por una conexión con la base), o hay un despliegue en curso | no, o resultado desconocido: **reintentar con la misma clave** ([D-20](../decisiones.md#d-20)) |
 | `503` | `CONNECTION_LOST` | la conexión con la base se cortó (reinicio de Postgres, failover, red), antes o después de enviar la escritura | resultado desconocido: **reintentar con la misma clave** |
+| `503` | `DEADLOCK` | Postgres eligió la escritura como víctima de un deadlock (SQLSTATE `40P01`). No debería ocurrir: si pasa, reportarlo | no: Postgres revierte la escritura entera; **reintentar con la misma clave** |
 | `500` | `INTERNAL` | un error no previsto | resultado desconocido: **reintentar con la misma clave** |
 
 Todos los errores responden `{ "error": "...", "message": "..." }`.
@@ -118,6 +119,7 @@ Devuelve la orden con la misma forma que `POST /orders`, con su estado actual, s
 | Código | Cuándo |
 |---|---|
 | `200` | estaba `NEW` y quedó `CANCELLED` con `cancel_reason: "USER"`; devuelve la orden. Libera lo reservado. |
+| `400 BAD_REQUEST` | el id no es un entero > 0 (hasta 2³¹ − 1); falta `userid` o no es un entero > 0 (hasta 2³¹ − 1); el body trae campos de más o no es JSON válido |
 | `404 NOT_FOUND` | no existe o es de otro usuario |
 | `409 NOT_CANCELLABLE` | ya no estaba `NEW`; el body incluye la orden con su estado actual |
 

@@ -19,6 +19,8 @@
 
 `main` está protegida por un ruleset sin bypass (también para administradores): no se integra nada sin `ci`, `commit-messages` y `codex/review` en verde. `ready-gate` (`.github/workflows/ready-gate.yml`, que corre `scripts/ready-gate.sh`) usa `pull_request_target`: corre el workflow y el script de `main`, sin checkout del PR, así que un PR no puede cambiar su propia gate. Decide sobre el head y el status vigentes, no los del evento, y de a una corrida por PR: una corrida atrasada no revierte un PR aprobado ni aprueba un commit nuevo con el status de uno anterior. Si no puede confirmar `codex/review` en verde (la API no responde, el head se mueve), devuelve el PR a borrador; si tampoco puede convertirlo, falla diciéndolo. `test/unit/ready-gate.test.ts` lo prueba con `gh` simulado.
 
+En los checks de un PR cada workflow aparece con el nombre de su job: `ci` (workflow `ci`), `commit-messages` (workflow `pr-format`) y `codex-review-before-ready` (workflow `ready-gate`). `codex/review` no es un workflow: es el commit status que fija la [revisión de Codex](#revisión-de-codex).
+
 ## Formato de commits y PRs
 
 Obligatorio. Con squash merge, el título y la descripción del PR son el commit que queda en `main`, así que la misma regla vale para los dos.
@@ -47,6 +49,7 @@ Refs: #<issue>
 - Después de `Refs:` solo van trailers de git (`Co-Authored-By: …`) y lo que agregan las herramientas: la línea `🤖 Generated with …`, URLs sueltas y un pie libre que empieza con una línea `---` (lo que sigue al `---` no se valida). Cualquier otro texto después de `Refs:` se rechaza.
 - En un PR, el título se valida tal cual: no puede empezar con `#` ni estar vacío, aunque la descripción tenga un mensaje completo.
 - Los docs versionados (`README.md`, `docs/`, este archivo) no dicen cuántas pruebas hay: ese número cambia con cada PR que agrega una y hace chocar a dos PRs en paralelo. La cuenta va en "Cómo se probó" del PR. `test/unit/docs` falla si un `.md` versionado tiene un número seguido de "pruebas" o "tests".
+- Cada archivo `test/**/*.test.ts` nuevo lleva su fila en la tabla de [`docs/testing.md`](docs/testing.md#qué-prueba-cada-suite), y los docs no enlazan al repositorio `dante0x95/cocos-challenge` (sin `-a`), que es privado. `test/unit/docs-sync` falla si no.
 
 Lo valida `scripts/commit-msg/check.ts`: en el CI (job `commit-messages`) y, si se activa, como hook local:
 

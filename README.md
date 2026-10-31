@@ -104,7 +104,9 @@ Todos en [`db/migrations`](db/migrations), justificados en cada archivo y en las
 ```
 db/
   migrations/     000 seed del challenge (sin modificar) · 001 esquema y roles · 002 auditoría
-                  003 libro de órdenes · 005 motivo de cancelación — corren una vez
+                  003 libro de órdenes · 005 motivo de cancelación · 006 plazo de idempotencia
+                  007 motivo UNBACKED · 008 índices del executor de LIMIT
+                  009 búsqueda con pg_trgm y unaccent — corren una vez
   functions/      010 base · 020 balance · 030 órdenes · 040 operación · 090 privilegios — repetibles
 src/
   db/             pool (una sentencia por escritura) · bootstrap (migraciones, funciones, verificación)
@@ -117,6 +119,9 @@ test/             unit · db · concurrency · property · bootstrap · oracle (
 docs/             decisiones · benchmark del balance · pruebas · contratos de la API
 rest-client/      colección de requests
 deploy/           gate del workflow, verificaciones y ensayos · lightsail/: el servidor (compose, Caddy, setup y deploy)
+scripts/          revisión de Codex · formato de commits y PRs (y su hook) · ready-gate
+                  versión anterior sobre la base nueva (CI)
+.github/          workflows: ci · pr-format · ready-gate · deploy — y la plantilla de los PRs
 ```
 
 ## Fuera de alcance

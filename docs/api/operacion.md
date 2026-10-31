@@ -68,11 +68,20 @@ Qué versión atiende cada entorno: Settings → Environments (el último deploy
 
 Una sola vez, antes del primer release, desde la raíz del repo parado en `main`, con `gh` autenticado y la clave por defecto de la instancia que se baja de la consola de Lightsail (Account → SSH keys). Nada de esto lo hace el workflow.
 
+**Ya se hizo** para este servidor, antes de v0.1.0. Para verificar que sigue preparado, sin cambiar nada:
+
+```bash
+ssh -i ~/.ssh/cocos-deploy -o IdentitiesOnly=yes deploy@18.227.203.30 docker ps   # la clave de deploy entra y lista Caddy y los entornos
+for env in staging production; do gh secret list --env "$env"; done              # LIGHTSAIL_HOST, LIGHTSAIL_SSH_KEY y LIGHTSAIL_KNOWN_HOSTS en cada uno
+```
+
 ```bash
 git switch main && git pull
 HOST=18.227.203.30
 LIGHTSAIL_KEY=~/.ssh/LightsailDefaultKey-us-east-2.pem
 ```
+
+La primera conexión SSH a la instancia (el primer comando del paso 2) pide aceptar la huella de la clave del host. Antes de aceptarla, compararla con la que muestra `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` en la consola de Lightsail (Connect using SSH, en el navegador): el paso 3 lee la clave del host por esa conexión y la fija en Actions, así que una huella aceptada sin verificar es la que el deploy va a dar por buena.
 
 1. La clave de deploy, dedicada: sin passphrase, porque la usa GitHub Actions.
 
@@ -132,7 +141,7 @@ El primer deploy de cada entorno no tiene release anterior: el gate de ancestrí
 - **Staging en rojo, producción no**: el job `production` no corre (`needs: staging`); lo que atiende producción no cambia. Un deploy de staging con una migración nueva corre su bootstrap contra la base de staging antes de que esa migración llegue a producción.
 - **En el servidor**: `ssh -i ~/.ssh/cocos-deploy deploy@18.227.203.30`, y cada entorno es un proyecto de compose en `/opt/cocos/<entorno>`: `docker compose -p cocos-production --project-directory /opt/cocos/production --env-file /opt/cocos/production/release.env logs api`. Las imágenes viejas se acumulan (la vuelta atrás usa la anterior): `docker image prune -a` borra las que ningún contenedor usa.
 - **Ensayos** (a mano; no corren en el CI). `deploy/drills.sh`, con `gh` autenticado: el último release pasó por el workflow de deploy y `/health` lo atiende (`release [tag]`), y un re-run del deploy de un release viejo se frena en el gate (`rerun`); `URL` elige el entorno (por defecto, producción). `deploy/lightsail/drill-docker.sh`, con Docker en la máquina local y sin el servidor: `remote.sh` con imágenes rotas a propósito (un bootstrap que falla, una API cuyo `/health` responde `503`) tiene que rechazarlas y volver a la buena; conviene correrlo después de cambiar `remote.sh` o `compose.yml`.
-- **Token interno** para `/internal/*`: `ssh -i ~/.ssh/cocos-deploy deploy@18.227.203.30 cat /opt/cocos/production/api.env`.
+- **Token interno** para `/internal/*`, solo el token (`api.env` tiene también `DATABASE_URL`, con la contraseña del rol `api`): `ssh -i ~/.ssh/cocos-deploy deploy@18.227.203.30 "sed -n 's/^INTERNAL_TOKEN=//p' /opt/cocos/<entorno>/api.env"`, con `<entorno>` `staging` o `production`.
 
 **Cambio de hash de idempotencia.** Si cambia cómo se calcula el hash de `POST /orders`, las claves vigentes (24 h) guardan el hash viejo y su reintento respondería `422`. El cambio tiene que aceptar también el hash anterior, solo para reconocer claves existentes y dentro de la misma llamada a `app.place_order`, hasta que vence la ventana; después se borra esa compatibilidad. Como el vencimiento lo decide `place_order` con `created_at`, la ventana termina 24 h + 1 min después del despliegue aunque la limpieza no haya corrido. Así se hizo al canonizar `amount` y `price` ([D-19](../decisiones.md#d-19)).
 

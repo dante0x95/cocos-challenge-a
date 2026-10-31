@@ -51,7 +51,7 @@ En el servidor lo corre cada deploy, con la imagen nueva y antes de cambiar de v
 
 Se despliega al **publicar una versión**: un GitHub Release con tag `vX.Y.Z` sobre un commit de `main` con el check `ci` en verde (`.github/workflows/deploy.yml`, [D-29](../decisiones.md#d-29)). Un merge a `main` corre solo el CI. Para publicar una versión, después de mergear:
 
-1. Las notas de la versión están en [`CHANGELOG.md`](../../CHANGELOG.md), la fuente: una sección por versión con lo que cambia para quien usa u opera el sistema y, en **Antes de publicar**, los pasos de operación que esa versión exige (hacerlos antes del paso 2). El PR que cierra la versión la completa con todo lo que entró desde el tag anterior.
+1. Las notas de la versión están en [`CHANGELOG.md`](../../CHANGELOG.md), la fuente: una sección por versión con lo que cambia para quien usa u opera el sistema y, en **Antes de publicar**, los pasos de operación que esa versión exige (hacerlos antes del paso 2). El PR que cierra la versión la completa con todo lo que entró desde el tag anterior: `test/unit/changelog` exige que la sección "sin publicar" nombre cada PR mergeado desde el último tag. Después de publicar, el PR siguiente cambia "sin publicar" por la fecha y abre la sección de la versión que sigue (si no, ese test frena el CI).
 2. Publicar el release. `--generate-notes` agrega la lista de PRs de GitHub; el texto del release puede ser la sección del CHANGELOG (`--notes-file` con esa sección), o el link a ella.
 
 ```bash

@@ -2,7 +2,9 @@
 // tag vX.Y.Z sobre un commit de main con el CI en verde, y exactamente ese commit: primero en
 // staging y después en producción, en un servidor con dos proyectos de Docker Compose detrás de
 // Caddy. Lo frena si no desciende del release que atiende, corre el bootstrap antes de cambiar de
-// versión, exige que /health atienda el commit y, si no, vuelve a la versión anterior. Sin red:
+// versión, exige que /health atienda el commit y que pase el smoke funcional (issue #51: el flujo
+// de órdenes en staging, con un usuario que existe solo ahí, y lecturas en producción) y, si no,
+// vuelve a la versión anterior. Sin red:
 //
 // 1. .github/workflows/deploy.yml: su disparador, sus jobs y el orden de sus pasos, con un
 //    evaluador mínimo de expresiones de GitHub Actions (solo lo que el workflow usa: contextos
@@ -13,7 +15,9 @@
 // 3. Los scripts que corren esos pasos (deploy/*.sh y deploy/lightsail/*.sh), con `curl`, `gh`,
 //    `ssh` y `docker` simulados y repositorios git temporales. El `ssh` simulado corre el comando
 //    en la máquina local, así que remote.sh corre de verdad sobre un directorio temporal que hace
-//    de /opt/cocos; el `docker` simulado anota cada llamada y qué API atiende cada entorno.
+//    de /opt/cocos; el `docker` simulado anota cada llamada y qué API atiende cada entorno. El
+//    smoke (deploy/smoke.mjs) también es simulado: un `node` que pasa o falla según qué release
+//    atiende; el script de verdad lo prueban test/db/smoke y deploy/lightsail/smoke-docker.sh.
 // 4. Los jobs staging y production ejecutados paso a paso como los corre GitHub (if, outcome,
 //    salidas de los pasos), contra ese servidor simulado.
 import { spawnSync } from 'node:child_process';
@@ -131,17 +135,28 @@ const URLS: Record<string, string> = {
   staging: 'https://staging.18-227-203-30.sslip.io',
   production: 'https://18-227-203-30.sslip.io',
 };
-/** Los pasos de cada entorno, en orden: el bootstrap antes de cambiar, la vuelta atrás al final. */
-const DEPLOY_FLOW = [
-  'deploy/lightsail/deploy.sh access',
-  'deploy/lightsail/deploy.sh current',
-  'deploy/release-check.sh before',
-  'deploy/lightsail/deploy.sh pull',
-  'deploy/lightsail/deploy.sh bootstrap',
-  'deploy/lightsail/deploy.sh switch',
-  'deploy/release-check.sh after',
-  'deploy/lightsail/deploy.sh rollback',
-];
+const RUN = {
+  access: 'deploy/lightsail/deploy.sh access',
+  current: 'deploy/lightsail/deploy.sh current',
+  before: 'deploy/release-check.sh before',
+  pull: 'deploy/lightsail/deploy.sh pull',
+  bootstrap: 'deploy/lightsail/deploy.sh bootstrap',
+  smokeUser: 'deploy/lightsail/deploy.sh smoke-user',
+  switch: 'deploy/lightsail/deploy.sh switch',
+  after: 'deploy/release-check.sh after',
+  smokeWrite: 'deploy/smoke.mjs write',
+  smokeRead: 'deploy/smoke.mjs read',
+  rollback: 'deploy/lightsail/deploy.sh rollback',
+};
+/**
+ * Los pasos de cada entorno, en orden: el bootstrap antes de cambiar, el smoke después de /health
+ * y la vuelta atrás al final. El usuario del smoke y el flujo de órdenes, solo en staging;
+ * producción corre el smoke de solo lectura.
+ */
+const FLOWS: Record<string, string[]> = {
+  staging: [RUN.access, RUN.current, RUN.before, RUN.pull, RUN.bootstrap, RUN.smokeUser, RUN.switch, RUN.after, RUN.smokeWrite, RUN.rollback],
+  production: [RUN.access, RUN.current, RUN.before, RUN.pull, RUN.bootstrap, RUN.switch, RUN.after, RUN.smokeRead, RUN.rollback],
+};
 
 describe('workflow de deploy', () => {
   it('el evaluador rechaza lo que no entiende', () => {
@@ -241,7 +256,7 @@ describe('workflow de deploy', () => {
       expect(job(name)).not.toMatch(/docker build|packages: write/);
       // El token del job alcanza para bajar la imagen privada de GHCR, no para publicarla.
       expect(job(name)).toMatch(/^ {4}permissions:\n {6}contents: read\n {6}packages: read\n {4}\w/m);
-      expect(runsOf(job(name))).toEqual(DEPLOY_FLOW);
+      expect(runsOf(job(name))).toEqual(FLOWS[name]);
     }
   });
 
@@ -979,6 +994,8 @@ function server() {
       '  login) cfg="${DOCKER_CONFIG:-$HOME/.docker}"; mkdir -p "$cfg"; printf \'{"auths":{"ghcr.io":{"auth":"%s"}}}\' "$(cat)" > "$cfg/config.json" ;;',
       '  compose)',
       '    case " $* " in',
+      // psql en el contenedor de la base (remote.sh smoke-user): anota el SQL y responde un id.
+      '      *" exec -T db psql "*) cat > "$CALLS.sql.$env"; printf "%s\\n" "${SMOKE_DB_USERID-41}" ;;',
       '      *" up "*" api "*) printf "%s %s\\n" "$image" "$release" > "$COCOS_ROOT/$env/.running" ;;',
       '      *" rm "*" api "*) rm -f "$COCOS_ROOT/$env/.running" ;;',
       '    esac ;;',
@@ -996,6 +1013,17 @@ function server() {
       'else printf \'{"ok":true,"db":"up","release":"%s","users":"4"}\' "$release"; fi',
     ].join('\n'),
     sleep: ':',
+    // deploy/smoke.mjs corre con `node` (su shebang): este lo anota con URL, SHA y SMOKE_USERID y
+    // pasa si la API de ese entorno atiende, salvo que su release esté en SMOKE_BROKEN.
+    node: [
+      'echo "node $* [URL=${URL:-} SHA=${SHA:-} SMOKE_USERID=${SMOKE_USERID:-}]" >> "$CALLS"',
+      'case "${URL:-}" in *//staging.*) env=staging ;; *) env=production ;; esac',
+      'f="$COCOS_ROOT/$env/.running"',
+      '[ -f "$f" ] || { echo "SMOKE FALLIDO: simulado: sin API" >&2; exit 1; }',
+      'release="$(cut -d" " -f2 "$f")"',
+      'if [[ " ${SMOKE_BROKEN:-} " == *" $release "* ]]; then echo "SMOKE FALLIDO: simulado" >&2; exit 1; fi',
+      'echo "== SMOKE OK (simulado)"',
+    ].join('\n'),
   };
   for (const [name, body] of Object.entries(scripts)) {
     writeFileSync(join(bin, name), `#!/usr/bin/env bash\n${body}\n`);
@@ -1033,6 +1061,8 @@ function server() {
     clearCalls: () => writeFileSync(calls, ''),
     running: (env: string) => (existsSync(join(root, env, '.running')) ? readFileSync(join(root, env, '.running'), 'utf8').trim() : null),
     state: (env: string, file = 'release.env') => (existsSync(join(root, env, file)) ? readFileSync(join(root, env, file), 'utf8') : null),
+    /** El SQL que recibió psql en la base de ese entorno (remote.sh smoke-user), o null. */
+    sql: (env: string) => (existsSync(`${calls}.sql.${env}`) ? readFileSync(`${calls}.sql.${env}`, 'utf8') : null),
     /** deploy.sh o release-check.sh en el checkout, con el entorno de un paso. */
     run: (cmd: string, env: Record<string, string>, input?: string) =>
       spawnSync('bash', ['-c', cmd], { cwd: repo, encoding: 'utf8', input, env: { ...baseEnv, ...env } }),
@@ -1094,7 +1124,9 @@ describe.each(['staging', 'production'])('el job %s contra el servidor simulado'
     for (const s of servers.splice(0)) rmSync(s.dir, { recursive: true, force: true });
   });
   const fresh = () => { const s = server(); servers.push(s); return s; };
-  const [ACCESS, CURRENT, BEFORE, PULL, BOOTSTRAP, SWITCH, AFTER, ROLLBACK] = DEPLOY_FLOW;
+  const DEPLOY_FLOW = FLOWS[name];
+  /** Los pasos hasta `last`, incluido, en el orden del entorno. */
+  const upTo = (last: string) => DEPLOY_FLOW.slice(0, DEPLOY_FLOW.indexOf(last) + 1);
   const [I0, I1, I2] = [imageOf('a'), imageOf('b'), imageOf('c')];
 
   it('el primer deploy y uno posterior: cada uno corre el bootstrap con su imagen antes de cambiar la API, y atiende su commit', () => {
@@ -1118,6 +1150,8 @@ describe.each(['staging', 'production'])('el job %s contra el servidor simulado'
       `docker image inspect ${I2}`,
       `docker compose up -d --wait --wait-timeout 7 db ${tag}`,
       `docker compose run --rm -T --no-deps -e RELEASE=${s.shas[2]} -e SERVING_RELEASE=${s.shas[0]} migrate ${tag}`,
+      // Solo staging: el usuario del smoke, con psql en la base, antes de cambiar la API.
+      ...(name === 'staging' ? [`docker compose exec -T db psql -U postgres -d cocos -X -q -A -t -v ON_ERROR_STOP=1 -1 -f - ${tag}`] : []),
       `docker compose up -d --wait --wait-timeout 7 --no-deps api ${tag}`,
     ]);
     expect(docker.slice(3).every((c) => c.includes(` -p cocos-${name} --project-directory ${join(s.root, name)} `))).toBe(true);
@@ -1130,7 +1164,7 @@ describe.each(['staging', 'production'])('el job %s contra el servidor simulado'
     execJob(s, name, s.shas[0], I0);
     s.clearCalls();
     const r = execJob(s, name, s.shas[1], I1, { BROKEN: s.shas[1] });
-    expect(r).toEqual({ ran: DEPLOY_FLOW, status: 'failure' });
+    expect(r).toEqual({ ran: [...upTo(RUN.after), RUN.rollback], status: 'failure' });
     expect(s.running(name)).toBe(`${I0} ${s.shas[0]}`);
     expect(s.state(name)).toBe(releaseEnv(I0, s.shas[0], name));
     // La vuelta atrás recrea la API con la imagen anterior, sin correr el bootstrap anterior, y
@@ -1168,7 +1202,7 @@ describe.each(['staging', 'production'])('el job %s contra el servidor simulado'
     const s = fresh();
     execJob(s, name, s.shas[0], I0);
     const r = execJob(s, name, s.shas[1], I1, { DOCKER_FAIL: `--no-deps api \\[IMAGE=${ere(I1)}` });
-    expect(r).toEqual({ ran: [ACCESS, CURRENT, BEFORE, PULL, BOOTSTRAP, SWITCH, ROLLBACK], status: 'failure' });
+    expect(r).toEqual({ ran: [...upTo(RUN.switch), RUN.rollback], status: 'failure' });
     expect(s.running(name)).toBe(`${I0} ${s.shas[0]}`);
     expect(s.state(name)).toBe(releaseEnv(I0, s.shas[0], name));
   });
@@ -1178,7 +1212,7 @@ describe.each(['staging', 'production'])('el job %s contra el servidor simulado'
     execJob(s, name, s.shas[0], I0);
     s.clearCalls();
     const r = execJob(s, name, s.shas[1], I1, { DOCKER_FAIL: 'run --rm' });
-    expect(r).toEqual({ ran: [ACCESS, CURRENT, BEFORE, PULL, BOOTSTRAP], status: 'failure' });
+    expect(r).toEqual({ ran: upTo(RUN.bootstrap), status: 'failure' });
     expect(s.calls().some((c) => / api \[/.test(c))).toBe(false);
     expect(s.running(name)).toBe(`${I0} ${s.shas[0]}`);
     expect(s.state(name)).toBe(releaseEnv(I0, s.shas[0], name));
@@ -1189,7 +1223,7 @@ describe.each(['staging', 'production'])('el job %s contra el servidor simulado'
     execJob(s, name, s.shas[2], I2);
     s.clearCalls();
     const r = execJob(s, name, s.shas[0], I0);
-    expect(r).toEqual({ ran: [ACCESS, CURRENT, BEFORE], status: 'failure' });
+    expect(r).toEqual({ ran: upTo(RUN.before), status: 'failure' });
     expect(s.calls().filter((c) => c.startsWith('docker '))).toEqual([]);
     expect(s.running(name)).toBe(`${I2} ${s.shas[2]}`);
     expect(s.state(name)).toBe(releaseEnv(I2, s.shas[2], name));
@@ -1201,7 +1235,7 @@ describe.each(['staging', 'production'])('el job %s contra el servidor simulado'
     writeFileSync(join(s.root, name, 'release.env'), `IMAGE=${I2}\nENVIRONMENT=${name}\n`);
     s.clearCalls();
     const r = execJob(s, name, s.shas[0], I0);
-    expect(r).toEqual({ ran: [ACCESS, CURRENT], status: 'failure' });
+    expect(r).toEqual({ ran: upTo(RUN.current), status: 'failure' });
     expect(s.calls().filter((c) => c.startsWith('docker '))).toEqual([]);
     expect(s.running(name)).toBe(`${I2} ${s.shas[2]}`);
   });
@@ -1236,7 +1270,7 @@ describe.each(['staging', 'production'])('el job %s contra el servidor simulado'
   it('si el primer deploy falla, saca la API y el entorno queda sin release: el siguiente vuelve a ser el primero', () => {
     const s = fresh();
     const r = execJob(s, name, s.shas[1], I1, { BROKEN: s.shas[1] });
-    expect(r).toEqual({ ran: DEPLOY_FLOW, status: 'failure' });
+    expect(r).toEqual({ ran: [...upTo(RUN.after), RUN.rollback], status: 'failure' });
     expect(s.running(name)).toBeNull();
     expect(s.state(name)).toBeNull();
     expect(execJob(s, name, s.shas[0], I0).status).toBe('success');
@@ -1262,6 +1296,110 @@ describe.each(['staging', 'production'])('el job %s contra el servidor simulado'
     const other = name === 'staging' ? 'production' : 'staging';
     expect(s.state(other)).toBeNull();
     expect(s.calls().filter((c) => c.includes(`cocos-${other}`) || c.includes(join(s.root, other)))).toEqual([]);
+  });
+});
+
+// Issue #51, plan de pruebas 3 y 4: el smoke funcional después del cambio, contra la URL pública.
+// En staging, el flujo de órdenes con el usuario que prepara smoke-user (antes del cambio); si
+// falla, la vuelta atrás, y el job en rojo deja producción sin desplegar. En producción, solo
+// lecturas, sin usuario del smoke.
+describe('el smoke funcional en el deploy', () => {
+  const servers: Server[] = [];
+  afterEach(() => {
+    for (const s of servers.splice(0)) rmSync(s.dir, { recursive: true, force: true });
+  });
+  const fresh = () => { const s = server(); servers.push(s); return s; };
+  const [I0, I1] = [imageOf('a'), imageOf('b')];
+  const smokeCalls = (s: Server) => s.calls().filter((c) => c.startsWith('node '));
+
+  it('los pasos: staging prepara el usuario del smoke y corre el flujo con él; producción, solo lecturas', () => {
+    const user = step(job('staging'), 'Usuario del smoke');
+    expect(keyIn(user, 'id')).toBe('smoke');
+    expect(keyIn(user, 'if')).toBeUndefined();
+    expect(envOf(step(job('staging'), 'Smoke funcional'), 8)).toEqual({ SMOKE_USERID: '${{ steps.smoke.outputs.userid }}' });
+    expect(keyIn(step(job('staging'), 'Smoke funcional'), 'if')).toBeUndefined();
+    const readOnly = step(job('production'), 'Smoke de solo lectura');
+    expect(keyIn(readOnly, 'if')).toBeUndefined();
+    expect(envOf(readOnly, 8)).toEqual({});
+    expect(job('production')).not.toMatch(/smoke-user|SMOKE_USERID|smoke\.mjs write/);
+    // Node para el smoke, de la misma acción que el CI.
+    const ciSetup = read('.github/workflows/ci.yml').match(/^ {6}- (uses: actions\/setup-node@.+)$/m)![1];
+    for (const name of ['staging', 'production']) {
+      const setup = stepsOf(job(name)).filter((st) => st.startsWith('uses: actions/setup-node@'));
+      expect(setup).toHaveLength(1);
+      expect(keyIn(setup[0], 'node-version')).toBe('22');
+      expect(setup[0].split('\n')[0]).toBe(ciSetup);
+    }
+    expect(statSync(join(ROOT, 'deploy/smoke.mjs')).mode & 0o111).not.toBe(0);
+    expect(read('deploy/smoke.mjs').split('\n')[0]).toBe('#!/usr/bin/env node');
+  });
+
+  it('staging: el usuario del smoke antes del cambio, y el smoke después de /health, con ese usuario y por la URL de staging', () => {
+    const s = fresh();
+    expect(execJob(s, 'staging', s.shas[0], I0, { SMOKE_DB_USERID: '57' })).toEqual({ ran: FLOWS.staging.slice(0, -1), status: 'success' });
+    expect(smokeCalls(s)).toEqual([`node deploy/smoke.mjs write [URL=${URLS.staging} SHA=${s.shas[0]} SMOKE_USERID=57]`]);
+    // psql recibe el SQL del commit, en la base de staging, después del bootstrap y antes de la API.
+    expect(s.sql('staging')).toBe(read('deploy/lightsail/smoke-user.sql'));
+    const calls = s.calls();
+    const at = (re: RegExp) => calls.findIndex((c) => re.test(c));
+    expect(at(/ run --rm .* migrate /)).toBeLessThan(at(/ exec -T db psql /));
+    expect(at(/ exec -T db psql /)).toBeLessThan(at(/ --no-deps api /));
+    expect(calls.length - 1 - [...calls].reverse().findIndex((c) => c.startsWith('curl '))).toBeLessThan(at(/^node /));
+    expect(calls.find((c) => / exec -T db psql /.test(c))).toContain(' -p cocos-staging ');
+  });
+
+  it('staging: un smoke fallido vuelve a la versión anterior, el job queda en rojo y producción no corre', () => {
+    const s = fresh();
+    execJob(s, 'staging', s.shas[0], I0);
+    s.clearCalls();
+    const r = execJob(s, 'staging', s.shas[1], I1, { SMOKE_BROKEN: s.shas[1] });
+    expect(r).toEqual({ ran: FLOWS.staging, status: 'failure' });
+    expect(s.running('staging')).toBe(`${I0} ${s.shas[0]}`);
+    expect(s.state('staging')).toBe(releaseEnv(I0, s.shas[0], 'staging'));
+    // El smoke corrió contra el release nuevo, ya atendiendo; la vuelta atrás, después.
+    expect(smokeCalls(s)).toEqual([`node deploy/smoke.mjs write [URL=${URLS.staging} SHA=${s.shas[1]} SMOKE_USERID=41]`]);
+    // Producción depende de staging sin `if`: con staging en rojo, GitHub no la corre.
+    expect(jobKey(job('production'), 'needs')).toMatch(/\bstaging\b/);
+    expect(jobKey(job('production'), 'if')).toBeUndefined();
+    expect(s.state('production')).toBeNull();
+  });
+
+  it('staging: si el primer deploy falla en el smoke, la API sale y el entorno queda sin release', () => {
+    const s = fresh();
+    const r = execJob(s, 'staging', s.shas[0], I0, { SMOKE_BROKEN: s.shas[0] });
+    expect(r).toEqual({ ran: FLOWS.staging, status: 'failure' });
+    expect(s.running('staging')).toBeNull();
+    expect(s.state('staging')).toBeNull();
+  });
+
+  it('staging: si no se puede preparar el usuario del smoke, no cambia de versión ni vuelve atrás', () => {
+    const s = fresh();
+    execJob(s, 'staging', s.shas[0], I0);
+    s.clearCalls();
+    const r = execJob(s, 'staging', s.shas[1], I1, { DOCKER_FAIL: 'exec -T db psql' });
+    expect(r).toEqual({ ran: FLOWS.staging.slice(0, FLOWS.staging.indexOf(RUN.smokeUser) + 1), status: 'failure' });
+    expect(s.calls().some((c) => / api \[/.test(c))).toBe(false);
+    expect(smokeCalls(s)).toEqual([]);
+    expect(s.running('staging')).toBe(`${I0} ${s.shas[0]}`);
+  });
+
+  it('producción: solo el smoke de lectura, sin usuario del smoke ni escrituras', () => {
+    const s = fresh();
+    expect(execJob(s, 'production', s.shas[0], I0)).toEqual({ ran: FLOWS.production.slice(0, -1), status: 'success' });
+    expect(smokeCalls(s)).toEqual([`node deploy/smoke.mjs read [URL=${URLS.production} SHA=${s.shas[0]} SMOKE_USERID=]`]);
+    expect(s.calls().filter((c) => /psql|smoke-user/.test(c))).toEqual([]);
+    // Los argumentos de remote.sh van después del script (citado): ninguna llamada es smoke-user.
+    expect(readFileSync(`${join(s.dir, 'calls')}.ssh`, 'utf8')).not.toMatch(/' remote\.sh smoke-user /);
+    expect(readFileSync(`${join(s.dir, 'calls')}.ssh`, 'utf8')).toMatch(/' remote\.sh switch production /);
+    expect(s.sql('production')).toBeNull();
+  });
+
+  it('producción: un smoke de lectura fallido vuelve a la versión anterior', () => {
+    const s = fresh();
+    execJob(s, 'production', s.shas[0], I0);
+    const r = execJob(s, 'production', s.shas[1], I1, { SMOKE_BROKEN: s.shas[1] });
+    expect(r).toEqual({ ran: FLOWS.production, status: 'failure' });
+    expect(s.running('production')).toBe(`${I0} ${s.shas[0]}`);
   });
 });
 
@@ -1434,6 +1572,375 @@ describe('deploy.sh y remote.sh', () => {
     expect(r.status).toBe(1);
     expect(r.stderr).toContain('no se toca nada');
     expect(s.calls().filter((c) => c.startsWith('docker '))).toEqual([]);
+  });
+});
+
+// deploy.sh smoke-user y remote.sh smoke-user (issue #51): el usuario del smoke existe solo en
+// staging. Producción se frena en los dos lados, antes de tocar la base.
+describe('smoke-user', () => {
+  const servers: Server[] = [];
+  afterEach(() => {
+    for (const s of servers.splice(0)) rmSync(s.dir, { recursive: true, force: true });
+  });
+  const I0 = imageOf('a');
+  /** Un servidor con el bootstrap de I0 terminado en `env` (lo que exige smoke-user). */
+  const bootstrapped = (env = 'staging') => {
+    const s = server();
+    servers.push(s);
+    s.run('deploy/lightsail/deploy.sh access', { ENVIRONMENT: env, ...s.secrets });
+    const r = s.run('deploy/lightsail/deploy.sh bootstrap', { ENVIRONMENT: env, IMAGE_REF: I0, SHA: s.shas[0] }, read('deploy/lightsail/compose.yml'));
+    expect(r.status).toBe(0);
+    s.clearCalls();
+    return s;
+  };
+  const smokeUser = (s: Server, env: Record<string, string> = {}) => {
+    const out = join(s.dir, 'out');
+    writeFileSync(out, '');
+    const r = s.run('deploy/lightsail/deploy.sh smoke-user', { ENVIRONMENT: 'staging', GITHUB_OUTPUT: out, ...env });
+    return { ...r, output: readFileSync(out, 'utf8') };
+  };
+
+  it('en staging, después del bootstrap: el id que devuelve psql queda en userid= de $GITHUB_OUTPUT', () => {
+    const s = bootstrapped();
+    const r = smokeUser(s, { SMOKE_DB_USERID: '73' });
+    expect(r.stderr).toBe('');
+    expect(r.status).toBe(0);
+    expect(r.output).toBe('userid=73\n');
+    expect(r.stdout).toContain('usuario del smoke en staging: 73');
+    expect(s.sql('staging')).toBe(read('deploy/lightsail/smoke-user.sql'));
+    // No consume la confirmación del bootstrap: el switch sigue habilitado.
+    expect(s.run('deploy/lightsail/deploy.sh switch', { ENVIRONMENT: 'staging', IMAGE_REF: I0, SHA: s.shas[0] }).status).toBe(0);
+  });
+
+  it('en producción frena en deploy.sh, sin SSH, y remote.sh también lo rechaza sin tocar la base', () => {
+    const s = bootstrapped('production');
+    const r = smokeUser(s, { ENVIRONMENT: 'production' });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('el usuario del smoke existe solo en staging, no en production');
+    expect(s.calls()).toEqual([]);
+    const direct = s.run('bash deploy/lightsail/remote.sh smoke-user production', {}, read('deploy/lightsail/smoke-user.sql'));
+    expect(direct.status).toBe(1);
+    expect(direct.stderr).toContain("el usuario del smoke existe solo en staging, no en 'production'");
+    expect(s.calls()).toEqual([]);
+    expect(s.sql('production')).toBeNull();
+  });
+
+  it('sin un bootstrap terminado, no toca la base', () => {
+    const s = server();
+    servers.push(s);
+    s.run('deploy/lightsail/deploy.sh access', { ENVIRONMENT: 'staging', ...s.secrets });
+    s.clearCalls();
+    const r = smokeUser(s);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('el usuario del smoke va después del paso bootstrap');
+    expect(s.calls().filter((c) => c.startsWith('docker '))).toEqual([]);
+    expect(r.output).toBe('');
+  });
+
+  it.each([['vacía', ''], ['que no es un id', 'ERROR'], ['con dos ids', '7\n8']])('frena con una respuesta de psql %s, sin escribir userid', (_name, answer) => {
+    const s = bootstrapped();
+    const r = smokeUser(s, { SMOKE_DB_USERID: answer });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('no devolvió un id');
+    expect(r.output).toBe('');
+  });
+});
+
+// deploy/lightsail/smoke-docker.sh, el smoke del CI, con un `docker` simulado que lleva qué
+// alias hay en cada red ($CALLS.net.<red>: "alias proyecto" por línea; la API entra a las redes de
+// su compose al hacer `up` y sale con `down`). Usa su propio proyecto (cocos-smoke-staging, nunca
+// cocos-staging ni cocos) y su propia red externa (cocos-smoke-edge): el api-staging de un staging
+// local en cocos-edge sigue siendo el único destino de ese nombre. El registro es el candado: si
+// otra ejecución lo tiene, no sigue ni borra nada ajeno, y se suelta recién al final de la
+// limpieza. El estado que comparten las ejecuciones (el registro, la red del ensayo, el proyecto
+// y las etiquetas de imagen, con su dueño) vive en $STATE, como en un Docker de verdad. Con
+// INTERLEAVE, antes de cada paso de la limpieza (y después del último) arranca otra ejecución,
+// completa, en ese punto. Corre bootstrap, smoke-user y switch de remote.sh y el smoke dos veces
+// con el mismo usuario; si la API no queda sana (una imagen que no arranca), no corre el smoke,
+// falla y limpia solo lo suyo.
+describe('smoke-docker.sh', () => {
+  const dirs: string[] = [];
+  afterEach(() => {
+    for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  });
+  const DIGEST = `localhost:5056/cocos-smoke@sha256:${'d'.repeat(64)}`;
+  const HEAD = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: ROOT, encoding: 'utf8' }).stdout.trim();
+  /** Un staging local ya levantado: su API, con el alias api-staging, en cocos-edge, que usa su Caddy. */
+  const EXISTING_EDGE = 'api-staging cocos-staging\ncaddy cocos-proxy\n';
+  const SCRIPT = join(ROOT, 'deploy/lightsail/smoke-docker.sh');
+  const run = (env: Record<string, string> = {}, prepare?: (state: string) => void) => {
+    const f = fakeBin({
+      docker: [
+        'me="${NESTED:-a}"',
+        'echo "docker $*" >> "$CALLS"',
+        '[ -n "${FAIL:-}" ] && [[ "$*" =~ $FAIL ]] && { echo "docker simulado: falla: $*" >&2; exit 1; }',
+        'file=""; project=""; a=("$@")',
+        'for ((i = 0; i < ${#a[@]}; i++)); do case "${a[i]}" in -f) file="${a[i+1]}" ;; -p) project="${a[i+1]}" ;; esac; done',
+        // Otra ejecución completa, en este punto de la limpieza de la primera: anota si salió y si
+        // llegó a tener el candado.
+        'other() {',
+        '  n=$(( $(ls "$STATE" | grep -c "^b[0-9]*\\.calls$" || true) + 1 )); c="$STATE/b$n.calls"',
+        '  NESTED=b$n CALLS="$c" bash "$SCRIPT" cocos:ci >/dev/null 2>"$STATE/b$n.err"; st=$?',
+        '  if grep -qx "b$n" "$STATE/acquired" 2>/dev/null; then lock=sí; else lock=no; fi',
+        '  echo "$1 $2: otra salió con $st, candado: $lock" >> "$STATE/interleave"',
+        '}',
+        'cleanup_step=""',
+        'case "$*" in "compose "*" down -v" | "rmi "* | "network rm "* | "rm -f -v "*) cleanup_step="$*" ;; esac',
+        '[ -n "${INTERLEAVE:-}" ] && [ "$me" = a ] && [ -n "$cleanup_step" ] && other antes "$cleanup_step"',
+        'case "$*" in',
+        '  *"ps -aq --filter label=com.docker.compose.project=cocos-smoke-staging") cat "$STATE/project" 2>/dev/null; printf "%s" "${PS_PROJECT:-}" ;;',
+        '  *"volume ls -q --filter name=cocos-smoke-staging_") printf "%s" "${VOL_NAME:-}" ;;',
+        // VOL_LEFT: un volumen del proyecto que down -v no borró (antes de down no está).
+        '  "volume ls -q --filter label=com.docker.compose.project=cocos-smoke-staging") [ ! -e "$STATE/downed" ] || printf "%s" "${VOL_LEFT:-}" ;;',
+        '  *"network ls -q --filter name=^cocos-smoke-edge$") cat "$STATE/net.cocos-smoke-edge" 2>/dev/null; printf "%s" "${NET_EDGE:-}" ;;',
+        // El nombre de un contenedor es único: si otro ya lo tiene, create (y run) fallan.
+        '  "create --name cocos-smoke-registry "* | "run -d --name cocos-smoke-registry "*)',
+        '    [ ! -e "$STATE/registry" ] || { echo "Conflict: name in use" >&2; exit 1; }',
+        '    echo "reg-$me" > "$STATE/registry"; echo "$me" >> "$STATE/acquired"; echo "reg-$me" ;;',
+        // Borra el registro por id o por nombre (lo que haga el script), sea de quien sea.
+        '  "rm -f -v "*) case "$(cat "$STATE/registry" 2>/dev/null)" in "$4" | "") ;; *) [ "$4" = cocos-smoke-registry ] || exit 1 ;; esac',
+        '    rm -f "$STATE/registry" ;;',
+        '  "network create "*) [ ! -e "$STATE/net.$3" ] || exit 1; echo "net-$me" > "$STATE/net.$3"; touch "$CALLS.net.$3"; echo "net-$me" ;;',
+        '  "network rm "*) for n in "$STATE"/net.*; do [ "$(cat "$n" 2>/dev/null)" = "$3" ] && rm -f "$n"; done ;;',
+        // Cada etiqueta con su dueño; rmi anota si borró la de otra ejecución.
+        '  "tag "*) echo "$me" > "$STATE/tag.${3//[\\/:]/_}" ;;',
+        '  "rmi "*) t="$STATE/tag.${2//[\\/:]/_}"; [ -e "$t" ] || exit 1; [ "$(cat "$t")" = "$me" ] || echo "$me borró la etiqueta $2 de $(cat "$t")" >> "$STATE/stolen"; rm -f "$t" ;;',
+        `  "image inspect --format"*) echo '${DIGEST}' ;;`,
+        '  *" exec -T db psql "*) cat >/dev/null; n=$(grep -c " exec -T db psql " "$CALLS"); if [ "$n" = 1 ]; then echo "${FIRST_ID-31}"; else echo "${SECOND_ID:-31}"; fi ;;',
+        // La API entra a la red interna de su proyecto y a la red edge de su compose, con su alias
+        // (API_EXTRA_NET: además a otra, como si el compose la nombrara).
+        '  "compose "*" up "*" api") cp "$file" "$CALLS.compose"; edge="$(sed -n "s/^    name: //p" "$file")"; echo "$me" > "$STATE/project"',
+        '    for n in "$edge" ${API_EXTRA_NET:-}; do sed -i.bak "/ $project\\$/d" "$CALLS.net.$n" 2>/dev/null || true; echo "api-staging $project" >> "$CALLS.net.$n"; done',
+        '    printf "%s\\n" "${project}_default" "$edge" ${API_EXTRA_NET:-} > "$CALLS.api-nets" ;;',
+        '  "compose "*" up "*) echo "$me" > "$STATE/project" ;;',
+        '  "compose "*" ps -q api") echo api789 ;;',
+        '  "inspect -f "*" api789") cat "$CALLS.api-nets" ;;',
+        '  "compose "*" down -v") touch "$STATE/downed"; [ -n "${DOWN_LEAVES:-}" ] || rm -f "$STATE/project"; for n in "$CALLS".net.*; do case "$n" in *.bak) ;; *) sed -i.bak "/ $project\\$/d" "$n" ;; esac; done ;;',
+        '  *"/smoke/smoke.mjs "*) [ -z "${SMOKE_FAIL:-}" ] || exit 1 ;;',
+        'esac',
+        '[ -n "${INTERLEAVE:-}" ] && [ "$me" = a ] && [[ "$cleanup_step" == "rm -f -v "* ]] && other después "$cleanup_step"',
+        'exit 0',
+      ].join('\n'),
+      // RM_FAIL: no se puede borrar el directorio temporal del ensayo (el resto de rm, de verdad).
+      rm: 'if [ -n "${RM_FAIL:-}" ] && [ "$1" = -rf ] && [[ "$2" == "$TMPDIR"/cocos-smoke.* ]]; then echo "rm: simulado: falla" >&2; exit 1; fi\nexec /bin/rm "$@"',
+    });
+    dirs.push(f.dir);
+    const state = join(f.dir, 'state');
+    mkdirSync(state);
+    prepare?.(state);
+    writeFileSync(`${f.log}.net.cocos-edge`, EXISTING_EDGE);
+    const r = runScript('deploy/lightsail/smoke-docker.sh', ['cocos:ci'], f.bin, { CALLS: f.log, TMPDIR: f.dir, STATE: state, SCRIPT, ...env });
+    const calls = f.calls();
+    const net = (name: string) => (existsSync(`${f.log}.net.${name}`) ? readFileSync(`${f.log}.net.${name}`, 'utf8') : null);
+    const compose = existsSync(`${f.log}.compose`) ? readFileSync(`${f.log}.compose`, 'utf8') : null;
+    const lines = (name: string) => (existsSync(join(state, name)) ? readFileSync(join(state, name), 'utf8').split('\n').filter(Boolean) : []);
+    return { ...r, calls, net, compose, state, interleave: lines('interleave'), stolen: lines('stolen'),
+      shared: readdirSync(state).filter((e) => /^(registry|project|net\.|tag\.)/.test(e)).sort(),
+      smokes: calls.filter((c) => c.includes('/smoke/smoke.mjs')).map((c) => c.split(' ').slice(-2).join(' ')),
+      removed: calls.filter((c) => /^docker (rm|rmi|network rm|volume rm) |^docker compose .* down/.test(c)),
+      leftovers: readdirSync(f.dir).filter((e) => !['bin', 'state'].includes(e) && !e.startsWith('calls')) };
+  };
+
+  it('sin la imagen local no empieza', () => {
+    const r = run({ FAIL: '^image inspect cocos:ci$' });
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain('no está la imagen cocos:ci');
+    expect(r.calls).toEqual(['docker image inspect cocos:ci']);
+  });
+
+  it.each([
+    ['contenedores del proyecto', { PS_PROJECT: 'abc' }, 'contenedores del proyecto cocos-smoke-staging'],
+    ['un volumen del proyecto', { VOL_NAME: 'cocos-smoke-staging_pgdata' }, 'volúmenes cocos-smoke-staging_*'],
+    ['la red del ensayo', { NET_EDGE: 'fed' }, 'la red cocos-smoke-edge'],
+  ])('con %s no sigue: borra solo el registro que acaba de crear', (_name, existing, what) => {
+    const r = run(existing);
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain(`NO SE CORRE: ya hay ${what}`);
+    expect(r.removed).toEqual(['docker rm -f -v reg-a']);
+    expect(r.calls.some((c) => /network create|^docker compose|^docker tag/.test(c))).toBe(false);
+    expect(r.leftovers).toEqual([]);
+  });
+
+  // CR-5: no hay nada antes de empezar, pero otra ejecución toma el registro primero (create falla
+  // por el nombre). La rechazada no sigue y no borra el registro, la red ni la imagen de la otra.
+  it('si otra ejecución tiene el registro, no sigue ni borra nada', () => {
+    const r = run({}, (state) => {
+      writeFileSync(join(state, 'registry'), 'reg-otra\n');
+      writeFileSync(join(state, 'tag.localhost_5056_cocos-smoke_smoke-otra'), 'otra\n');
+    });
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain('NO SE CORRE: ya hay un contenedor cocos-smoke-registry');
+    expect(r.removed).toEqual([]);
+    expect(r.calls.some((c) => /^docker (start|tag|push|network)|^docker compose/.test(c))).toBe(false);
+    // Lo de la otra sigue ahí.
+    expect(readFileSync(join(r.state, 'registry'), 'utf8')).toBe('reg-otra\n');
+    expect(r.shared).toEqual(['registry', 'tag.localhost_5056_cocos-smoke_smoke-otra']);
+    expect(r.leftovers).toEqual([]);
+  });
+
+  // CR-6 y CR-7: otra ejecución que arranca en cualquier punto de la limpieza de la primera no
+  // consigue el candado mientras quede algo compartido por borrar (el proyecto, la etiqueta, la
+  // red); el candado se suelta al final, y recién ahí la otra corre entera. Ninguna borra la
+  // etiqueta de la otra: cada ejecución etiqueta con un nombre propio.
+  it('una ejecución que arranca durante la limpieza de otra no consigue el candado hasta el final', () => {
+    const r = run({ INTERLEAVE: '1' });
+    expect(r.stderr).not.toContain('FALLIDO');
+    expect(r.status).toBe(0);
+    expect(r.interleave).toEqual([
+      expect.stringMatching(/^antes compose -p cocos-smoke-staging .* down -v: otra salió con 2, candado: no$/),
+      expect.stringMatching(/^antes rmi localhost:5056\/cocos-smoke:smoke-cocos-smoke\.\S+: otra salió con 2, candado: no$/),
+      'antes network rm net-a: otra salió con 2, candado: no',
+      'antes rm -f -v reg-a: otra salió con 2, candado: no',
+      'después rm -f -v reg-a: otra salió con 0, candado: sí',
+    ]);
+    expect(r.stolen).toEqual([]);
+    expect(r.shared).toEqual([]);
+    expect(r.leftovers).toEqual([]);
+  });
+
+  it('si no puede borrar algo compartido, deja el registro como candado y sale con 1', () => {
+    const r = run({ FAIL: '^network rm ' });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('no se pudo borrar la red cocos-smoke-edge; queda el registro cocos-smoke-registry como candado');
+    expect(r.removed.some((c) => c.startsWith('docker rm -f -v'))).toBe(false);
+    expect(r.shared).toEqual(['net.cocos-smoke-edge', 'registry']);
+    // La ejecución siguiente se rechaza sin tocar nada.
+    expect(r.leftovers).toEqual([]);
+  });
+
+  // CR-8 y el resto de la ruta de salida: ningún borrado que falla termina en 0, cada uno dice qué
+  // borrar a mano, y un error anterior conserva su código.
+  it('si no puede borrar el registro, sale con 1 y dice cómo borrarlo; con un error anterior, conserva su código', () => {
+    const only = run({ FAIL: '^rm -f -v reg-a$' });
+    expect(only.status).toBe(1);
+    expect(only.stderr).toContain('no se pudo borrar el registro cocos-smoke-registry (reg-a), que sigue siendo el candado: borrarlo a mano con docker rm -f -v cocos-smoke-registry');
+    expect(only.stdout).toContain('SMOKE CON DOCKER OK');   // el smoke pasó; la limpieza no
+    expect(only.shared).toEqual(['registry']);
+    const afterFailure = run({ FAIL: '^rm -f -v reg-a$', SMOKE_FAIL: '1' });
+    expect(afterFailure.status).toBe(1);
+    expect(afterFailure.stderr).toContain('la primera corrida de write falló');
+    expect(afterFailure.stderr).toContain('no se pudo borrar el registro cocos-smoke-registry');
+    const afterRefusal = run({ FAIL: '^rm -f -v reg-a$', NET_EDGE: 'fed' });
+    expect(afterRefusal.status).toBe(2);
+    expect(afterRefusal.stderr).toContain('no se pudo borrar el registro cocos-smoke-registry');
+  });
+
+  it('si down -v deja algo del proyecto, deja el candado y sale con 1', () => {
+    const r = run({ DOWN_LEAVES: '1' });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('no se pudo borrar contenedores o volúmenes del proyecto cocos-smoke-staging; queda el registro cocos-smoke-registry como candado');
+    expect(r.removed.some((c) => c.startsWith('docker rm -f -v'))).toBe(false);
+    expect(r.shared).toEqual(['project', 'registry']);
+  });
+
+  // CR-9: un volumen sobrante sin contenedores. Las comprobaciones iniciales no ven nada, down -v
+  // termina bien y `docker ps` no devuelve contenedores, pero `docker volume ls` por la etiqueta
+  // del proyecto devuelve un volumen que quedó: el candado queda y sale con 1.
+  it('si después de down -v queda un volumen del proyecto sin contenedores, deja el candado y sale con 1', () => {
+    const r = run({ VOL_LEFT: 'cocos-smoke-staging_pgdata' });
+    expect(r.stdout).toContain('SMOKE CON DOCKER OK');
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('no se pudo borrar contenedores o volúmenes del proyecto cocos-smoke-staging; queda el registro cocos-smoke-registry como candado');
+    const lists = r.calls.filter((c) => c === 'docker volume ls -q --filter label=com.docker.compose.project=cocos-smoke-staging');
+    expect(lists).toHaveLength(2);   // al empezar (vacío) y después de down -v (el sobrante)
+    expect(r.calls).toContainEqual(expect.stringMatching(/ down -v$/));
+    expect(r.removed.some((c) => c.startsWith('docker rm -f -v'))).toBe(false);
+    expect(r.shared).toEqual(['registry']);   // sin proyecto (no hay contenedores), con el registro
+  });
+
+  it('si down -v falla, también', () => {
+    const r = run({ FAIL: ' down -v$' });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('no se pudo borrar el proyecto cocos-smoke-staging (down -v falló)');
+    expect(r.shared).toEqual(['project', 'registry']);
+  });
+
+  it('si no puede borrar la etiqueta de la imagen, deja el candado y sale con 1', () => {
+    const r = run({ FAIL: '^rmi ' });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toMatch(/no se pudo borrar la imagen localhost:5056\/cocos-smoke:smoke-cocos-smoke\.\S+; queda el registro/);
+    expect(r.shared).toEqual(['registry', expect.stringMatching(/^tag\./)]);
+  });
+
+  it('si no puede borrar su directorio temporal (con los secretos de prueba), sale con 1 y lo nombra', () => {
+    const r = run({ RM_FAIL: '1' });
+    expect(r.status).toBe(1);
+    const left = /no se pudo borrar (\S+\/cocos-smoke\.\S+) \(tiene secretos de prueba\): borrarlo a mano/.exec(r.stderr)?.[1];
+    expect(left).toBeDefined();
+    expect(existsSync(left!)).toBe(true);
+    rmSync(left!, { recursive: true, force: true });
+    expect(r.shared).toEqual([]);   // lo de Docker sí se borró
+  });
+
+  it('si smoke-user no da un id, frena antes del switch', () => {
+    const r = run({ FIRST_ID: '' });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('SMOKE CON DOCKER FALLIDO: 1: smoke-user');
+    expect(r.calls.some((c) => / --no-deps api /.test(c))).toBe(false);
+    expect(r.smokes).toEqual([]);
+    expect(r.shared).toEqual([]);
+  });
+
+  it('con la API sana: bootstrap, usuario del smoke y switch, write dos veces con el mismo usuario y read; después limpia', () => {
+    const r = run();
+    expect(r.stderr).not.toContain('FALLIDO');
+    expect(r.status).toBe(0);
+    expect(r.smokes).toEqual(['/smoke/smoke.mjs write', '/smoke/smoke.mjs write', '/smoke/smoke.mjs read']);
+    const smoke = r.calls.find((c) => c.includes('/smoke/smoke.mjs write'))!;
+    expect(smoke).toContain('--network cocos-smoke-staging_default --entrypoint node');
+    expect(smoke).toContain(`-e URL=http://api:3000 -e SHA=${HEAD} -e SMOKE_USERID=31 ${DIGEST}`);
+    const compose = r.calls.filter((c) => c.startsWith('docker compose'));
+    expect(compose.every((c) => c.includes(' -p cocos-smoke-staging '))).toBe(true);
+    expect(r.calls.some((c) => / -p cocos-(staging|production) | -p cocos /.test(c))).toBe(false);
+    // Borra lo suyo, por id o por su nombre único, y el candado al final.
+    expect(r.removed).toEqual([expect.stringMatching(/^docker compose -p cocos-smoke-staging .* down -v$/),
+      expect.stringMatching(/^docker rmi localhost:5056\/cocos-smoke:smoke-cocos-smoke\.\S+$/), 'docker network rm net-a', 'docker rm -f -v reg-a']);
+    expect(r.shared).toEqual([]);
+    expect(r.leftovers).toEqual([]);
+  });
+
+  // CR-1 y CR-4: el aislamiento no es solo el nombre del proyecto. Con un staging local en
+  // cocos-edge (su API con el alias api-staging, lo que resuelve su Caddy), el ensayo no entra a
+  // esa red: su compose usa cocos-smoke-edge, y api-staging en cocos-edge sigue siendo uno solo.
+  it('no entra a cocos-edge: el api-staging existente sigue siendo el único destino de ese nombre', () => {
+    const r = run();
+    expect(r.status).toBe(0);
+    expect(r.net('cocos-edge')).toBe(EXISTING_EDGE);
+    expect(r.calls.filter((c) => c.includes('cocos-edge') && !c.includes('cocos-smoke-edge'))).toEqual([]);
+    expect(r.calls).toContain('docker network create cocos-smoke-edge');
+    // El compose instalado es el del commit con la red edge renombrada, y nada más.
+    expect(r.compose).toBe(read('deploy/lightsail/compose.yml').replace(/^ {4}name: cocos-edge$/m, '    name: cocos-smoke-edge'));
+    expect(r.compose!.split('\n').filter((l) => !l.trim().startsWith('#') && l.includes('cocos-edge'))).toEqual([]);
+  });
+
+  it('frena si la API del ensayo quedó también en otra red, sin correr el smoke', () => {
+    const r = run({ API_EXTRA_NET: 'cocos-edge' });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('la API del ensayo está en las redes');
+    expect(r.smokes).toEqual([]);
+    // Al limpiar, down -v la saca: el api-staging existente vuelve a ser el único.
+    expect(r.net('cocos-edge')).toBe(EXISTING_EDGE);
+  });
+
+  it('una imagen cuya API no arranca frena en el switch, sin correr el smoke, y limpia', () => {
+    const r = run({ FAIL: 'up -d --wait --wait-timeout [0-9]+ --no-deps api' });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('SMOKE CON DOCKER FALLIDO: 1: el switch falló');
+    expect(r.smokes).toEqual([]);
+    expect(r.calls.filter((c) => c.startsWith('docker compose')).at(-1)).toMatch(/ down -v$/);
+    expect(r.leftovers).toEqual([]);
+  });
+
+  it('un smoke fallido lo pone en rojo', () => {
+    const r = run({ SMOKE_FAIL: '1' });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('SMOKE CON DOCKER FALLIDO: 2: la primera corrida de write falló');
+  });
+
+  it('si después de una corrida completa smoke-user da otro usuario, el flujo no dejó al usuario en cero', () => {
+    const r = run({ SECOND_ID: '32' });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('smoke-user dio otro usuario (32 y no 31)');
   });
 });
 

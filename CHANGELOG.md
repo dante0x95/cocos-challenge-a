@@ -1,0 +1,36 @@
+# Cambios
+
+Una sección por versión publicada (un GitHub Release `vX.Y.Z`, que despliega en staging y después en producción: [D-29](docs/decisiones.md#d-29)). Cada línea dice qué cambia para quien usa la API o la opera, con el PR que lo trae. **Antes de publicar** lista los pasos de operación que la versión exige: se hacen antes de `gh release create` ([`docs/api/operacion.md`](docs/api/operacion.md#desplegar-en-lightsail)). Este archivo es la fuente de las notas; `--generate-notes` solo agrega la lista de PRs.
+
+## v0.2.0 — sin publicar
+
+### Antes de publicar
+
+1. **Volver a correr `setup.sh` en el servidor** (por [#50](https://github.com/dante0x95/cocos-challenge-a/pull/50)): migra los secretos de cada entorno de `db.env`, `migrate.env` y `api.env` a los archivos de `secrets/`, con los mismos valores. Los comandos y lo que tiene que imprimir, en [Secretos como archivos](docs/api/operacion.md#secretos-como-archivos), paso 1. Sin esto, el deploy frena en `Release que atiende` sin cambiar nada.
+2. Después de publicar: verificar que `docker inspect` no muestra ningún secreto (paso 3 de esa misma sección). Los `.env` se borran recién después del segundo release con #50 (paso 4).
+
+El smoke de staging ([#52](https://github.com/dante0x95/cocos-challenge-a/pull/52)) no pide nada en el servidor: su usuario lo crea el propio deploy de staging la primera vez.
+
+### Operación y deploy
+
+- **Un smoke funcional antes de producción** ([#52](https://github.com/dante0x95/cocos-challenge-a/pull/52)): después de cambiar de versión y de `/health`, staging corre el flujo de órdenes por la URL pública (depósito y replay, compras y ventas `MARKET` por `size` y por `amount`, una LIMIT que reserva y se cancela, retiro, portfolio exacto, búsqueda y los `400`) con un usuario que existe solo en staging (`smoke@staging.invalid`); si falla, staging vuelve a la versión anterior y producción no se despliega. Producción corre solo lecturas. El CI corre el mismo smoke contra la imagen de cada PR, levantada con Docker Compose como en el deploy.
+- **Los secretos llegan como archivos, no como variables de entorno** ([#50](https://github.com/dante0x95/cocos-challenge-a/pull/50)): la contraseña de la base, la del rol `api` y el token interno ya no aparecen en `docker inspect` ni en el entorno de ningún proceso. La app acepta `<VAR>_FILE` (`DATABASE_URL_FILE`, `INTERNAL_TOKEN_FILE`, `DATABASE_ADMIN_URL_FILE`, …). El primer deploy recrea la base de cada entorno (el volumen sigue): la API anterior puede responder `503` reintentables unos segundos.
+- **Un release ya no puede dejar sin escribir a la versión que atiende** ([#47](https://github.com/dante0x95/cocos-challenge-a/pull/47)): el bootstrap aborta, sin cambiar la base, si una función que llama la versión anterior deja de resolver; el CI corre las pruebas de escritura del release anterior sobre la base nueva. Un cambio de firma va en dos releases (expand/contract, [D-24](docs/decisiones.md#d-24)).
+- **Una LIMIT heredada por encima del tope no se ejecuta** ([#44](https://github.com/dante0x95/cocos-challenge-a/pull/44)): una `NEW` con importe mayor a 10¹⁵ ARS la cancela el executor, o el bootstrap al migrar una base, con `cancel_reason = 'LIMIT'`, y el log lo informa.
+
+### API
+
+- **Ninguna entrada del cliente responde `500`** ([#46](https://github.com/dante0x95/cocos-challenge-a/pull/46)): un carácter de control en `q` o en `Idempotency-Key`, un parámetro de ruta mal codificado (`/portfolio/%FF`) o un charset que no se soporta responden `400` (o `415`) con qué corregir.
+- **Los números del body se validan por cómo están escritos** ([#43](https://github.com/dante0x95/cocos-challenge-a/pull/43)): `100.0`, `1e2` o un monto con decimales enviado como número JSON responden `400` y piden el valor como string, en vez de convertirse en silencio en otro monto.
+- **Una clave de idempotencia se puede reutilizar recién desde 24 h + 1 min** ([#45](https://github.com/dante0x95/cocos-challenge-a/pull/45)): un reintento que empezó dentro de las 24 h siempre recibe la respuesta original, nunca un `422` falso.
+
+### Documentación
+
+- **Los docs al día después de v0.1.0** ([#48](https://github.com/dante0x95/cocos-challenge-a/pull/48)): cada suite con su fila en `docs/testing.md`, los errores que faltaban en `docs/api/orders.md`, el token interno sin imprimir la contraseña del rol `api`; un test frena una suite sin fila o un link al repositorio de la otra variante.
+- **Este CHANGELOG** ([#52](https://github.com/dante0x95/cocos-challenge-a/pull/52)): la fuente de las notas de cada versión, con los pasos de operación que exige.
+
+## v0.1.0 — 2026-10-30
+
+Primera versión publicada, sobre `159b0f0`: la API de portfolio, búsqueda de instrumentos y órdenes (`MARKET`, `LIMIT`, depósitos y retiros, idempotencia, cancelación) sobre Postgres 18, con la lógica en PL/pgSQL. El deploy en AWS Lightsail al publicar un release `vX.Y.Z` ([#33](https://github.com/dante0x95/cocos-challenge-a/pull/33), [#35](https://github.com/dante0x95/cocos-challenge-a/pull/35)): gate, una imagen en GHCR por digest, staging y después producción, cada uno con su Postgres detrás de Caddy con HTTPS, el bootstrap antes de cambiar de versión, `/health` sobre el commit y la vuelta atrás si falla.
+
+**Antes de publicar** (la primera vez): la clave de deploy, `setup.sh` en el servidor y los secretos `LIGHTSAIL_*` de los environments ([La primera vez](docs/api/operacion.md#la-primera-vez)).

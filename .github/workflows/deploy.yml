@@ -16,8 +16,11 @@
 # viejo no pisa uno más nuevo; el mismo commit pasa); bajar la imagen con el GITHUB_TOKEN del job
 # por stdin, sin que quede en el servidor; el bootstrap con la imagen nueva y la API anterior
 # atendiendo; el cambio de la API; /health por la URL pública tiene que atender el commit
-# (release-check.sh after). Si el cambio o esa verificación fallan, el entorno vuelve solo a la
-# imagen y el release anteriores y el job queda en rojo. La primera vez: deploy/lightsail/setup.sh
+# (release-check.sh after); el smoke funcional por esa URL (deploy/smoke.mjs, issue #51): en
+# staging el flujo de órdenes completo, con un usuario que existe solo ahí (deploy.sh smoke-user,
+# antes del cambio), y en producción solo lecturas. Si el cambio, /health o el smoke fallan, el
+# entorno vuelve solo a la imagen y el release anteriores y el job queda en rojo: un staging en
+# rojo deja producción sin desplegar. La primera vez: deploy/lightsail/setup.sh
 # en el servidor y los secretos LIGHTSAIL_* de cada environment (docs/api/operacion.md).
 # No hay deploy manual desde acá: un commit sin release, fuera de main o sin el CI en verde no
 # se despliega.
@@ -120,6 +123,10 @@ jobs:
         with:
           ref: ${{ env.SHA }}
           fetch-depth: 0
+      # El smoke (deploy/smoke.mjs) corre con Node, sin dependencias.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
       # Los secretos del environment, solo en este paso: la clave y el host quedan en
       # $RUNNER_TEMP, que GitHub vacía al terminar el job.
       - name: Acceso SSH al servidor
@@ -144,13 +151,23 @@ jobs:
       # nada que volver (el paso Cambiar de versión no corre).
       - name: Bootstrap de la base
         run: deploy/lightsail/deploy.sh bootstrap
+      # Antes del cambio, con la base ya migrada: si falla, no cambió nada. Solo en staging: en
+      # producción el usuario del smoke no existe.
+      - name: Usuario del smoke
+        id: smoke
+        run: deploy/lightsail/deploy.sh smoke-user
       - name: Cambiar de versión
         id: deploy
         run: deploy/lightsail/deploy.sh switch
       - name: /health atiende el commit
         run: deploy/release-check.sh after
+      # El flujo crítico por la URL pública: si falla, vuelve a la versión anterior.
+      - name: Smoke funcional
+        run: deploy/smoke.mjs write
+        env:
+          SMOKE_USERID: ${{ steps.smoke.outputs.userid }}
       # Si algo falló desde que empezó el cambio: el cambio mismo (la API nueva no quedó sana) o
-      # la verificación de después. remote.sh mira el estado del servidor: si el cambio falló
+      # las verificaciones de después (/health o el smoke). remote.sh mira el estado del servidor: si el cambio falló
       # antes de tocar la API, sigue la anterior y solo verifica.
       - name: Volver a la versión anterior
         if: failure() && steps.deploy.outcome != 'skipped'
@@ -184,6 +201,10 @@ jobs:
         with:
           ref: ${{ env.SHA }}
           fetch-depth: 0
+      # El smoke (deploy/smoke.mjs) corre con Node, sin dependencias.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
       # Los secretos del environment, solo en este paso: la clave y el host quedan en
       # $RUNNER_TEMP, que GitHub vacía al terminar el job.
       - name: Acceso SSH al servidor
@@ -213,8 +234,11 @@ jobs:
         run: deploy/lightsail/deploy.sh switch
       - name: /health atiende el commit
         run: deploy/release-check.sh after
+      # Solo lecturas: en producción el smoke no escribe órdenes.
+      - name: Smoke de solo lectura
+        run: deploy/smoke.mjs read
       # Si algo falló desde que empezó el cambio: el cambio mismo (la API nueva no quedó sana) o
-      # la verificación de después. remote.sh mira el estado del servidor: si el cambio falló
+      # las verificaciones de después (/health o el smoke). remote.sh mira el estado del servidor: si el cambio falló
       # antes de tocar la API, sigue la anterior y solo verifica.
       - name: Volver a la versión anterior
         if: failure() && steps.deploy.outcome != 'skipped'

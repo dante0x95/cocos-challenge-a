@@ -32,9 +32,19 @@
 #   remote.sh rollback <entorno> <ref anterior> <sha anterior>
 #       Vuelve a lo que atendía antes del deploy, sin correr el bootstrap anterior. Sin release
 #       anterior (el primer deploy), saca la API y deja el entorno sin release.
+#   remote.sh smoke-user staging                    (stdin: deploy/lightsail/smoke-user.sql)
+#       Solo en staging, después del bootstrap: deja listo el usuario del smoke (issue #51) y
+#       escribe userid=<id>. Corre el SQL con psql como superusuario dentro del contenedor de la
+#       base (el socket local, sin contraseña: no depende de cómo llegan los secretos), en una
+#       transacción. En production frena antes de tocar nada: ahí el usuario no existe.
+#
+# COCOS_ROOT, COCOS_PROJECT (el prefijo del proyecto de compose, cocos-<entorno>) y
+# COMPOSE_WAIT_TIMEOUT existen para los ensayos con Docker (drill-docker.sh, smoke-docker.sh): en
+# el servidor no están definidos.
 set -euo pipefail
 
 ROOT="${COCOS_ROOT:-/opt/cocos}"
+PROJECT="${COCOS_PROJECT:-cocos}"
 WAIT="${COMPOSE_WAIT_TIMEOUT:-120}"
 
 fail() { echo "SERVIDOR: $*" >&2; exit 1; }
@@ -59,7 +69,7 @@ valid_sha() { [[ "$1" =~ ^[0-9a-f]{40}$ ]] || fail "'$1' no es el SHA de un comm
 compose() {
   local state="$1"; shift
   local suffix="${state:+.$state}"
-  docker compose -p "cocos-$ENV" --project-directory "$DIR" \
+  docker compose -p "$PROJECT-$ENV" --project-directory "$DIR" \
     -f "$DIR/compose$suffix.yml" --env-file "$DIR/release$suffix.env" "$@"
 }
 field() { sed -n "s/^$1=//p" "$2"; }
@@ -166,11 +176,26 @@ rollback() {
   compose "" up -d --wait --wait-timeout "$WAIT" --no-deps api || fail "la API de $sha no quedó sana"
 }
 
+smoke_user() {
+  [ "${1:-}" = staging ] || fail "el usuario del smoke existe solo en staging, no en '${1:-}'"
+  use_env "$1"
+  [ -f "$DIR/compose.next.yml" ] && [ -f "$DIR/bootstrap.ok" ] \
+    || fail "no hay un bootstrap terminado en $ENV: el usuario del smoke va después del paso bootstrap"
+  local sql out
+  sql="$(cat)"
+  [ -n "$sql" ] || fail "no llegó el SQL del usuario del smoke"
+  out="$(compose next exec -T db psql -U postgres -d cocos -X -q -A -t -v ON_ERROR_STOP=1 -1 -f - <<<"$sql")" \
+    || fail "no se pudo preparar el usuario del smoke en $ENV"
+  [[ "$out" =~ ^[1-9][0-9]*$ ]] || fail "el SQL del usuario del smoke no devolvió un id: '$out'"
+  echo "userid=$out"
+}
+
 case "${1:-}" in
   current)   current "${2:-}" ;;
   pull)      pull "${2:-}" "${3:-}" "${4:-}" ;;
   bootstrap) bootstrap "${2:-}" "${3:-}" "${4:-}" ;;
   switch)    switch "${2:-}" "${3:-}" "${4:-}" ;;
   rollback)  rollback "${2:-}" "${3:-}" "${4:-}" ;;
-  *)         echo "uso: $0 current|pull|bootstrap|switch|rollback <entorno> ..." >&2; exit 2 ;;
+  smoke-user) smoke_user "${2:-}" ;;
+  *)         echo "uso: $0 current|pull|bootstrap|switch|rollback|smoke-user <entorno> ..." >&2; exit 2 ;;
 esac

@@ -213,6 +213,18 @@ describe('ready-gate: errores de la API', () => {
     expect(r.stdout).not.toContain('El PR volvió a borrador');
   });
 
+  it.each([
+    ['contents: write', 'contents=read,pull-requests=write,statuses=read'],
+    ['pull-requests: write', 'contents=write,pull-requests=read,statuses=read'],
+  ])('al token le falta %s: la conversión falla y sale con 2', (_, permissions) => {
+    arrange({ pulls: [{ head: A }], statuses: { [A]: review('failure') } });
+    const r = exec(['bash', SCRIPT], { ...ENV, FAKE_PERMISSIONS: permissions });
+    expect(r.code).toBe(2);
+    expect(r.mutations).toHaveLength(3);
+    expect(r.stderr).toContain('Resource not accessible by integration');
+    expect(r.stdout).toContain('No se pudo devolver el PR a borrador');
+  });
+
   it('la conversión responde isDraft false: no la da por hecha', () => {
     arrange({ pulls: [{ head: A }], statuses: { [A]: review('failure') }, mutation: 'not-draft' });
     const r = gate();
@@ -312,6 +324,15 @@ describe('ready-gate.yml', () => {
     expect(block('on:')).toBe('on:\n  pull_request_target:\n    types: [opened, reopened, ready_for_review]\n');
   });
 
+  /** Los permisos del bloque `permissions:` como los recibe el fake ("contents=write,…"). */
+  const permissions = () => block('permissions:').split('\n').slice(1).filter(Boolean)
+    .map((l) => l.trim().replace(': ', '=')).join(',');
+
+  it('pide contents: write y pull-requests: write, los dos que exige convertPullRequestToDraft', () => {
+    // Con pull-requests: write solo, GitHub responde "Resource not accessible by integration" (#53).
+    expect(block('permissions:')).toBe('permissions:\n  contents: write\n  pull-requests: write\n  statuses: read\n');
+  });
+
   it('excluye los borradores y corre de a una corrida por PR, sin cancelar la que corre', () => {
     expect(WORKFLOW).toContain('    if: ${{ !github.event.pull_request.draft }}\n');
     expect(block('concurrency:')).toBe(
@@ -340,8 +361,9 @@ describe('ready-gate.yml', () => {
     const run = /^ {8}run: (.+)$/m.exec(step)![1];
 
     arrange({ pulls: [{ head: A }], statuses: { [A]: review('failure') } });
-    const r = exec(['bash', '-e', '-c', run], env);
+    const r = exec(['bash', '-e', '-c', run], { ...env, FAKE_PERMISSIONS: permissions() });
     expect(r.code).toBe(1);
+    expect(r.stdout).toContain('El PR volvió a borrador');
     expect(r.calls.map((c) => c.endpoint)).toEqual([
       'repos/acme/demo/pulls/29',
       `repos/acme/demo/commits/${A}/status?per_page=100`,

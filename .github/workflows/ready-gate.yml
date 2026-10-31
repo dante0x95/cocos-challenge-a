@@ -12,8 +12,12 @@ on:
   pull_request_target:
     types: [opened, reopened, ready_for_review]
 
+# convertPullRequestToDraft con el GITHUB_TOKEN pide contents: write además de pull-requests:
+# write; con uno solo responde "Resource not accessible by integration" (#53, probado con un
+# workflow de prueba en #59). El token solo llega al paso que corre scripts/ready-gate.sh de
+# main, y el checkout no lo guarda (persist-credentials: false).
 permissions:
-  contents: read
+  contents: write
   pull-requests: write
   statuses: read
 

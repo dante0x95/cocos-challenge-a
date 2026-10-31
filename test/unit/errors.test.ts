@@ -48,6 +48,24 @@ describe('fromDbError: errores de un deploy en curso', () => {
   });
 });
 
+// Un estado de los datos que el bootstrap ya conoce ('overflow' en verify_ledger, issue #57): ni
+// un bug (500) ni algo que se resuelva reintentando (503). Sin Retry-After, y el mensaje de la base
+// tal cual, en todas las rutas.
+describe('fromDbError: historia fuera de los tipos (APP07)', () => {
+  it.each([true, false])('APP07 → 409 HISTORY_OVERFLOW sin Retry-After (usesIdempotencyKey = %s)', (usesKey) => {
+    const msg = 'la historia del usuario 7 supera los tipos del cálculo (D-14): no puede operar hasta que se corrija; no reintentar';
+    const e = fromDbError(Object.assign(new Error(msg), { code: 'APP07' }), usesKey);
+    expect({ status: e.status, code: e.code, message: e.message, retryAfter: e.retryAfter })
+      .toEqual({ status: 409, code: 'HISTORY_OVERFLOW', message: msg, retryAfter: undefined });
+  });
+
+  it('el middleware no lo deja como error en el log: no es un bug', () => {
+    const r = handle(Object.assign(new Error('x'), { code: 'APP07' }), { method: 'GET', path: '/portfolio/7' });
+    expect(r.status).toBe(409);
+    expect(r.logs.error).toEqual([]);
+  });
+});
+
 describe('fromDbError: cortes de conexión (issue #7)', () => {
   const lost = { status: 503, code: 'CONNECTION_LOST', retryAfter: 1 };
   // Toda la clase 08 de SQLSTATE (connection_exception) y los códigos de corte de la clase 57.

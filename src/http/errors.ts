@@ -100,6 +100,9 @@ export function fromDbError(err: unknown, usesIdempotencyKey = true): HttpError 
     case 'APP04': return new HttpError(503, 'VERSION_MISMATCH', msg, 1);
     case 'APP05': return new HttpError(422, 'LIMIT', msg);
     case 'APP06': return notFound(msg);
+    // Historia del usuario fuera de los tipos (issue #57): un estado de los datos, no un bug ni algo
+    // que se arregle reintentando. Sin Retry-After.
+    case 'APP07': return new HttpError(409, 'HISTORY_OVERFLOW', msg);
     case '55P03': return new HttpError(503, 'LOCK_TIMEOUT', 'el usuario tiene otra operación en curso; reintentar con la misma Idempotency-Key', 1);
     case '57014': return new HttpError(503, 'TIMEOUT', 'la operación superó el tiempo máximo; reintentar con la misma Idempotency-Key', 1);
     case '40P01': return new HttpError(503, 'DEADLOCK', 'deadlock (no debería ocurrir: reportar)', 1);

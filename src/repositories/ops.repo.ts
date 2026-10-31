@@ -13,6 +13,10 @@ export interface ExecuteReport {
   errors: { order_id: string; error: string }[];
   // Usuarios cuyo lock no se consiguió (55P03): sus demás candidatas del lote no se intentaron.
   skipped_users: string[];
+  // Usuarios con la historia fuera de los tipos (APP07, 'overflow' en verify_ledger; issue #57):
+  // necesitan corrección manual. Sus NEW siguen NEW (sin fold no se decide el respaldo) y sus
+  // demás candidatas del lote no se intentaron.
+  overflow_users: string[];
   // Instrumentos que se quedaron sin cotización válida entre la selección y la ejecución (APP01):
   // sus demás candidatas del lote no se intentaron.
   skipped_instruments: string[];
@@ -43,8 +47,8 @@ interface Candidate { order_id: string; userid: number; instrumentid: number }
 /**
  * Ejecuta las LIMIT que la cotización vigente cruza (D-28). La decisión final es de
  * execute_limit_outcome, una sentencia (= una transacción) por candidata. Un usuario con el lock
- * tomado o un instrumento sin cotización no frenan al resto: se saltean sus demás candidatas del
- * lote. Al vencer `maxMs` la corrida corta entre sentencias y deja `remaining`.
+ * tomado o con la historia fuera de los tipos, o un instrumento sin cotización, no frenan al resto:
+ * se saltean sus demás candidatas del lote. Al vencer `maxMs` la corrida corta entre sentencias y deja `remaining`.
  */
 export async function executeLimits(opts: ExecuteOptions = {}): Promise<ExecuteReport> {
   const max = opts.max ?? EXECUTE_DEFAULTS.max;
@@ -60,7 +64,7 @@ export async function executeLimits(opts: ExecuteOptions = {}): Promise<ExecuteR
   const batch = rows.slice(0, max);
   const report: ExecuteReport = {
     candidates: batch.length, executed: [], not_crossed: [], cancelled: [], errors: [],
-    skipped_users: [], skipped_instruments: [], after_id: null, remaining: 0,
+    skipped_users: [], overflow_users: [], skipped_instruments: [], after_id: null, remaining: 0,
   };
   const skippedUsers = new Set<number>();
   const skippedInstruments = new Set<number>();
@@ -81,6 +85,9 @@ export async function executeLimits(opts: ExecuteOptions = {}): Promise<ExecuteR
       if (code === '55P03') {
         skippedUsers.add(c.userid);
         report.skipped_users.push(String(c.userid));
+      } else if (code === 'APP07') {
+        skippedUsers.add(c.userid);
+        report.overflow_users.push(String(c.userid));
       } else if (code === 'APP01') {
         skippedInstruments.add(c.instrumentid);
         report.skipped_instruments.push(String(c.instrumentid));

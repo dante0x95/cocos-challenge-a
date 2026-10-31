@@ -12,6 +12,10 @@ Nada.
 
 - **Volver a correr un deploy cortado ya no borra el último release sano** ([#65](https://github.com/dante0x95/cocos-challenge-a/pull/65)): el cambio de versión queda sin confirmar hasta que pasan `/health` y el smoke (`switch.pending`, que borra el paso nuevo `Confirmar el cambio`). Si el job se corta antes (cancelado, runner perdido, timeout), el re-run toma como lo que atiende el último release confirmado, no pisa su respaldo y, si vuelve a fallar en cualquier paso, vuelve a él. Antes, el re-run tomaba el release roto como el anterior y la vuelta atrás no tenía a dónde volver. No borrar `switch.pending` a mano ([operación](docs/api/operacion.md#operación)).
 
+### API
+
+- **Un usuario con la historia fuera de los tipos recibe `409`, no `500` para siempre** ([#62](https://github.com/dante0x95/cocos-challenge-a/pull/62)): si su historia heredada no entra en los tipos del cálculo (`overflow` en el log del bootstrap), `GET /portfolio` y `POST /orders` responden `409 HISTORY_OVERFLOW` y dicen que no se reintenta; consultar y cancelar sus órdenes sigue andando. El executor lo informa en `overflow_users` y deja sus LIMIT pendientes, en vez de anotarlas en `errors` en cada corrida. La reserva del portfolio ya no responde `500` cuando las pendientes heredadas suman más que un `bigint`.
+
 ### Documentación
 
 - **Los comandos del servidor funcionan en zsh** ([#55](https://github.com/dante0x95/cocos-challenge-a/pull/55)): `docs/api/operacion.md` y el README llaman `LIGHTSAIL_HOST` a la IP del servidor y la escriben `${LIGHTSAIL_HOST}`: en zsh, `HOST` ya existe (el nombre de la Mac), así que si no se definía los comandos apuntaban en silencio a la propia máquina, y `$HOST:c` se comía los dos puntos del `scp`, que copiaba en local. La clave de Lightsail queda como marcador. v0.2.0 queda con su fecha.

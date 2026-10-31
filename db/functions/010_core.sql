@@ -7,6 +7,9 @@
 --   APP04 VERSION_MISMATCH     → 503  las funciones cambiaron durante un despliegue (reintentable)
 --   APP05 DOMAIN_LIMIT         → 422  el resultado saldría de ±10^15 ARS o 2^62 acciones
 --   APP06 USER_NOT_FOUND       → 404  el usuario no existe (app.read_portfolio)
+--   APP07 HISTORY_OVERFLOW     → 409  la historia del usuario no entra en los tipos del fold
+--                                     (app.c_state, 'overflow' en verify_ledger): necesita
+--                                     corrección manual, no se reintenta (issue #57)
 --   55P03 / 57014 (lock / statement timeout, los pone Postgres) → 503
 
 -- División entera con redondeo half-even del resto exacto (D-09). b > 0.

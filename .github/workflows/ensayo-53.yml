@@ -1,0 +1,39 @@
+# ENSAYO DESCARTABLE (#53): corre scripts/ready-gate.sh de esta rama, con los permisos de #59,
+# cuando el PR de ensayo se marca ready. No se mergea; el PR se cierra y la rama se borra.
+name: ensayo-53
+on:
+  pull_request:
+    types: [ready_for_review, synchronize]
+permissions:
+  contents: write
+  pull-requests: write
+  statuses: read
+jobs:
+  ready-gate-ensayo:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Antes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}" --jq '"antes: draft=\(.draft) head=\(.head.sha)"'
+      - name: scripts/ready-gate.sh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_NODE_ID: ${{ github.event.pull_request.node_id }}
+          EVENT_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set +e
+          scripts/ready-gate.sh
+          echo "salida=$?"
+      - name: Después
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}" --jq '"después: draft=\(.draft)"'

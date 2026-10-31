@@ -1704,7 +1704,7 @@ describe('smoke-docker.sh', () => {
         '  "tag "*) echo "$me" > "$STATE/tag.${3//[\\/:]/_}" ;;',
         '  "rmi "*) t="$STATE/tag.${2//[\\/:]/_}"; [ -e "$t" ] || exit 1; [ "$(cat "$t")" = "$me" ] || echo "$me borró la etiqueta $2 de $(cat "$t")" >> "$STATE/stolen"; rm -f "$t" ;;',
         `  "image inspect --format"*) echo '${DIGEST}' ;;`,
-        '  *" exec -T db psql "*) cat >/dev/null; n=$(grep -c " exec -T db psql " "$CALLS"); if [ "$n" = 1 ]; then echo 31; else echo "${SECOND_ID:-31}"; fi ;;',
+        '  *" exec -T db psql "*) cat >/dev/null; n=$(grep -c " exec -T db psql " "$CALLS"); if [ "$n" = 1 ]; then echo "${FIRST_ID-31}"; else echo "${SECOND_ID:-31}"; fi ;;',
         // La API entra a la red interna de su proyecto y a la red edge de su compose, con su alias
         // (API_EXTRA_NET: además a otra, como si el compose la nombrara).
         '  "compose "*" up "*" api") cp "$file" "$CALLS.compose"; edge="$(sed -n "s/^    name: //p" "$file")"; echo "$me" > "$STATE/project"',
@@ -1713,12 +1713,14 @@ describe('smoke-docker.sh', () => {
         '  "compose "*" up "*) echo "$me" > "$STATE/project" ;;',
         '  "compose "*" ps -q api") echo api789 ;;',
         '  "inspect -f "*" api789") cat "$CALLS.api-nets" ;;',
-        '  "compose "*" down -v") rm -f "$STATE/project"; for n in "$CALLS".net.*; do case "$n" in *.bak) ;; *) sed -i.bak "/ $project\\$/d" "$n" ;; esac; done ;;',
+        '  "compose "*" down -v") [ -n "${DOWN_LEAVES:-}" ] || rm -f "$STATE/project"; for n in "$CALLS".net.*; do case "$n" in *.bak) ;; *) sed -i.bak "/ $project\\$/d" "$n" ;; esac; done ;;',
         '  *"/smoke/smoke.mjs "*) [ -z "${SMOKE_FAIL:-}" ] || exit 1 ;;',
         'esac',
         '[ -n "${INTERLEAVE:-}" ] && [ "$me" = a ] && [[ "$cleanup_step" == "rm -f -v "* ]] && other después "$cleanup_step"',
         'exit 0',
       ].join('\n'),
+      // RM_FAIL: no se puede borrar el directorio temporal del ensayo (el resto de rm, de verdad).
+      rm: 'if [ -n "${RM_FAIL:-}" ] && [ "$1" = -rf ] && [[ "$2" == "$TMPDIR"/cocos-smoke.* ]]; then echo "rm: simulado: falla" >&2; exit 1; fi\nexec /bin/rm "$@"',
     });
     dirs.push(f.dir);
     const state = join(f.dir, 'state');
@@ -1784,7 +1786,7 @@ describe('smoke-docker.sh', () => {
     expect(r.status).toBe(0);
     expect(r.interleave).toEqual([
       expect.stringMatching(/^antes compose -p cocos-smoke-staging .* down -v: otra salió con 2, candado: no$/),
-      expect.stringMatching(/^antes rmi localhost:5056\/cocos-smoke:smoke-tmp\.\S+: otra salió con 2, candado: no$/),
+      expect.stringMatching(/^antes rmi localhost:5056\/cocos-smoke:smoke-cocos-smoke\.\S+: otra salió con 2, candado: no$/),
       'antes network rm net-a: otra salió con 2, candado: no',
       'antes rm -f -v reg-a: otra salió con 2, candado: no',
       'después rm -f -v reg-a: otra salió con 0, candado: sí',
@@ -1804,6 +1806,64 @@ describe('smoke-docker.sh', () => {
     expect(r.leftovers).toEqual([]);
   });
 
+  // CR-8 y el resto de la ruta de salida: ningún borrado que falla termina en 0, cada uno dice qué
+  // borrar a mano, y un error anterior conserva su código.
+  it('si no puede borrar el registro, sale con 1 y dice cómo borrarlo; con un error anterior, conserva su código', () => {
+    const only = run({ FAIL: '^rm -f -v reg-a$' });
+    expect(only.status).toBe(1);
+    expect(only.stderr).toContain('no se pudo borrar el registro cocos-smoke-registry (reg-a), que sigue siendo el candado: borrarlo a mano con docker rm -f -v cocos-smoke-registry');
+    expect(only.stdout).toContain('SMOKE CON DOCKER OK');   // el smoke pasó; la limpieza no
+    expect(only.shared).toEqual(['registry']);
+    const afterFailure = run({ FAIL: '^rm -f -v reg-a$', SMOKE_FAIL: '1' });
+    expect(afterFailure.status).toBe(1);
+    expect(afterFailure.stderr).toContain('la primera corrida de write falló');
+    expect(afterFailure.stderr).toContain('no se pudo borrar el registro cocos-smoke-registry');
+    const afterRefusal = run({ FAIL: '^rm -f -v reg-a$', NET_EDGE: 'fed' });
+    expect(afterRefusal.status).toBe(2);
+    expect(afterRefusal.stderr).toContain('no se pudo borrar el registro cocos-smoke-registry');
+  });
+
+  it('si down -v deja algo del proyecto, deja el candado y sale con 1', () => {
+    const r = run({ DOWN_LEAVES: '1' });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('no se pudo borrar contenedores o volúmenes del proyecto cocos-smoke-staging; queda el registro cocos-smoke-registry como candado');
+    expect(r.removed.some((c) => c.startsWith('docker rm -f -v'))).toBe(false);
+    expect(r.shared).toEqual(['project', 'registry']);
+  });
+
+  it('si down -v falla, también', () => {
+    const r = run({ FAIL: ' down -v$' });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('no se pudo borrar el proyecto cocos-smoke-staging (down -v falló)');
+    expect(r.shared).toEqual(['project', 'registry']);
+  });
+
+  it('si no puede borrar la etiqueta de la imagen, deja el candado y sale con 1', () => {
+    const r = run({ FAIL: '^rmi ' });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toMatch(/no se pudo borrar la imagen localhost:5056\/cocos-smoke:smoke-cocos-smoke\.\S+; queda el registro/);
+    expect(r.shared).toEqual(['registry', expect.stringMatching(/^tag\./)]);
+  });
+
+  it('si no puede borrar su directorio temporal (con los secretos de prueba), sale con 1 y lo nombra', () => {
+    const r = run({ RM_FAIL: '1' });
+    expect(r.status).toBe(1);
+    const left = /no se pudo borrar (\S+\/cocos-smoke\.\S+) \(tiene secretos de prueba\): borrarlo a mano/.exec(r.stderr)?.[1];
+    expect(left).toBeDefined();
+    expect(existsSync(left!)).toBe(true);
+    rmSync(left!, { recursive: true, force: true });
+    expect(r.shared).toEqual([]);   // lo de Docker sí se borró
+  });
+
+  it('si smoke-user no da un id, frena antes del switch', () => {
+    const r = run({ FIRST_ID: '' });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('SMOKE CON DOCKER FALLIDO: 1: smoke-user');
+    expect(r.calls.some((c) => / --no-deps api /.test(c))).toBe(false);
+    expect(r.smokes).toEqual([]);
+    expect(r.shared).toEqual([]);
+  });
+
   it('con la API sana: bootstrap, usuario del smoke y switch, write dos veces con el mismo usuario y read; después limpia', () => {
     const r = run();
     expect(r.stderr).not.toContain('FALLIDO');
@@ -1817,7 +1877,7 @@ describe('smoke-docker.sh', () => {
     expect(r.calls.some((c) => / -p cocos-(staging|production) | -p cocos /.test(c))).toBe(false);
     // Borra lo suyo, por id o por su nombre único, y el candado al final.
     expect(r.removed).toEqual([expect.stringMatching(/^docker compose -p cocos-smoke-staging .* down -v$/),
-      expect.stringMatching(/^docker rmi localhost:5056\/cocos-smoke:smoke-tmp\.\S+$/), 'docker network rm net-a', 'docker rm -f -v reg-a']);
+      expect.stringMatching(/^docker rmi localhost:5056\/cocos-smoke:smoke-cocos-smoke\.\S+$/), 'docker network rm net-a', 'docker rm -f -v reg-a']);
     expect(r.shared).toEqual([]);
     expect(r.leftovers).toEqual([]);
   });

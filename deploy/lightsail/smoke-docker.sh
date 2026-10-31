@@ -34,7 +34,10 @@
 #     (smoke-<id de la ejecución>, de nadie más), la red y, al final, el registro (con su
 #     volumen). El candado se suelta recién ahí: mientras quede algo compartido por borrar, otra
 #     ejecución no puede empezar. Si algo no se pudo borrar, el registro queda (las ejecuciones
-#     siguientes se rechazan) y sale con 1 diciendo qué limpiar a mano.
+#     siguientes se rechazan). Todo borrado que falla (también el del registro, y que `down -v`
+#     deje contenedores o volúmenes del proyecto, y el del directorio temporal) se informa con qué
+#     borrar a mano y la salida no es 0: conserva el código de un error anterior, y si no había,
+#     sale con 1.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
@@ -60,30 +63,41 @@ EDGE="$PREFIX-edge"
 docker image inspect "$LOCAL_IMAGE" >/dev/null 2>&1 || refuse "no está la imagen $LOCAL_IMAGE (docker build -t $LOCAL_IMAGE .)"
 
 # Lo que esta ejecución creó, por id: la limpieza no toca nada más.
-ROOT_DIR="$(mktemp -d)"
+ROOT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/cocos-smoke.XXXXXX")"   # en TMPDIR también en macOS
 REGISTRY_ID=""; EDGE_ID=""; TAGGED=""
 IMAGE_TAG="$REG:smoke-${ROOT_DIR##*/}"   # única por ejecución: ninguna otra la usa
 export COCOS_ROOT="$ROOT_DIR" COCOS_PROJECT="$PREFIX" COMPOSE_WAIT_TIMEOUT="${COMPOSE_WAIT_TIMEOUT:-90}"
 DIR="$ROOT_DIR/staging"
 
 # Lo compartido primero y el candado al final: mientras algo quede, otra ejecución se rechaza.
+# Sin `set -e` adentro: cada paso se intenta, y lo que falla se anota y cambia la salida.
 cleanup() {
   local status=$? left=()
+  set +e
   if [ -f "$DIR/compose.yml" ] || [ -f "$DIR/compose.next.yml" ]; then
     local f="$DIR/compose.yml" e="$DIR/release.env"
     [ -f "$f" ] || { f="$DIR/compose.next.yml"; e="$DIR/release.next.env"; }
-    docker compose -p "$PROJECT" --project-directory "$DIR" -f "$f" --env-file "$e" down -v >/dev/null 2>&1 || left+=("el proyecto $PROJECT")
+    if ! docker compose -p "$PROJECT" --project-directory "$DIR" -f "$f" --env-file "$e" down -v >/dev/null 2>&1; then
+      left+=("el proyecto $PROJECT (down -v falló)")
+    # Que down diga que terminó no alcanza: no tiene que quedar nada con la etiqueta del proyecto.
+    elif [ -n "$(docker ps -aq --filter "label=com.docker.compose.project=$PROJECT" 2>&1)$(docker volume ls -q --filter "label=com.docker.compose.project=$PROJECT" 2>&1)" ]; then
+      left+=("contenedores o volúmenes del proyecto $PROJECT")
+    fi
   fi
-  if [ -n "$TAGGED" ]; then docker rmi "$IMAGE_TAG" >/dev/null 2>&1 || left+=("la imagen $IMAGE_TAG"); fi
-  if [ -n "$EDGE_ID" ]; then docker network rm "$EDGE_ID" >/dev/null 2>&1 || left+=("la red $EDGE"); fi
+  if [ -n "$TAGGED" ] && ! docker rmi "$IMAGE_TAG" >/dev/null 2>&1; then left+=("la imagen $IMAGE_TAG"); fi
+  if [ -n "$EDGE_ID" ] && ! docker network rm "$EDGE_ID" >/dev/null 2>&1; then left+=("la red $EDGE"); fi
   if [ ${#left[@]} -gt 0 ]; then
     # El registro queda como candado: borrarlo dejaría empezar a otra encima de lo que quedó.
     echo "SMOKE CON DOCKER: no se pudo borrar ${left[*]}; queda el registro $REGISTRY como candado: limpiar a mano y después docker rm -f -v $REGISTRY" >&2
     [ "$status" != 0 ] || status=1
-  elif [ -n "$REGISTRY_ID" ]; then
-    docker rm -f -v "$REGISTRY_ID" >/dev/null 2>&1 || true   # -v: su volumen anónimo
+  elif [ -n "$REGISTRY_ID" ] && ! docker rm -f -v "$REGISTRY_ID" >/dev/null 2>&1; then   # -v: su volumen anónimo
+    echo "SMOKE CON DOCKER: no se pudo borrar el registro $REGISTRY ($REGISTRY_ID), que sigue siendo el candado: borrarlo a mano con docker rm -f -v $REGISTRY" >&2
+    [ "$status" != 0 ] || status=1
   fi
-  rm -rf "$ROOT_DIR"
+  if ! rm -rf "$ROOT_DIR"; then
+    echo "SMOKE CON DOCKER: no se pudo borrar $ROOT_DIR (tiene secretos de prueba): borrarlo a mano" >&2
+    [ "$status" != 0 ] || status=1
+  fi
   exit "$status"
 }
 trap cleanup EXIT
@@ -134,9 +148,11 @@ sed "s/^    name: cocos-edge\$/    name: $EDGE/" deploy/lightsail/compose.yml > 
 
 # Lo que en el deploy hace deploy.sh smoke-user: el SQL por stdin y userid= en la salida.
 smoke_user() {
-  local out
+  local out id
   out="$(remote smoke-user staging < deploy/lightsail/smoke-user.sql)" || fail "$1: smoke-user falló"
-  sed -n 's/^userid=//p' <<<"$out"
+  id="$(sed -n 's/^userid=//p' <<<"$out")"
+  [[ "$id" =~ ^[1-9][0-9]*$ ]] || fail "$1: smoke-user no devolvió un userid: '$out'"
+  echo "$id"
 }
 # deploy/smoke.mjs dentro de la imagen, en la red interna del proyecto.
 smoke() {   # modo, userid

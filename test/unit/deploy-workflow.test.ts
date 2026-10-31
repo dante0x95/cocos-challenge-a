@@ -27,6 +27,8 @@ const yml = readFileSync(join(ROOT, '.github/workflows/deploy.yml'), 'utf8');
 const SCRIPT = join(ROOT, 'deploy/release-check.sh');
 const GATE = join(ROOT, 'deploy/release-gate.sh');
 const read = (f: string) => readFileSync(join(ROOT, f), 'utf8');
+/** Los secretos de un entorno en el servidor, un archivo cada uno (issue #36), como los escribe setup.sh. */
+const SECRET_FILES = ['postgres_password', 'database_admin_url', 'api_db_password', 'database_url', 'internal_token'];
 
 /** Valor de la primera clave `key:` del archivo, en una sola línea. */
 function valueOf(key: string): string {
@@ -432,11 +434,61 @@ describe('servidor de Lightsail', () => {
     expect(compose).not.toMatch(/PGDATA/);
   });
 
-  // La credencial de administrador de la base la recibe solo el bootstrap (migrate), no la API
-  // que atiende; ni la API ni el bootstrap bajan imágenes (no hay credenciales de GHCR acá).
-  it('la API recibe api.env y el bootstrap migrate.env; los dos con la imagen del release, sin bajarla', () => {
-    expect(service(env, 'api')).toMatch(/^ {4}env_file: \[api\.env\]$/m);
-    expect(service(env, 'migrate')).toMatch(/^ {4}env_file: \[migrate\.env\]$/m);
+  // Issue #36: ningún secreto llega como variable de entorno, que `docker inspect` muestra. Son
+  // archivos de secrets/ (los genera setup.sh) montados como secrets de compose, cada uno solo en
+  // el servicio que lo usa, que recibe su ruta en <VAR>_FILE. La credencial de administrador de la
+  // base la recibe solo el bootstrap (migrate), no la API que atiende.
+  const SECRETS: Record<string, Record<string, string>> = {
+    db: { POSTGRES_PASSWORD: 'postgres_password' },
+    migrate: { DATABASE_ADMIN_URL: 'database_admin_url', API_DB_PASSWORD: 'api_db_password' },
+    api: { DATABASE_URL: 'database_url', INTERNAL_TOKEN: 'internal_token' },
+  };
+  const SECRET_VARS = Object.values(SECRETS).flatMap((s) => Object.keys(s));
+  /** Las variables (en mayúsculas, 6 espacios) de environment de un servicio, con su valor. */
+  const environment = (block: string) => {
+    const m = block.match(/^ {4}environment:\n((?: {6}.*\n)+)/m);
+    return Object.fromEntries([...(m?.[1] ?? '').matchAll(/^ {6}([A-Z][A-Z0-9_]*): (.*)$/gm)].map((x) => [x[1], x[2]]));
+  };
+  const mounted = (block: string) => block.match(/^ {4}secrets: \[(.*)\]$/m)?.[1].split(', ') ?? [];
+
+  it('ningún servicio recibe un secreto en environment ni en env_file: solo la ruta en <VAR>_FILE', () => {
+    expect(env).not.toMatch(/env_file/);
+    for (const [name, secrets] of Object.entries(SECRETS)) {
+      const vars = environment(service(env, name));
+      for (const v of SECRET_VARS) expect(vars, `${name}: ${v}`).not.toHaveProperty(v);
+      for (const [v, secret] of Object.entries(secrets)) expect(vars[`${v}_FILE`], `${name}: ${v}_FILE`).toBe(`/run/secrets/${secret}`);
+    }
+  });
+
+  it('cada servicio monta solo sus secretos, de un archivo de secrets/ cada uno; la API nunca la credencial de administrador', () => {
+    for (const [name, secrets] of Object.entries(SECRETS)) expect(mounted(service(env, name)), name).toEqual(Object.values(secrets));
+    expect(service(proxy, 'caddy')).not.toMatch(/secrets/);
+    const top = env.match(/^secrets:\n((?: {2}.*\n?)+)/m)?.[1] ?? '';
+    const files = Object.fromEntries([...top.matchAll(/^ {2}(\w+):\n {4}file: (\S+)$/gm)].map((x) => [x[1], x[2]]));
+    const all = Object.values(SECRETS).flatMap((s) => Object.values(s));
+    expect(files).toEqual(Object.fromEntries(all.map((s) => [s, `secrets/${s}`])));
+    expect(service(env, 'api')).not.toMatch(/DATABASE_ADMIN_URL|database_admin_url|POSTGRES_PASSWORD|postgres_password|API_DB_PASSWORD|api_db_password/);
+  });
+
+  // Sin Swarm, compose monta cada secreto con el dueño y el modo del servidor. setup.sh deja 600
+  // los que lee root (el entrypoint de Postgres, antes de bajar a postgres) y 640 con el grupo de
+  // node los de los servicios que corren con la imagen de la API (USER node, gid 1000 en
+  // node:22-alpine; drill-docker.sh lo verifica con Docker real). Las listas tienen que coincidir.
+  it('setup.sh y remote.sh conocen los mismos secretos que compose.yml, con los permisos de quien los lee', () => {
+    const setup = read('deploy/lightsail/setup.sh');
+    const list = (name: string) => setup.match(new RegExp(`^${name}=\\((.*)\\)$`, 'm'))?.[1].split(' ');
+    expect(list('ROOT_SECRETS')).toEqual(mounted(service(env, 'db')));
+    expect(list('APP_SECRETS')).toEqual([...mounted(service(env, 'migrate')), ...mounted(service(env, 'api'))]);
+    expect(setup).toMatch(/^APP_GID=1000$/m);
+    const dockerfile = read('Dockerfile');
+    expect(dockerfile.match(/^FROM (\S+)$/gm)?.at(-1)).toBe('FROM node:22-alpine');
+    expect(dockerfile).toMatch(/^USER node$/m);
+    const remote = read('deploy/lightsail/remote.sh').match(/for f in (.*); do\n\s+\[ -f "\$DIR\/secrets\/\$f" \]/)?.[1].split(' ');
+    expect(remote?.sort()).toEqual([...list('ROOT_SECRETS')!, ...list('APP_SECRETS')!].sort());
+  });
+
+  // Ni la API ni el bootstrap bajan imágenes (no hay credenciales de GHCR acá).
+  it('la API y el bootstrap corren con la imagen del release, sin bajarla', () => {
     expect(service(env, 'migrate')).toMatch(/^ {4}command: \["node", "dist\/db\/bootstrap\.js"\]$/m);
     expect(service(env, 'migrate')).toMatch(/^ {4}profiles: \[migrate\]$/m);
     for (const s of ['api', 'migrate']) {
@@ -444,7 +496,6 @@ describe('servidor de Lightsail', () => {
       expect(service(env, s)).toMatch(/^ {4}pull_policy: never$/m);
     }
     expect(service(env, 'api')).toMatch(/^ {6}RELEASE: \$\{RELEASE:\?falta RELEASE\}$/m);
-    expect(env).not.toMatch(/DATABASE_ADMIN_URL|POSTGRES_PASSWORD/);
   });
 
   it('la base, la API y Caddy vuelven solos después de reiniciar el servidor', () => {
@@ -950,10 +1001,10 @@ function server() {
     writeFileSync(join(bin, name), `#!/usr/bin/env bash\n${body}\n`);
     chmodSync(join(bin, name), 0o755);
   }
-  // Lo que deja setup.sh en cada entorno.
+  // Lo que deja setup.sh en cada entorno: un archivo por secreto.
   for (const env of ['staging', 'production']) {
-    mkdirSync(join(root, env));
-    for (const f of ['db.env', 'migrate.env', 'api.env']) writeFileSync(join(root, env, f), `${f}=secreto\n`, { mode: 0o600 });
+    mkdirSync(join(root, env, 'secrets'), { recursive: true });
+    for (const f of SECRET_FILES) writeFileSync(join(root, env, 'secrets', f), `${f}-secreto`, { mode: 0o600 });
   }
   // El checkout del release: deploy/ del commit actual y tres commits en línea.
   cpSync(join(ROOT, 'deploy'), join(repo, 'deploy'), { recursive: true });
@@ -1259,7 +1310,7 @@ describe('deploy.sh y remote.sh', () => {
     expect(current('staging').output).toBe('release=\nimage=\nfirst=true\n');
     writeFileSync(join(s.root, 'staging', 'release.env'), releaseEnv(I0, s.shas[0], 'staging'));
     expect(current('staging').output).toBe(`release=${s.shas[0]}\nimage=${I0}\nfirst=false\n`);
-    rmSync(join(s.root, 'production', 'api.env'));
+    rmSync(join(s.root, 'production', 'secrets', 'internal_token'));
     const r = current('production');
     expect(r.status).toBe(1);
     expect(r.stderr).toContain('el servidor no está preparado');
@@ -1405,6 +1456,8 @@ describe('drill-docker.sh', () => {
         '  *"volume ls -q --filter label=com.docker.compose.project=cocos-staging") printf "%s" "${VOL_PROJECT:-}" ;;',
         '  *"volume ls -q --filter name=cocos-staging_") printf "%s" "${VOL_NAME:-}" ;;',
         '  *"ps -aq --filter name=cocos-drill-registry") printf "%s" "${PS_REGISTRY:-}" ;;',
+        '  *"ps -aq --filter name=cocos-drill-pg") printf "%s" "${PS_PG:-}" ;;',
+        '  *"volume ls -q --filter name=cocos-drill-secrets") printf "%s" "${VOL_SECRETS:-}" ;;',
         'esac',
       ].join('\n'),
     });
@@ -1417,6 +1470,8 @@ describe('drill-docker.sh', () => {
     'docker volume ls -q --filter label=com.docker.compose.project=cocos-staging',
     'docker volume ls -q --filter name=cocos-staging_',
     'docker ps -aq --filter name=cocos-drill-registry',
+    'docker ps -aq --filter name=cocos-drill-pg',
+    'docker volume ls -q --filter name=cocos-drill-secrets',
   ];
 
   it.each([
@@ -1424,6 +1479,8 @@ describe('drill-docker.sh', () => {
     ['un volumen con la etiqueta del proyecto', { VOL_PROJECT: 'otro_nombre' }, 'volúmenes del proyecto cocos-staging'],
     ['contenedores del proyecto', { PS_PROJECT: 'abc123' }, 'contenedores del proyecto cocos-staging'],
     ['el contenedor del registro', { PS_REGISTRY: 'def456' }, 'un contenedor cocos-drill-registry'],
+    ['el Postgres del ensayo de permisos', { PS_PG: 'fed987' }, 'un contenedor cocos-drill-pg'],
+    ['el volumen del ensayo de permisos', { VOL_SECRETS: 'cocos-drill-secrets' }, 'un volumen cocos-drill-secrets'],
   ])('con %s no empieza: solo lista, no crea ni borra nada', (_name, existing, what) => {
     const r = drill(existing);
     expect(r.status).toBe(2);
@@ -1441,8 +1498,8 @@ describe('drill-docker.sh', () => {
 
   it('sin nada del proyecto, pasa las comprobaciones y empieza por el registro', () => {
     const r = drill({}, 'run -d --name cocos-drill-registry');
-    expect(r.calls.slice(0, 4)).toEqual(LISTS);
-    expect(r.calls[4]).toMatch(/^docker run -d --name cocos-drill-registry /);
+    expect(r.calls.slice(0, LISTS.length)).toEqual(LISTS);
+    expect(r.calls[LISTS.length]).toMatch(/^docker run -d --name cocos-drill-registry /);
     // Falla al crear el registro: la limpieza no toca volúmenes (no hubo compose).
     expect(r.status).not.toBe(0);
     expect(r.calls.some((c) => / down -v|volume rm/.test(c))).toBe(false);
@@ -1478,37 +1535,58 @@ describe('setup.sh', () => {
       const r = runScript('deploy/lightsail/setup.sh', args, f.bin, { CALLS: f.log, USERS: users, COCOS_ROOT: root, DEPLOY_HOME: home, ...env });
       return { ...r, calls: f.calls() };
     };
-    const secretsOf = (env: string) => Object.fromEntries(['db.env', 'migrate.env', 'api.env'].map((file) =>
-      [file, Object.fromEntries(readFileSync(join(root, env, file), 'utf8').split('\n').filter(Boolean).map((l) => [l.slice(0, l.indexOf('=')), l.slice(l.indexOf('=') + 1)]))]));
-    return { root, home, run, secretsOf };
+    /** Los cinco archivos de secrets/ de un entorno, con su contenido. */
+    const secretsOf = (env: string) => Object.fromEntries(SECRET_FILES.map((f) => [f, readFileSync(join(root, env, 'secrets', f), 'utf8')]));
+    /** Los .env de la versión anterior (issue #34), como los escribía setup.sh. */
+    const legacy = (env: string, v: { pg: string; api: string; token: string }) => {
+      mkdirSync(join(root, env), { recursive: true });
+      writeFileSync(join(root, env, 'db.env'), `POSTGRES_PASSWORD=${v.pg}\n`, { mode: 0o600 });
+      writeFileSync(join(root, env, 'migrate.env'), `DATABASE_ADMIN_URL=postgresql://postgres:${v.pg}@db:5432/cocos\nAPI_DB_PASSWORD=${v.api}\n`, { mode: 0o600 });
+      writeFileSync(join(root, env, 'api.env'), `DATABASE_URL=postgresql://api:${v.api}@db:5432/cocos\nINTERNAL_TOKEN=${v.token}\n`, { mode: 0o600 });
+    };
+    const legacyFiles = (env: string) => ['db.env', 'migrate.env', 'api.env'].map((f) => readFileSync(join(root, env, f), 'utf8'));
+    return { root, home, run, secretsOf, legacy, legacyFiles };
   };
+  const coherent = (s: Record<string, string>) => ({
+    pg: s.postgres_password, api: s.api_db_password, token: s.internal_token,
+    admin: s.database_admin_url === `postgresql://postgres:${s.postgres_password}@db:5432/cocos`,
+    url: s.database_url === `postgresql://api:${s.api_db_password}@db:5432/cocos`,
+  });
 
-  it('genera los secretos de cada entorno una vez, coherentes entre sí, en archivos 600 que solo lee deploy, sin imprimirlos', () => {
+  // Issue #36: un archivo por secreto, sin salto final, en secrets/ (700). Sin Swarm, compose los
+  // monta con el dueño y el modo del servidor: postgres_password 600 (lo lee root), los de api y
+  // migrate 640 con el grupo 1000 (node), puesto después del chown -R que deja el de deploy.
+  it('genera los secretos de cada entorno una vez, coherentes entre sí, un archivo cada uno, sin imprimirlos', () => {
     const m = machine();
     const r = m.run([KEY]);
     expect(r.stderr).toBe('');
     expect(r.status).toBe(0);
     const values: string[] = [];
+    const chownR = r.calls.indexOf(`chown -R deploy:deploy ${m.root}`);
+    expect(chownR).toBeGreaterThanOrEqual(0);
     for (const env of ['staging', 'production']) {
+      expect(r.stdout).toContain(`== ${env}: secretos nuevos`);
       expect(statSync(join(m.root, env)).mode & 0o777).toBe(0o700);
-      for (const f of ['db.env', 'migrate.env', 'api.env']) expect(statSync(join(m.root, env, f)).mode & 0o777).toBe(0o600);
-      const s = m.secretsOf(env);
-      expect(Object.keys(s['db.env'])).toEqual(['POSTGRES_PASSWORD']);
-      expect(Object.keys(s['migrate.env'])).toEqual(['DATABASE_ADMIN_URL', 'API_DB_PASSWORD']);
-      expect(Object.keys(s['api.env'])).toEqual(['DATABASE_URL', 'INTERNAL_TOKEN']);
-      const pg = s['db.env'].POSTGRES_PASSWORD;
-      const api = s['migrate.env'].API_DB_PASSWORD;
-      expect(s['migrate.env'].DATABASE_ADMIN_URL).toBe(`postgresql://postgres:${pg}@db:5432/cocos`);
-      expect(s['api.env'].DATABASE_URL).toBe(`postgresql://api:${api}@db:5432/cocos`);
-      values.push(pg, api, s['api.env'].INTERNAL_TOKEN);
+      expect(readdirSync(join(m.root, env)).sort()).toEqual(['secrets']);
+      const dir = join(m.root, env, 'secrets');
+      expect(statSync(dir).mode & 0o777).toBe(0o700);
+      expect(readdirSync(dir).sort()).toEqual([...SECRET_FILES].sort());
+      expect(statSync(join(dir, 'postgres_password')).mode & 0o777).toBe(0o600);
+      expect(r.calls.some((c) => c.startsWith('chown') && c.endsWith(join(dir, 'postgres_password')))).toBe(false);
+      for (const f of ['database_admin_url', 'api_db_password', 'database_url', 'internal_token']) {
+        expect(statSync(join(dir, f)).mode & 0o777, f).toBe(0o640);
+        expect(r.calls.indexOf(`chown deploy:1000 ${join(dir, f)}`), f).toBeGreaterThan(chownR);
+      }
+      const c = coherent(m.secretsOf(env));
+      expect(c.admin && c.url).toBe(true);
+      values.push(c.pg, c.api, c.token);
     }
     for (const v of values) {
-      expect(v).toMatch(/^[0-9a-f]{48}$/);
+      expect(v).toMatch(/^[0-9a-f]{48}$/);   // sin salto de línea
       expect(r.stdout + r.stderr + r.calls.join('\n')).not.toContain(v);
     }
     expect(new Set(values).size).toBe(6);
     expect(statSync(m.root).mode & 0o777).toBe(0o700);
-    expect(r.calls).toContain(`chown -R deploy:deploy ${m.root}`);
   });
 
   it('es idempotente: la segunda vez no cambia ningún secreto ni recrea el usuario', () => {
@@ -1519,18 +1597,72 @@ describe('setup.sh', () => {
     expect(r.status).toBe(0);
     expect(['staging', 'production'].map(m.secretsOf)).toEqual(before);
     expect(r.stdout).toContain('== staging: secretos ya generados, sin cambios');
+    expect(r.stdout).toContain('== production: secretos ya generados, sin cambios');
     expect(r.calls.filter((c) => c.startsWith('useradd'))).toEqual([]);
     expect(r.calls.filter((c) => c.startsWith('docker network create'))).toEqual([]);
+  });
+
+  // Un servidor preparado con la versión anterior tiene db.env, migrate.env y api.env y una base
+  // ya creada con esas contraseñas: se migran una sola vez con los mismos valores, sin generar
+  // nada. Los .env quedan (un rollback a un release anterior los usa) y no se vuelven a leer.
+  it('migra los .env existentes a archivos con los mismos valores, una sola vez, y los deja como estaban', () => {
+    const m = machine();
+    const old = { pg: 'pg-de-la-base-creada', api: 'api-de-la-base-creada', token: 'token-en-uso' };
+    m.legacy('staging', old);
+    const files = m.legacyFiles('staging');
+    const r = m.run([KEY]);
+    expect(r.stderr).toBe('');
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain('== staging: secretos migrados de db.env, migrate.env y api.env, con los mismos valores');
+    expect(r.stdout).toContain('== production: secretos nuevos');
+    expect(m.secretsOf('staging')).toEqual({
+      postgres_password: old.pg,
+      database_admin_url: `postgresql://postgres:${old.pg}@db:5432/cocos`,
+      api_db_password: old.api,
+      database_url: `postgresql://api:${old.api}@db:5432/cocos`,
+      internal_token: old.token,
+    });
+    for (const v of Object.values(old)) expect(r.stdout + r.stderr + r.calls.join('\n')).not.toContain(v);
+    expect(m.legacyFiles('staging')).toEqual(files);
+    for (const f of ['db.env', 'migrate.env', 'api.env']) expect(statSync(join(m.root, 'staging', f)).mode & 0o777).toBe(0o600);
+    expect(statSync(join(m.root, 'staging', 'secrets', 'internal_token')).mode & 0o777).toBe(0o640);
+
+    // Una sola vez: después, los .env no se vuelven a leer aunque cambien.
+    const migrated = m.secretsOf('staging');
+    writeFileSync(join(m.root, 'staging', 'api.env'), 'DATABASE_URL=otra\nINTERNAL_TOKEN=otro\n');
+    const again = m.run([KEY]);
+    expect(again.status).toBe(0);
+    expect(again.stdout).toContain('== staging: secretos ya generados, sin cambios');
+    expect(m.secretsOf('staging')).toEqual(migrated);
+  });
+
+  it.each([
+    ['sin una variable', (env: string, root: string) => writeFileSync(join(root, env, 'api.env'), 'DATABASE_URL=postgresql://api:x@db:5432/cocos\n'), 'api.env tiene 0 líneas INTERNAL_TOKEN='],
+    ['con una variable repetida', (env: string, root: string) => writeFileSync(join(root, env, 'db.env'), 'POSTGRES_PASSWORD=a\nPOSTGRES_PASSWORD=b\n'), 'db.env tiene 2 líneas POSTGRES_PASSWORD='],
+    ['con una variable vacía', (env: string, root: string) => writeFileSync(join(root, env, 'migrate.env'), 'DATABASE_ADMIN_URL=postgresql://postgres:a@db:5432/cocos\nAPI_DB_PASSWORD=\n'), 'API_DB_PASSWORD está vacío en'],
+    ['sin uno de los tres', (env: string, root: string) => rmSync(join(root, env, 'migrate.env')), 'tiene 2 de los 3 .env de la versión anterior y ningún secreto'],
+  ])('con .env de la versión anterior %s frena sin escribir ningún secreto ni tocar los .env', (_name, edit, message) => {
+    const m = machine();
+    m.legacy('production', { pg: 'pg', api: 'api', token: 'token' });
+    edit('production', m.root);
+    const files = readdirSync(join(m.root, 'production')).sort().map((f) => [f, readFileSync(join(m.root, 'production', f), 'utf8')]);
+    const r = m.run([KEY]);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain(message);
+    expect(existsSync(join(m.root, 'production', 'secrets'))).toBe(false);
+    expect(readdirSync(join(m.root, 'production')).sort().map((f) => [f, readFileSync(join(m.root, 'production', f), 'utf8')])).toEqual(files);
   });
 
   it('frena si a un entorno le falta uno de sus secretos: no regenera contraseñas que la base ya tiene', () => {
     const m = machine();
     m.run([KEY]);
-    rmSync(join(m.root, 'production', 'api.env'));
+    const before = m.secretsOf('staging');
+    rmSync(join(m.root, 'production', 'secrets', 'api_db_password'));
     const r = m.run([KEY]);
     expect(r.status).toBe(1);
-    expect(r.stderr).toContain('tiene 2 de los 3 archivos de secretos');
-    expect(existsSync(join(m.root, 'production', 'api.env'))).toBe(false);
+    expect(r.stderr).toContain('secrets tiene 4 de los 5 secretos');
+    expect(existsSync(join(m.root, 'production', 'secrets', 'api_db_password'))).toBe(false);
+    expect(m.secretsOf('staging')).toEqual(before);
   });
 
   it('el usuario deploy, en el grupo docker, con solo la clave de deploy y restringida', () => {

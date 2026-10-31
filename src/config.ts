@@ -1,6 +1,7 @@
 // Configuración tipada desde el entorno. Falla al arrancar si algo es inválido, no en el
 // primer request.
 import { z } from 'zod';
+import { withFileSecrets } from './file-secrets.js';
 
 const Env = z.object({
   DATABASE_URL: z.string().url().default('postgresql://api:api@localhost:5432/cocos'),
@@ -20,8 +21,18 @@ const Env = z.object({
 
 export type Config = z.infer<typeof Env>;
 
+// Los secretos de la API también se aceptan como archivo: DATABASE_URL_FILE e INTERNAL_TOKEN_FILE
+// (D-29, issue #36; src/file-secrets.ts).
+export const FILE_SECRETS = ['DATABASE_URL', 'INTERNAL_TOKEN'] as const;
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
-  const parsed = Env.safeParse(env);
+  let resolved: NodeJS.ProcessEnv;
+  try {
+    resolved = withFileSecrets(env, FILE_SECRETS);
+  } catch (e) {
+    throw new Error(`configuración inválida: ${(e as Error).message}`);
+  }
+  const parsed = Env.safeParse(resolved);
   if (!parsed.success) {
     const issues = parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ');
     throw new Error(`configuración inválida: ${issues}`);

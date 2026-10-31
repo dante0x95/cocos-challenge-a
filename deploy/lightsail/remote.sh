@@ -10,7 +10,8 @@
 #                                         bootstrap de esa versión terminó bien: la exige switch
 #   compose.previous.yml, release.previous.env
 #                                         lo que atendía antes del último cambio (switch)
-#   db.env, migrate.env, api.env          secretos (setup.sh, 600)
+#   secrets/                              un archivo por secreto (setup.sh), que compose.yml
+#                                         monta solo en el servicio que lo usa
 #
 #   remote.sh current <entorno>
 #       first=false, release=<sha> e image=<ref> de lo que atiende; first=true (y los dos vacíos)
@@ -45,8 +46,8 @@ use_env() {
     *) fail "entorno desconocido: '${1:-}' (staging o production)" ;;
   esac
   DIR="$ROOT/$ENV"
-  for f in db.env migrate.env api.env; do
-    [ -f "$DIR/$f" ] || fail "falta $DIR/$f: el servidor no está preparado (deploy/lightsail/setup.sh)"
+  for f in postgres_password database_admin_url api_db_password database_url internal_token; do
+    [ -f "$DIR/secrets/$f" ] || fail "falta $DIR/secrets/$f: el servidor no está preparado (deploy/lightsail/setup.sh)"
   done
 }
 REF_RE='^[a-z0-9.:/_-]+@sha256:[0-9a-f]{64}$'

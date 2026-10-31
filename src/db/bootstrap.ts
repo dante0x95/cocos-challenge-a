@@ -4,7 +4,8 @@
 //   pnpm db:bootstrap                       (desarrollo, con tsx)
 //   node dist/db/bootstrap.js               (contenedor `migrate` de docker compose)
 //
-// Necesita DATABASE_ADMIN_URL (un rol que pueda crear roles, esquemas y cambiar dueños).
+// Necesita DATABASE_ADMIN_URL (un rol que pueda crear roles, esquemas y cambiar dueños), o
+// DATABASE_ADMIN_URL_FILE con la ruta de un archivo que la tenga (en el servidor, D-29).
 //
 // 1. db/migrations/*.sql, en orden y UNA sola vez (public.schema_migrations guarda nombre y
 //    checksum; un archivo ya aplicado que cambió aborta el bootstrap). 000_seed.sql es el
@@ -34,6 +35,7 @@ import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import pg from 'pg';
 import { API_CONTRACT, parseSignature } from './contract.js';
+import { withFileSecrets } from '../file-secrets.js';
 
 export interface BootstrapOptions {
   adminUrl: string;
@@ -256,14 +258,23 @@ async function run(db: pg.Pool, dbDir: string, opts: BootstrapOptions, log: (m: 
 }
 
 // Ejecución directa (CLI).
+// Los dos secretos también se aceptan como archivo: DATABASE_ADMIN_URL_FILE y API_DB_PASSWORD_FILE
+// (D-29, issue #36; src/file-secrets.ts).
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
-  const adminUrl = process.env.DATABASE_ADMIN_URL;
+  let env: NodeJS.ProcessEnv;
+  try {
+    env = withFileSecrets(process.env, ['DATABASE_ADMIN_URL', 'API_DB_PASSWORD']);
+  } catch (e) {
+    console.error(`bootstrap FALLÓ: ${(e as Error).message}`);
+    process.exit(2);
+  }
+  const adminUrl = env.DATABASE_ADMIN_URL;
   if (!adminUrl) {
     console.error('falta DATABASE_ADMIN_URL');
     process.exit(2);
   }
-  bootstrap({ adminUrl, apiPassword: process.env.API_DB_PASSWORD ?? 'api',
-    release: process.env.RELEASE || undefined, servingRelease: process.env.SERVING_RELEASE })
+  bootstrap({ adminUrl, apiPassword: env.API_DB_PASSWORD ?? 'api',
+    release: env.RELEASE || undefined, servingRelease: env.SERVING_RELEASE })
     .then((r) => {
       console.log(`bootstrap OK: ${r.applied.length} migración(es) aplicadas, ${r.baselined.length} registradas como existentes`);
       process.exit(0);

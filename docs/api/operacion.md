@@ -89,7 +89,7 @@ La primera conexión SSH a la instancia (el primer comando del paso 2) pide acep
 ssh-keygen -t ed25519 -N '' -C cocos-deploy -f ~/.ssh/cocos-deploy
 ```
 
-2. Preparar el servidor con [`deploy/lightsail/setup.sh`](../../deploy/lightsail/setup.sh): el usuario `deploy` con esa clave, los secretos de cada entorno (generados en el servidor, sin imprimirse) y Caddy. Es idempotente: volver a correrlo no cambia los secretos, actualiza el proxy y, con otra clave, la reemplaza.
+2. Preparar el servidor con [`deploy/lightsail/setup.sh`](../../deploy/lightsail/setup.sh): el usuario `deploy` con esa clave, los secretos de cada entorno (generados en el servidor, sin imprimirse, un archivo cada uno en `/opt/cocos/<entorno>/secrets`) y Caddy. Es idempotente: volver a correrlo no cambia los secretos, actualiza el proxy y, con otra clave, la reemplaza.
 
 ```bash
 ssh -i "$LIGHTSAIL_KEY" "ubuntu@$HOST" rm -rf cocos-setup
@@ -134,6 +134,33 @@ deploy/drills.sh release v0.1.0
 
 El primer deploy de cada entorno no tiene release anterior: el gate de ancestría lo deja pasar, y si falla, la API sale y el entorno queda vacío hasta el próximo release. El primer `/health` tarda unos segundos más: Caddy pide el certificado de cada nombre. El paquete de GHCR puede quedar privado: cada deploy baja la imagen con el token de su job.
 
+### Secretos como archivos
+
+Desde [#36](https://github.com/dante0x95/cocos-challenge-a/issues/36) los secretos no llegan a los contenedores como variables de entorno (las muestra `docker inspect`): son archivos de `/opt/cocos/<entorno>/secrets/`, uno por secreto, que compose monta en `/run/secrets/` solo en el servicio que los usa ([D-29](../decisiones.md#d-29)). `postgres_password` queda 600 y los otros cuatro 640 con el grupo 1000, el de `node` en la imagen: así los lee la API.
+
+Un servidor preparado antes de #36 tiene los secretos en `db.env`, `migrate.env` y `api.env`, y la base ya creada con esas contraseñas. Una sola vez, **antes de publicar el primer release que incluye #36**, desde la raíz del repo parado en `main` y con las variables de [La primera vez](#la-primera-vez):
+
+1. Volver a correr `setup.sh` desde `main`, con la misma clave de deploy (los mismos comandos del paso 2 de arriba). Migra los `.env` de cada entorno a los archivos, con los mismos valores; no genera nada ni toca los `.env`. Tiene que decir, para los dos entornos, `secretos migrados de db.env, migrate.env y api.env, con los mismos valores`; si frena (un `.env` sin una variable, con una repetida o vacía), no escribió nada: corregir ese `.env` a mano y volver a correrlo.
+
+```bash
+ssh -i "$LIGHTSAIL_KEY" "ubuntu@$HOST" rm -rf cocos-setup
+scp -i "$LIGHTSAIL_KEY" -r deploy/lightsail "ubuntu@$HOST:cocos-setup"
+ssh -i "$LIGHTSAIL_KEY" "ubuntu@$HOST" "sudo bash cocos-setup/setup.sh '$(cat ~/.ssh/cocos-deploy.pub)'"
+ssh -i ~/.ssh/cocos-deploy -o IdentitiesOnly=yes "deploy@$HOST" 'ls -ln /opt/cocos/staging/secrets /opt/cocos/production/secrets'
+```
+
+El último tiene que listar los cinco archivos de cada entorno: `postgres_password` con `-rw-------` y los demás con `-rw-r-----` y el grupo `1000`.
+
+2. Publicar el release. Su deploy recrea la base de cada entorno (cambió su configuración; el volumen sigue y la contraseña ya no se usa: la base existe), con la API anterior atendiendo, que mientras tanto puede responder `503` reintentables ([cuando la base se reinicia](#cuando-la-base-se-reinicia)), y después la API. Si se publica sin el paso 1, el deploy frena en `Release que atiende` (`falta /opt/cocos/<entorno>/secrets/…: el servidor no está preparado`) sin cambiar nada: correr el paso 1 y volver a correr el workflow.
+
+3. Verificar que `docker inspect` no muestra ningún secreto (tiene que imprimir `0`):
+
+```bash
+ssh -i ~/.ssh/cocos-deploy "deploy@$HOST" "docker inspect cocos-production-api-1 cocos-production-db-1 cocos-staging-api-1 cocos-staging-db-1 | grep -cE '(POSTGRES_PASSWORD|DATABASE_URL|DATABASE_ADMIN_URL|API_DB_PASSWORD|INTERNAL_TOKEN)='"
+```
+
+4. Los `.env` quedan para la vuelta atrás a un release anterior a #36, cuyo `compose.yml` todavía los usa con `env_file`. Se borran cuando ningún `compose*.yml` del entorno los usa (después del segundo release con #36, cuando `compose.previous.yml` también es de esta versión): si `grep -l env_file /opt/cocos/<entorno>/compose*.yml` no imprime nada, `rm /opt/cocos/<entorno>/{db,migrate,api}.env`. `setup.sh` no los vuelve a leer.
+
 ### Operación
 
 - **Un deploy en rojo.** `gh run list --workflow deploy` y `gh run view <id> --log`. Si frenó en el job `gate`, el release no se puede desplegar (tag que no es `vX.Y.Z`, commit fuera de `main` o con `ci` en rojo; el log dice cuál): no se construyó nada, y la corrección es otro release. Si frenó en `Acceso SSH al servidor` o `Release que atiende`, faltan los secretos, el servidor no está preparado (`setup.sh`) o su `release.env` no dice qué atiende (el log lo nombra): se corrige a mano, nunca borrándolo, que lo haría pasar por un primer deploy. Si frenó en `El commit desciende del release actual`, el commit es anterior al que atiende (un re-run del deploy de un release viejo, por ejemplo): no cambió nada. Si falló `Bootstrap de la base`, no quedó nada aplicado y sigue la versión anterior; el log tiene el error del bootstrap. Si falló `Cambiar de versión` o `/health atiende el commit`, el paso `Volver a la versión anterior` devolvió la API a la imagen y el release de antes, y su log dice si `/health` atiende otra vez ese release. Si ese paso también falló, el entorno quedó como lo dejó el cambio: entrar al servidor y mirar `/opt/cocos/<entorno>` (`release.env`, `release.previous.env`) y `docker compose -p cocos-<entorno> ps`.
@@ -141,7 +168,7 @@ El primer deploy de cada entorno no tiene release anterior: el gate de ancestrí
 - **Staging en rojo, producción no**: el job `production` no corre (`needs: staging`); lo que atiende producción no cambia. Un deploy de staging con una migración nueva corre su bootstrap contra la base de staging antes de que esa migración llegue a producción.
 - **En el servidor**: `ssh -i ~/.ssh/cocos-deploy deploy@18.227.203.30`, y cada entorno es un proyecto de compose en `/opt/cocos/<entorno>`: `docker compose -p cocos-production --project-directory /opt/cocos/production --env-file /opt/cocos/production/release.env logs api`. Las imágenes viejas se acumulan (la vuelta atrás usa la anterior): `docker image prune -a` borra las que ningún contenedor usa.
 - **Ensayos** (a mano; no corren en el CI). `deploy/drills.sh`, con `gh` autenticado: el último release pasó por el workflow de deploy y `/health` lo atiende (`release [tag]`), y un re-run del deploy de un release viejo se frena en el gate (`rerun`); `URL` elige el entorno (por defecto, producción). `deploy/lightsail/drill-docker.sh`, con Docker en la máquina local y sin el servidor: `remote.sh` con imágenes rotas a propósito (un bootstrap que falla, una API cuyo `/health` responde `503`) tiene que rechazarlas y volver a la buena; conviene correrlo después de cambiar `remote.sh` o `compose.yml`.
-- **Token interno** para `/internal/*`, solo el token (`api.env` tiene también `DATABASE_URL`, con la contraseña del rol `api`): `ssh -i ~/.ssh/cocos-deploy deploy@18.227.203.30 "sed -n 's/^INTERNAL_TOKEN=//p' /opt/cocos/<entorno>/api.env"`, con `<entorno>` `staging` o `production`.
+- **Token interno** para `/internal/*`, solo el token (el archivo tiene el token y nada más, sin salto final): `ssh -i ~/.ssh/cocos-deploy deploy@18.227.203.30 cat /opt/cocos/<entorno>/secrets/internal_token`, con `<entorno>` `staging` o `production`.
 
 **Cambio de hash de idempotencia.** Si cambia cómo se calcula el hash de `POST /orders`, las claves vigentes (24 h) guardan el hash viejo y su reintento respondería `422`. El cambio tiene que aceptar también el hash anterior, solo para reconocer claves existentes y dentro de la misma llamada a `app.place_order`, hasta que vence la ventana; después se borra esa compatibilidad. Como el vencimiento lo decide `place_order` con `created_at`, la ventana termina 24 h + 1 min después del despliegue aunque la limpieza no haya corrido. Así se hizo al canonizar `amount` y `price` ([D-19](../decisiones.md#d-19)).
 

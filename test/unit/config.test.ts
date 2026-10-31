@@ -1,6 +1,7 @@
 // El plazo local del driver (issue #11) va por encima del statement_timeout del rol api: en
 // condiciones normales manda la base (D-20).
 import { afterEach, describe, expect, it } from 'vitest';
+import { spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -56,6 +57,47 @@ describe('secretos como archivo (<VAR>_FILE)', () => {
     const env: NodeJS.ProcessEnv = { INTERNAL_TOKEN_FILE: secret('token-del-archivo') };
     expect(loadConfig(env).INTERNAL_TOKEN).toBe('token-del-archivo');
     expect(Object.keys(env)).toEqual(['INTERNAL_TOKEN_FILE']);
+  });
+
+  // Como arranca la API: un proceso aparte, con solo los _FILE en su entorno, importa src/config.ts
+  // (que llama a loadConfig con process.env). process.env tiene que quedar como estaba, sin ningún
+  // valor leído, y un proceso hijo no los hereda: una asignación global (process.env[name] = value)
+  // los publicaría a los dos aunque el objeto recibido quede intacto.
+  it('el valor leído no llega a process.env ni lo hereda un proceso hijo', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cocos-secret-env-'));
+    dirs.push(dir);
+    const url = 'postgresql://api:clave-del-archivo-url@db:5432/cocos';
+    const token = 'token-del-archivo-env';
+    writeFileSync(join(dir, 'database_url'), `${url}\n`, { mode: 0o600 });
+    writeFileSync(join(dir, 'internal_token'), `${token}\n`, { mode: 0o600 });
+    const script = join(dir, 'arranque.mts');
+    writeFileSync(script, `
+      import { spawnSync } from 'node:child_process';
+      const before = { ...process.env };
+      const { config } = await import(${JSON.stringify(resolve(import.meta.dirname, '../../src/config.ts'))});
+      const child = spawnSync(process.execPath, ['-e', 'process.stdout.write(JSON.stringify(process.env))'], { encoding: 'utf8' });
+      process.stdout.write(JSON.stringify({ config: { url: config.DATABASE_URL, token: config.INTERNAL_TOKEN },
+        before, after: { ...process.env }, child: JSON.parse(child.stdout) }));
+    `);
+    const { DATABASE_URL: _u, INTERNAL_TOKEN: _t, ...base } = process.env;
+    const r = spawnSync(resolve(import.meta.dirname, '../../node_modules/.bin/tsx'), [script], {
+      encoding: 'utf8',
+      env: { ...base, DATABASE_URL_FILE: join(dir, 'database_url'), INTERNAL_TOKEN_FILE: join(dir, 'internal_token') },
+    });
+    expect(r.stderr).toBe('');
+    expect(r.status).toBe(0);
+    const out = JSON.parse(r.stdout) as { config: Record<string, string>; before: Record<string, string>; after: Record<string, string>; child: Record<string, string> };
+    expect(out.config).toEqual({ url, token });   // la configuración sí los tiene
+    expect(out.after).toEqual(out.before);
+    for (const env of [out.after, out.child]) {
+      expect(env).not.toHaveProperty('DATABASE_URL');
+      expect(env).not.toHaveProperty('INTERNAL_TOKEN');
+      expect(env.INTERNAL_TOKEN_FILE).toBe(join(dir, 'internal_token'));
+      for (const v of Object.values(env)) {
+        expect(v).not.toContain(token);
+        expect(v).not.toContain('clave-del-archivo-url');
+      }
+    }
   });
 
   it.each(['DATABASE_URL', 'INTERNAL_TOKEN'])('%s y su _FILE juntas fallan al arrancar', (name) => {

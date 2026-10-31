@@ -1690,6 +1690,8 @@ describe('smoke-docker.sh', () => {
         'case "$*" in',
         '  *"ps -aq --filter label=com.docker.compose.project=cocos-smoke-staging") cat "$STATE/project" 2>/dev/null; printf "%s" "${PS_PROJECT:-}" ;;',
         '  *"volume ls -q --filter name=cocos-smoke-staging_") printf "%s" "${VOL_NAME:-}" ;;',
+        // VOL_LEFT: un volumen del proyecto que down -v no borró (antes de down no está).
+        '  "volume ls -q --filter label=com.docker.compose.project=cocos-smoke-staging") [ ! -e "$STATE/downed" ] || printf "%s" "${VOL_LEFT:-}" ;;',
         '  *"network ls -q --filter name=^cocos-smoke-edge$") cat "$STATE/net.cocos-smoke-edge" 2>/dev/null; printf "%s" "${NET_EDGE:-}" ;;',
         // El nombre de un contenedor es único: si otro ya lo tiene, create (y run) fallan.
         '  "create --name cocos-smoke-registry "* | "run -d --name cocos-smoke-registry "*)',
@@ -1713,7 +1715,7 @@ describe('smoke-docker.sh', () => {
         '  "compose "*" up "*) echo "$me" > "$STATE/project" ;;',
         '  "compose "*" ps -q api") echo api789 ;;',
         '  "inspect -f "*" api789") cat "$CALLS.api-nets" ;;',
-        '  "compose "*" down -v") [ -n "${DOWN_LEAVES:-}" ] || rm -f "$STATE/project"; for n in "$CALLS".net.*; do case "$n" in *.bak) ;; *) sed -i.bak "/ $project\\$/d" "$n" ;; esac; done ;;',
+        '  "compose "*" down -v") touch "$STATE/downed"; [ -n "${DOWN_LEAVES:-}" ] || rm -f "$STATE/project"; for n in "$CALLS".net.*; do case "$n" in *.bak) ;; *) sed -i.bak "/ $project\\$/d" "$n" ;; esac; done ;;',
         '  *"/smoke/smoke.mjs "*) [ -z "${SMOKE_FAIL:-}" ] || exit 1 ;;',
         'esac',
         '[ -n "${INTERLEAVE:-}" ] && [ "$me" = a ] && [[ "$cleanup_step" == "rm -f -v "* ]] && other después "$cleanup_step"',
@@ -1829,6 +1831,21 @@ describe('smoke-docker.sh', () => {
     expect(r.stderr).toContain('no se pudo borrar contenedores o volúmenes del proyecto cocos-smoke-staging; queda el registro cocos-smoke-registry como candado');
     expect(r.removed.some((c) => c.startsWith('docker rm -f -v'))).toBe(false);
     expect(r.shared).toEqual(['project', 'registry']);
+  });
+
+  // CR-9: un volumen sobrante sin contenedores. Las comprobaciones iniciales no ven nada, down -v
+  // termina bien y `docker ps` no devuelve contenedores, pero `docker volume ls` por la etiqueta
+  // del proyecto devuelve un volumen que quedó: el candado queda y sale con 1.
+  it('si después de down -v queda un volumen del proyecto sin contenedores, deja el candado y sale con 1', () => {
+    const r = run({ VOL_LEFT: 'cocos-smoke-staging_pgdata' });
+    expect(r.stdout).toContain('SMOKE CON DOCKER OK');
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('no se pudo borrar contenedores o volúmenes del proyecto cocos-smoke-staging; queda el registro cocos-smoke-registry como candado');
+    const lists = r.calls.filter((c) => c === 'docker volume ls -q --filter label=com.docker.compose.project=cocos-smoke-staging');
+    expect(lists).toHaveLength(2);   // al empezar (vacío) y después de down -v (el sobrante)
+    expect(r.calls).toContainEqual(expect.stringMatching(/ down -v$/));
+    expect(r.removed.some((c) => c.startsWith('docker rm -f -v'))).toBe(false);
+    expect(r.shared).toEqual(['registry']);   // sin proyecto (no hay contenedores), con el registro
   });
 
   it('si down -v falla, también', () => {

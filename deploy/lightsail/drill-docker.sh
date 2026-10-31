@@ -28,11 +28,20 @@
 #   4. Un switch cortado (issue #56): el switch de bad-health falla y nadie vuelve atrás; current
 #      anuncia good con bad-health pendiente, el re-run vuelve a fallar en el switch y rollback
 #      vuelve a good.
-# Al final borra todo lo que creó (contenedores, volúmenes, red, registro e imágenes). remote.sh usa
-# el proyecto fijo cocos-staging, y `down -v` borraría su volumen aunque no fuera de este ensayo:
-# si en este Docker ya hay algo de ese proyecto (contenedores o volúmenes, también sin
-# contenedores, como deja un `down` sin -v), el contenedor del registro o lo del paso 0 (su
-# volumen y su Postgres), no empieza ni crea nada. Si no puede consultar Docker, tampoco.
+# Al terminar borra solo lo que esta corrida creó, por su id o por un nombre que es solo suyo: el
+# proyecto (`down -v`, desde su directorio temporal; después exige que no quede ningún contenedor
+# ni volumen del proyecto), el Postgres del paso 0 y su volumen de secretos, la red cocos-edge si
+# la creó, las etiquetas de imagen que construyó y, al final, el registro (con su volumen).
+# remote.sh usa el proyecto fijo cocos-staging, y `down -v` borraría su volumen aunque no fuera de
+# este ensayo: si en este Docker ya hay algo de ese proyecto (contenedores o volúmenes, también sin
+# contenedores, como deja un `down` sin -v) o lo del paso 0 (su volumen y su Postgres), no empieza
+# ni crea nada más que el registro, que borra. Si no puede consultar Docker, tampoco.
+# El registro es el candado: lo crea primero con `docker create --name`, que falla si ya hay un
+# cocos-drill-registry (otro ensayo, o lo que dejó uno anterior); en ese caso no sigue ni toca
+# nada. Si algo no se pudo borrar, el registro queda (los ensayos siguientes se rechazan). Todo
+# borrado que falla (también el del registro y el del directorio temporal, y que `down -v` deje
+# contenedores o volúmenes del proyecto) se informa con qué borrar a mano y la salida no es 0:
+# conserva el código de un error anterior, y si no había, sale con 1.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
@@ -45,43 +54,71 @@ SHA_HEALTH="$(printf 'c%.0s' {1..40})"
 fail() { echo "ENSAYO FALLIDO: $*" >&2; exit 1; }
 remote() { bash deploy/lightsail/remote.sh "$@"; }
 
-# Antes de crear nada: lo que este ensayo borraría al terminar no puede existir antes.
+# Antes de crear nada más que el candado: lo que este ensayo borraría al terminar no puede existir antes.
 refuse() { echo "NO SE ENSAYA: $*" >&2; exit 2; }
 absent() {   # descripción, comando de docker que lista; vacío = no hay
   local what="$1" out; shift
   out="$("$@")" || refuse "no se pudo consultar Docker ($*)"
   [ -z "$out" ] || refuse "ya hay $what en este Docker ($(tr '\n' ' ' <<<"$out")): no se ensaya encima"
 }
-absent "contenedores del proyecto cocos-staging" docker ps -aq --filter label=com.docker.compose.project=cocos-staging
-absent "volúmenes del proyecto cocos-staging" docker volume ls -q --filter label=com.docker.compose.project=cocos-staging
-absent "volúmenes cocos-staging_*" docker volume ls -q --filter name=cocos-staging_
-absent "un contenedor cocos-drill-registry" docker ps -aq --filter name=cocos-drill-registry
-absent "un contenedor cocos-drill-pg" docker ps -aq --filter name=cocos-drill-pg
-absent "un volumen cocos-drill-secrets" docker volume ls -q --filter name=cocos-drill-secrets
 
-ROOT_DIR="$(mktemp -d)"
-NETWORK_CREATED=""
-SECRETS_VOLUME=""
+# Lo que esta corrida creó, por id: la limpieza no toca nada más.
+ROOT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/cocos-drill.XXXXXX")"
+REGISTRY_ID=""; PG_ID=""; EDGE_ID=""; SECRETS_VOLUME=""; BUILT=()
 export COCOS_ROOT="$ROOT_DIR" COMPOSE_WAIT_TIMEOUT="${COMPOSE_WAIT_TIMEOUT:-90}"
 DIR="$ROOT_DIR/staging"
 
+# Lo compartido primero y el candado al final: mientras algo quede, otro ensayo se rechaza.
+# Sin `set -e` adentro: cada paso se intenta, y lo que falla se anota y cambia la salida.
 cleanup() {
+  local status=$? left=() t
+  set +e
   if [ -f "$DIR/compose.yml" ] || [ -f "$DIR/compose.next.yml" ]; then
     local f="$DIR/compose.yml" e="$DIR/release.env"
     [ -f "$f" ] || { f="$DIR/compose.next.yml"; e="$DIR/release.next.env"; }
-    docker compose -p cocos-staging --project-directory "$DIR" -f "$f" --env-file "$e" down -v >/dev/null 2>&1 || true
+    if ! docker compose -p cocos-staging --project-directory "$DIR" -f "$f" --env-file "$e" down -v >/dev/null 2>&1; then
+      left+=("el proyecto cocos-staging (down -v falló)")
+    # Que down diga que terminó no alcanza: no tiene que quedar nada con la etiqueta del proyecto.
+    elif [ -n "$(docker ps -aq --filter label=com.docker.compose.project=cocos-staging 2>&1)$(docker volume ls -q --filter label=com.docker.compose.project=cocos-staging 2>&1)" ]; then
+      left+=("contenedores o volúmenes del proyecto cocos-staging")
+    fi
   fi
-  docker rm -f cocos-drill-registry cocos-drill-pg >/dev/null 2>&1 || true
-  [ -z "$SECRETS_VOLUME" ] || docker volume rm cocos-drill-secrets >/dev/null 2>&1 || true
-  [ -z "$NETWORK_CREATED" ] || docker network rm cocos-edge >/dev/null 2>&1 || true
-  docker rmi "$REG:good" "$REG:bad-boot" "$REG:bad-health" >/dev/null 2>&1 || true
-  rm -rf "$ROOT_DIR"
+  # -v: el volumen anónimo de la imagen de Postgres.
+  if [ -n "$PG_ID" ] && ! docker rm -f -v "$PG_ID" >/dev/null 2>&1; then left+=("el contenedor cocos-drill-pg ($PG_ID)"); fi
+  if [ -n "$SECRETS_VOLUME" ] && ! docker volume rm "$SECRETS_VOLUME" >/dev/null 2>&1; then left+=("el volumen $SECRETS_VOLUME"); fi
+  if [ -n "$EDGE_ID" ] && ! docker network rm "$EDGE_ID" >/dev/null 2>&1; then left+=("la red cocos-edge ($EDGE_ID)"); fi
+  for t in ${BUILT[@]+"${BUILT[@]}"}; do
+    docker rmi "$t" >/dev/null 2>&1 || left+=("la imagen $t")
+  done
+  if [ ${#left[@]} -gt 0 ]; then
+    # El registro queda como candado: borrarlo dejaría empezar a otro ensayo encima de lo que quedó.
+    echo "ENSAYO: no se pudo borrar ${left[*]}; queda el registro cocos-drill-registry como candado: limpiar a mano y después docker rm -f -v cocos-drill-registry" >&2
+    [ "$status" != 0 ] || status=1
+  elif [ -n "$REGISTRY_ID" ] && ! docker rm -f -v "$REGISTRY_ID" >/dev/null 2>&1; then   # -v: su volumen anónimo
+    echo "ENSAYO: no se pudo borrar el registro cocos-drill-registry ($REGISTRY_ID), que sigue siendo el candado: borrarlo a mano con docker rm -f -v cocos-drill-registry" >&2
+    [ "$status" != 0 ] || status=1
+  fi
+  if ! rm -rf "$ROOT_DIR"; then
+    echo "ENSAYO: no se pudo borrar $ROOT_DIR (tiene secretos de prueba): borrarlo a mano" >&2
+    [ "$status" != 0 ] || status=1
+  fi
+  exit "$status"
 }
 trap cleanup EXIT
 
+# El candado: si otro tiene el registro, no sigue (y no lo borra: no es suyo).
+REGISTRY_ID="$(docker create --name cocos-drill-registry -p "$PORT:5000" registry:2 2>/dev/null)" \
+  || { REGISTRY_ID=""; refuse "ya hay un contenedor cocos-drill-registry (¿otro ensayo, o lo que dejó uno anterior?): no se ensaya encima"; }
+absent "contenedores del proyecto cocos-staging" docker ps -aq --filter label=com.docker.compose.project=cocos-staging
+absent "volúmenes del proyecto cocos-staging" docker volume ls -q --filter label=com.docker.compose.project=cocos-staging
+absent "volúmenes cocos-staging_*" docker volume ls -q --filter name=cocos-staging_
+absent "un contenedor cocos-drill-pg" docker ps -aq --filter name=cocos-drill-pg
+absent "un volumen cocos-drill-secrets" docker volume ls -q --filter name=cocos-drill-secrets
+
 echo "== imágenes"
-docker run -d --name cocos-drill-registry -p "$PORT:5000" registry:2 >/dev/null
+docker start "$REGISTRY_ID" >/dev/null || fail "no arrancó el registro local (¿el puerto $PORT está ocupado?)"
 docker build -q -t "$REG:good" . >/dev/null
+BUILT+=("$REG:good")
 ctx="$ROOT_DIR/build"
 mkdir -p "$ctx"
 cat > "$ctx/999_drill.sql" <<'SQL'
@@ -91,10 +128,12 @@ docker build -q -t "$REG:bad-boot" -f - "$ctx" >/dev/null <<EOF
 FROM $REG:good
 COPY 999_drill.sql db/migrations/999_drill.sql
 EOF
+BUILT+=("$REG:bad-boot")
 docker build -q -t "$REG:bad-health" - >/dev/null <<EOF
 FROM $REG:good
 CMD ["node", "-e", "require('http').createServer((q, s) => { s.statusCode = 503; s.end('{}'); }).listen(3000)"]
 EOF
+BUILT+=("$REG:bad-health")
 digest() {
   docker push -q "$REG:$1" >/dev/null
   docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$REG:$1" | grep "^$REG@sha256:" | head -1
@@ -106,16 +145,16 @@ echo "== 0. permisos de los secretos, como los deja setup.sh"
 # Docker), con otro dueño que node, como deploy en el servidor, y los modos de setup.sh. Se montan
 # por la ruta del volumen, como compose monta un secreto de archivo: un bind mount.
 p0="$(openssl rand -hex 24)"; t0="$(openssl rand -hex 24)"
-SECRETS_VOLUME=1
-docker volume create cocos-drill-secrets >/dev/null
-docker run --rm -u 0 -v cocos-drill-secrets:/s -e P0="$p0" -e T0="$t0" --entrypoint sh "$GOOD" -ec '
+# Con un nombre de esta corrida: `docker volume create` no falla si el volumen ya existe.
+SECRETS_VOLUME="$(docker volume create "cocos-drill-secrets-${ROOT_DIR##*.}")" || { SECRETS_VOLUME=""; fail "0: no se pudo crear el volumen de los secretos"; }
+docker run --rm -u 0 -v "$SECRETS_VOLUME:/s" -e P0="$p0" -e T0="$t0" --entrypoint sh "$GOOD" -ec '
   cd /s
   printf %s "$P0" > postgres_password; printf %s "$T0" > internal_token; printf %s "$T0" > control
   printf %s postgresql://api:x@db:5432/cocos > database_url
   chown 1001:1001 postgres_password control; chmod 600 postgres_password control
   chown 1001:1000 internal_token database_url; chmod 640 internal_token database_url' \
   || fail "0: no se pudieron escribir los secretos de prueba"
-VOL="$(docker volume inspect -f '{{.Mountpoint}}' cocos-drill-secrets)"
+VOL="$(docker volume inspect -f '{{.Mountpoint}}' "$SECRETS_VOLUME")"
 [ "$(docker run --rm --entrypoint id "$GOOD" -u):$(docker run --rm --entrypoint id "$GOOD" -g)" = 1000:1000 ] \
   || fail "0: la imagen no corre como uid y gid 1000 (node), el grupo al que setup.sh da los secretos"
 config() {   # archivo del volumen para INTERNAL_TOKEN_FILE: la configuración de la API lo lee
@@ -125,8 +164,9 @@ config() {   # archivo del volumen para INTERNAL_TOKEN_FILE: la configuración d
 }
 config internal_token || fail "0: node no lee un secreto 640 del grupo 1000"
 if config control 2>/dev/null; then fail "0: node leyó un 600 de otro usuario: el ensayo no ve los permisos"; fi
-docker run -d --name cocos-drill-pg -v "$VOL/postgres_password:/run/secrets/postgres_password:ro" \
-  -e POSTGRES_PASSWORD_FILE=/run/secrets/postgres_password postgres:18 >/dev/null
+PG_ID="$(docker create --name cocos-drill-pg -v "$VOL/postgres_password:/run/secrets/postgres_password:ro" \
+  -e POSTGRES_PASSWORD_FILE=/run/secrets/postgres_password postgres:18)" || { PG_ID=""; fail "0: no se pudo crear el contenedor cocos-drill-pg"; }
+docker start "$PG_ID" >/dev/null || fail "0: no arrancó el contenedor cocos-drill-pg"
 ip="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' cocos-drill-pg)"
 for ((i = 1; ; i++)); do
   docker exec cocos-drill-pg pg_isready -q -h "$ip" 2>/dev/null && break
@@ -139,7 +179,8 @@ docker exec cocos-drill-pg psql -qAt "postgresql://postgres:$p0@$ip/postgres" -c
 if docker exec cocos-drill-pg psql -qAt "postgresql://postgres:otra@$ip/postgres" -c 'SELECT 1' >/dev/null 2>&1; then
   fail "0: Postgres aceptó otra contraseña: el control no prueba nada"
 fi
-docker rm -f cocos-drill-pg >/dev/null
+docker rm -f -v "$PG_ID" >/dev/null || fail "0: no se pudo borrar el contenedor cocos-drill-pg"
+PG_ID=""
 echo "   node lee un 640 del grupo 1000 y no un 600 de otro usuario; Postgres arranca con su 600 y esa contraseña"
 
 echo "== servidor en $ROOT_DIR"
@@ -161,7 +202,9 @@ SECRET_VALUES=("$pg" "$api" "$token" "$admin_url" "$api_url")
   node_secrets=(database_admin_url api_db_password database_url internal_token)
   if chgrp 1000 "${node_secrets[@]}" 2>/dev/null; then chmod 640 "${node_secrets[@]}"; else chmod 644 "${node_secrets[@]}"; fi
 )
-docker network inspect cocos-edge >/dev/null 2>&1 || { docker network create cocos-edge >/dev/null; NETWORK_CREATED=1; }
+if ! docker network inspect cocos-edge >/dev/null 2>&1; then
+  EDGE_ID="$(docker network create cocos-edge)" || { EDGE_ID=""; fail "no se pudo crear la red cocos-edge"; }
+fi
 
 # /health de la API del entorno, desde la red del proxy (como la ve Caddy).
 health() { docker run --rm --network cocos-edge --entrypoint wget "$GOOD" -qO- http://api-staging:3000/health 2>/dev/null || true; }

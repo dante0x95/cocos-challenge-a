@@ -2152,70 +2152,259 @@ describe('smoke-docker.sh', () => {
 
 // deploy/lightsail/drill-docker.sh usa el proyecto fijo cocos-staging de remote.sh y al terminar
 // hace `down -v`: si en el Docker local ya hay algo de ese proyecto (un volumen sin contenedores,
-// como deja un `down` sin -v, también), no empieza ni crea nada, así que tampoco lo borra. Con un
-// `docker` simulado que anota cada llamada y responde los listados con EXISTING.
+// como deja un `down` sin -v, también), no empieza ni crea nada salvo su registro, que borra. El
+// registro es el candado: si ya hay uno, no sigue ni borra nada. Corre el ensayo entero (y
+// remote.sh de verdad) con un `docker` simulado que anota cada llamada, responde los listados y
+// lleva en $STATE lo que existe en el Docker, con su id: el registro, el Postgres del paso 0, la
+// red cocos-edge, el volumen de los secretos, las etiquetas de imagen y el proyecto. Al terminar,
+// la limpieza borra por id solo lo que creó la corrida, intenta cada paso aunque uno falle, exige
+// que `down -v` no deje nada del proyecto y, si algo queda, deja el registro y no sale con 0.
 describe('drill-docker.sh', () => {
   const dirs: string[] = [];
   afterEach(() => {
     for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
   });
-  const drill = (existing: Record<string, string>, fail = '') => {
+  const REG = 'localhost:5055/cocos-drill';
+  const DIGESTS = { good: `${REG}@sha256:${'1'.repeat(64)}`, boot: `${REG}@sha256:${'2'.repeat(64)}`, health: `${REG}@sha256:${'3'.repeat(64)}` };
+  const drill = (env: Record<string, string> = {}, prepare?: (state: string) => void) => {
     const f = fakeBin({
       docker: [
         'echo "docker $*" >> "$CALLS"',
-        '[ -n "$FAIL" ] && [[ "$*" == *"$FAIL"* ]] && exit 1',
+        '[ -n "${FAIL:-}" ] && [[ "$*" =~ $FAIL ]] && { echo "docker simulado: falla: $*" >&2; exit 1; }',
+        'envfile=""; a=("$@")',
+        'for ((i = 0; i < ${#a[@]}; i++)); do [ "${a[i]}" = --env-file ] && envfile="${a[i+1]}"; done',
+        'image() { sed -n "s/^IMAGE=//p" "$envfile"; }',
+        `GOOD='${DIGESTS.good}' BOOT='${DIGESTS.boot}' HEALTH='${DIGESTS.health}'`,
         'case "$*" in',
-        '  *"ps -aq --filter label=com.docker.compose.project=cocos-staging") printf "%s" "${PS_PROJECT:-}" ;;',
-        '  *"volume ls -q --filter label=com.docker.compose.project=cocos-staging") printf "%s" "${VOL_PROJECT:-}" ;;',
-        '  *"volume ls -q --filter name=cocos-staging_") printf "%s" "${VOL_NAME:-}" ;;',
-        '  *"ps -aq --filter name=cocos-drill-registry") printf "%s" "${PS_REGISTRY:-}" ;;',
-        '  *"ps -aq --filter name=cocos-drill-pg") printf "%s" "${PS_PG:-}" ;;',
-        '  *"volume ls -q --filter name=cocos-drill-secrets") printf "%s" "${VOL_SECRETS:-}" ;;',
+        // El nombre de un contenedor es único: si otro ya lo tiene, create falla.
+        '  "create --name cocos-drill-registry "* | "create --name cocos-drill-pg "*)',
+        '    s="${3#cocos-drill-}"; [ ! -e "$STATE/$s" ] || { echo "Conflict: name in use" >&2; exit 1; }',
+        '    echo "$s-1" > "$STATE/$s"; echo "$s-1" ;;',
+        // Borra por id o por nombre (lo que haga el script), sea de quien sea; un id que no existe falla.
+        '  "rm "*) shift; st=0',
+        '    for x in "$@"; do case "$x" in -*) continue ;; esac; hit=""',
+        '      for s in registry pg; do',
+        '        [ -e "$STATE/$s" ] && { [ "$x" = "$(cat "$STATE/$s")" ] || [ "$x" = "cocos-drill-$s" ]; } && { rm -f "$STATE/$s"; hit=1; }',
+        '      done; [ -n "$hit" ] || st=1',
+        '    done; exit $st ;;',
+        '  "ps -aq --filter label=com.docker.compose.project=cocos-staging") cat "$STATE/project" 2>/dev/null; printf "%s" "${PS_PROJECT:-}" ;;',
+        // VOL_LEFT: un volumen del proyecto que down -v no borró (antes de down no está).
+        '  "volume ls -q --filter label=com.docker.compose.project=cocos-staging")',
+        '    if [ -e "$STATE/downed" ]; then printf "%s" "${VOL_LEFT:-}"; else printf "%s" "${VOL_PROJECT:-}"; fi ;;',
+        '  "volume ls -q --filter name=cocos-staging_") printf "%s" "${VOL_NAME:-}" ;;',
+        '  "ps -aq --filter name=cocos-drill-pg") printf "%s" "${PS_PG:-}" ;;',
+        '  "volume ls -q --filter name=cocos-drill-secrets") printf "%s" "${VOL_SECRETS:-}" ;;',
+        // Cada etiqueta que se construyó; rmi de una que no está falla.
+        '  "build -q -t "*) touch "$STATE/tag.${4//[\\/:]/_}" ;;',
+        '  "rmi "*) shift; st=0; for t in "$@"; do f="$STATE/tag.${t//[\\/:]/_}"; if [ -e "$f" ]; then rm -f "$f"; else st=1; fi; done; exit $st ;;',
+        '  "image inspect --format "*) case "$5" in *:good) echo "$GOOD" ;; *:bad-boot) echo "$BOOT" ;; *:bad-health) echo "$HEALTH" ;; esac ;;',
+        '  "volume create "*) touch "$STATE/volume.$3"; echo "$3" ;;',
+        '  "volume inspect -f "*) echo "$STATE/mountpoint" ;;',
+        '  "volume rm "*) [ -e "$STATE/volume.$3" ] || exit 1; rm -f "$STATE/volume.$3" ;;',
+        // Paso 0: la imagen corre como 1000:1000, node no lee el 600 de control y Postgres rechaza otra contraseña.
+        '  "run --rm --entrypoint id "*) echo 1000 ;;',
+        '  *"/control:/run/secrets/internal_token:ro "*) exit 3 ;;',
+        '  "inspect -f "*"IPAddress"*) echo 172.17.0.9 ;;',
+        '  "exec cocos-drill-pg psql -qAt postgresql://postgres:otra@"*) exit 1 ;;',
+        // EDGE: una red cocos-edge que ya estaba (de otro), con ese id.
+        '  "network inspect cocos-edge") [ -e "$STATE/net" ] || exit 1 ;;',
+        '  "network create cocos-edge") [ ! -e "$STATE/net" ] || exit 1; echo net-1 > "$STATE/net"; echo net-1 ;;',
+        '  "network rm "*) [ -e "$STATE/net" ] && { [ "$3" = "$(cat "$STATE/net")" ] || [ "$3" = cocos-edge ]; } || exit 1; rm -f "$STATE/net" ;;',
+        `  *" --entrypoint wget "*) echo '{"ok":true,"release":"${'a'.repeat(40)}"}' ;;`,
+        // remote.sh: bad-boot falla en el bootstrap y bad-health no queda sana.
+        '  "compose "*" up "*" db") echo c-db > "$STATE/project" ;;',
+        '  "compose "*" run "*" migrate") [ "$(image)" != "$BOOT" ] || exit 1 ;;',
+        '  "compose "*" up "*" api") [ "$(image)" != "$HEALTH" ] || exit 1 ;;',
+        '  "compose "*" ps -aq "*) echo "c-${!#}" ;;',
+        '  "inspect -f "*"Mounts"*) case "${!#}" in',
+        '    c-db) printf "%s\\n" /var/lib/postgresql /run/secrets/postgres_password ;;',
+        '    c-migrate) printf "/run/secrets/%s\\n" database_admin_url api_db_password ;;',
+        '    c-api) printf "/run/secrets/%s\\n" database_url internal_token ;;',
+        '  esac ;;',
+        // DOWN_LEAVES: down -v termina bien pero deja contenedores del proyecto.
+        '  "compose "*" down -v") touch "$STATE/downed"; [ -n "${DOWN_LEAVES:-}" ] || rm -f "$STATE/project" ;;',
         'esac',
+        'exit 0',
       ].join('\n'),
+      // RM_FAIL: no se puede borrar el directorio temporal del ensayo (el resto de rm, de verdad).
+      rm: 'if [ -n "${RM_FAIL:-}" ] && [ "$1" = -rf ] && [[ "$2" == "$TMPDIR"/cocos-drill.* ]]; then echo "rm: simulado: falla" >&2; exit 1; fi\nexec /bin/rm "$@"',
     });
     dirs.push(f.dir);
-    const r = runScript('deploy/lightsail/drill-docker.sh', [], f.bin, { CALLS: f.log, FAIL: fail, TMPDIR: f.dir, ...existing });
-    return { ...r, calls: f.calls(), leftovers: readdirSync(f.dir).filter((e) => !['bin', 'calls'].includes(e)) };
+    const state = join(f.dir, 'state');
+    mkdirSync(state);
+    prepare?.(state);
+    const r = runScript('deploy/lightsail/drill-docker.sh', [], f.bin, { CALLS: f.log, TMPDIR: f.dir, STATE: state, ...env });
+    const calls = f.calls();
+    return { ...r, calls, state,
+      shared: readdirSync(state).filter((e) => !['downed', 'mountpoint'].includes(e)).sort(),
+      removed: calls.filter((c) => /^docker (rm|rmi|network rm|volume rm) |^docker compose .* down/.test(c)),
+      leftovers: readdirSync(f.dir).filter((e) => !['bin', 'state'].includes(e) && !e.startsWith('calls')) };
   };
+  const LOCK = 'docker create --name cocos-drill-registry -p 5055:5000 registry:2';
   const LISTS = [
     'docker ps -aq --filter label=com.docker.compose.project=cocos-staging',
     'docker volume ls -q --filter label=com.docker.compose.project=cocos-staging',
     'docker volume ls -q --filter name=cocos-staging_',
-    'docker ps -aq --filter name=cocos-drill-registry',
     'docker ps -aq --filter name=cocos-drill-pg',
     'docker volume ls -q --filter name=cocos-drill-secrets',
   ];
+  const IMAGES = ['good', 'bad-boot', 'bad-health'].map((t) => `docker rmi ${REG}:${t}`);
+  const LOCKED = 'queda el registro cocos-drill-registry como candado: limpiar a mano y después docker rm -f -v cocos-drill-registry';
 
   it.each([
     ['un volumen cocos-staging_pgdata sin contenedores', { VOL_NAME: 'cocos-staging_pgdata' }, 'volúmenes cocos-staging_*'],
     ['un volumen con la etiqueta del proyecto', { VOL_PROJECT: 'otro_nombre' }, 'volúmenes del proyecto cocos-staging'],
     ['contenedores del proyecto', { PS_PROJECT: 'abc123' }, 'contenedores del proyecto cocos-staging'],
-    ['el contenedor del registro', { PS_REGISTRY: 'def456' }, 'un contenedor cocos-drill-registry'],
     ['el Postgres del ensayo de permisos', { PS_PG: 'fed987' }, 'un contenedor cocos-drill-pg'],
-    ['el volumen del ensayo de permisos', { VOL_SECRETS: 'cocos-drill-secrets' }, 'un volumen cocos-drill-secrets'],
-  ])('con %s no empieza: solo lista, no crea ni borra nada', (_name, existing, what) => {
+    ['un volumen del ensayo de permisos', { VOL_SECRETS: 'cocos-drill-secrets-x1y2z3' }, 'un volumen cocos-drill-secrets'],
+  ])('con %s no empieza: solo toma el candado, lista y borra el registro que acaba de crear', (_name, existing, what) => {
     const r = drill(existing);
     expect(r.status).toBe(2);
     expect(r.stderr).toContain(`NO SE ENSAYA: ya hay ${what}`);
-    expect(r.calls.every((c) => LISTS.includes(c))).toBe(true);
+    expect(r.calls[0]).toBe(LOCK);
+    expect(r.calls.slice(1, -1).every((c) => LISTS.includes(c))).toBe(true);
+    expect(r.calls.at(-1)).toBe('docker rm -f -v registry-1');
+    expect(r.shared).toEqual([]);
     expect(r.leftovers).toEqual([]);
   });
 
   it('si no puede consultar Docker, no empieza', () => {
-    const r = drill({}, 'volume ls');
+    const r = drill({ FAIL: '^volume ls' });
     expect(r.status).toBe(2);
     expect(r.stderr).toContain('NO SE ENSAYA: no se pudo consultar Docker');
-    expect(r.calls.every((c) => LISTS.includes(c))).toBe(true);
+    expect(r.removed).toEqual(['docker rm -f -v registry-1']);
+    expect(r.shared).toEqual([]);
   });
 
-  it('sin nada del proyecto, pasa las comprobaciones y empieza por el registro', () => {
-    const r = drill({}, 'run -d --name cocos-drill-registry');
-    expect(r.calls.slice(0, LISTS.length)).toEqual(LISTS);
-    expect(r.calls[LISTS.length]).toMatch(/^docker run -d --name cocos-drill-registry /);
-    // Falla al crear el registro: la limpieza no toca volúmenes (no hubo compose).
-    expect(r.status).not.toBe(0);
-    expect(r.calls.some((c) => / down -v|volume rm/.test(c))).toBe(false);
+  // Un recurso ajeno con el mismo nombre: el registro de otro ensayo (o el que dejó uno anterior).
+  it('si ya hay un cocos-drill-registry, no sigue ni lo borra', () => {
+    const r = drill({}, (state) => writeFileSync(join(state, 'registry'), 'registry-otro\n'));
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain('NO SE ENSAYA: ya hay un contenedor cocos-drill-registry');
+    expect(r.calls).toEqual([LOCK]);
+    expect(readFileSync(join(r.state, 'registry'), 'utf8')).toBe('registry-otro\n');
+    expect(r.leftovers).toEqual([]);
+  });
+
+  // Otro recurso ajeno con el mismo nombre: un cocos-drill-pg que aparece después de las
+  // comprobaciones. create falla y la limpieza no lo borra (antes, `docker rm -f cocos-drill-pg`
+  // borraba el de otro).
+  it('si otro crea un cocos-drill-pg después de las comprobaciones, falla sin borrarlo', () => {
+    const r = drill({}, (state) => writeFileSync(join(state, 'pg'), 'pg-otro\n'));
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('ENSAYO FALLIDO: 0: no se pudo crear el contenedor cocos-drill-pg');
+    expect(readFileSync(join(r.state, 'pg'), 'utf8')).toBe('pg-otro\n');
+    expect(r.removed.filter((c) => c.includes('pg'))).toEqual([]);
+    expect(r.removed.some((c) => /cocos-drill-(registry|pg)/.test(c))).toBe(false);
+    expect(r.shared).toEqual(['pg']);   // lo suyo (volumen, etiquetas, registro) sí lo borró
+    expect(r.leftovers).toEqual([]);
+  });
+
+  it('el ensayo entero: rechaza bad-boot y bad-health, atiende good y borra por id solo lo que creó', () => {
+    const r = drill();
+    expect(r.stderr).not.toContain('FALLIDO');
+    expect(r.stdout).toContain('ENSAYO OK');
+    expect(r.status).toBe(0);
+    expect(r.removed).toEqual([
+      'docker rm -f -v pg-1',   // al terminar el paso 0
+      expect.stringMatching(/^docker compose -p cocos-staging .* down -v$/),
+      expect.stringMatching(/^docker volume rm cocos-drill-secrets-\w+$/),
+      'docker network rm net-1',
+      ...IMAGES,
+      'docker rm -f -v registry-1',
+    ]);
+    expect(r.shared).toEqual([]);
+    expect(r.leftovers).toEqual([]);
+  });
+
+  it('una red cocos-edge que ya estaba no la crea ni la borra', () => {
+    const r = drill({}, (state) => writeFileSync(join(state, 'net'), 'net-otra\n'));
+    expect(r.status).toBe(0);
+    expect(r.calls.some((c) => /^docker network (create|rm) /.test(c))).toBe(false);
+    expect(r.shared).toEqual(['net']);
+  });
+
+  it('si el ensayo falla a la mitad, limpia lo mismo y sale con 1', () => {
+    const r = drill({ FAIL: 'up -d --wait --wait-timeout [0-9]+ --no-deps api$' });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('ENSAYO FALLIDO: 1: el switch de good falló');
+    expect(r.removed).toContainEqual(expect.stringMatching(/ down -v$/));
+    expect(r.removed.at(-1)).toBe('docker rm -f -v registry-1');
+    expect(r.shared).toEqual([]);
+    expect(r.leftovers).toEqual([]);
+  });
+
+  // Un borrado que falla: los demás se intentan igual, el registro queda como candado y sale con 1.
+  it('si no puede borrar la red, borra el resto, deja el registro como candado y sale con 1', () => {
+    const r = drill({ FAIL: '^network rm ' });
+    expect(r.stdout).toContain('ENSAYO OK');   // el ensayo pasó; la limpieza no
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain(`ENSAYO: no se pudo borrar la red cocos-edge (net-1); ${LOCKED}`);
+    expect(r.removed).toEqual(expect.arrayContaining(IMAGES));
+    expect(r.removed).not.toContain('docker rm -f -v registry-1');
+    expect(r.shared).toEqual(['net', 'registry']);
+  });
+
+  it('si no puede borrar una etiqueta de imagen, borra las otras y sale con 1', () => {
+    const r = drill({ FAIL: '^rmi .*:bad-boot$' });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain(`no se pudo borrar la imagen ${REG}:bad-boot; ${LOCKED}`);
+    expect(r.removed).toEqual(expect.arrayContaining(IMAGES));
+    expect(r.shared).toEqual(['registry', 'tag.localhost_5055_cocos-drill_bad-boot']);
+  });
+
+  it('si no puede borrar el volumen de los secretos, sale con 1 y lo nombra', () => {
+    const r = drill({ FAIL: '^volume rm ' });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toMatch(new RegExp(`no se pudo borrar el volumen cocos-drill-secrets-\\w+; ${LOCKED}`));
+    expect(r.shared).toEqual(['registry', expect.stringMatching(/^volume\.cocos-drill-secrets-/)]);
+  });
+
+  // CR-9 de #52 en el ensayo: un volumen sobrante sin contenedores. down -v termina bien y
+  // `docker ps` no devuelve contenedores, pero `docker volume ls` por la etiqueta del proyecto sí.
+  it('si después de down -v queda un volumen del proyecto sin contenedores, deja el candado y sale con 1', () => {
+    const r = drill({ VOL_LEFT: 'cocos-staging_pgdata' });
+    expect(r.stdout).toContain('ENSAYO OK');
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain(`no se pudo borrar contenedores o volúmenes del proyecto cocos-staging; ${LOCKED}`);
+    const lists = r.calls.filter((c) => c === LISTS[1]);
+    expect(lists).toHaveLength(2);   // al empezar (vacío) y después de down -v (el sobrante)
+    expect(r.shared).toEqual(['registry']);
+  });
+
+  it('si down -v deja contenedores del proyecto, también', () => {
+    const r = drill({ DOWN_LEAVES: '1' });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain(`no se pudo borrar contenedores o volúmenes del proyecto cocos-staging; ${LOCKED}`);
+    expect(r.shared).toEqual(['project', 'registry']);
+  });
+
+  it('si down -v falla, también', () => {
+    const r = drill({ FAIL: ' down -v$' });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain(`no se pudo borrar el proyecto cocos-staging (down -v falló); ${LOCKED}`);
+    expect(r.shared).toEqual(['project', 'registry']);
+  });
+
+  it('si no puede borrar el registro, sale con 1 y dice cómo borrarlo; con un rechazo antes, conserva su código', () => {
+    const only = drill({ FAIL: '^rm -f -v registry-1$' });
+    expect(only.stdout).toContain('ENSAYO OK');
+    expect(only.status).toBe(1);
+    expect(only.stderr).toContain('ENSAYO: no se pudo borrar el registro cocos-drill-registry (registry-1), que sigue siendo el candado: borrarlo a mano con docker rm -f -v cocos-drill-registry');
+    expect(only.shared).toEqual(['registry']);
+    const afterRefusal = drill({ FAIL: '^rm -f -v registry-1$', PS_PG: 'fed987' });
+    expect(afterRefusal.status).toBe(2);
+    expect(afterRefusal.stderr).toContain('no se pudo borrar el registro cocos-drill-registry');
+  });
+
+  it('si no puede borrar su directorio temporal (con los secretos de prueba), sale con 1 y lo nombra', () => {
+    const r = drill({ RM_FAIL: '1' });
+    expect(r.status).toBe(1);
+    const left = /no se pudo borrar (\S+\/cocos-drill\.\S+) \(tiene secretos de prueba\): borrarlo a mano/.exec(r.stderr)?.[1];
+    expect(left).toBeDefined();
+    expect(existsSync(left!)).toBe(true);
+    rmSync(left!, { recursive: true, force: true });
+    expect(r.shared).toEqual([]);   // lo de Docker sí se borró
   });
 });
 

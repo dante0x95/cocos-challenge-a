@@ -10,7 +10,7 @@ Nada.
 
 ### Documentación
 
-- **Los comandos del servidor funcionan en zsh** ([#55](https://github.com/dante0x95/cocos-challenge-a/pull/55)): `docs/api/operacion.md` usa `${HOST}` en los `scp` (en zsh, `$HOST:c` se come los dos puntos y `scp` copia en local) y la clave de Lightsail como marcador. v0.2.0 queda con su fecha.
+- **Los comandos del servidor funcionan en zsh** ([#55](https://github.com/dante0x95/cocos-challenge-a/pull/55)): `docs/api/operacion.md` y el README llaman `LIGHTSAIL_HOST` a la IP del servidor y la escriben `${LIGHTSAIL_HOST}`: en zsh, `HOST` ya existe (el nombre de la Mac), así que si no se definía los comandos apuntaban en silencio a la propia máquina, y `$HOST:c` se comía los dos puntos del `scp`, que copiaba en local. La clave de Lightsail queda como marcador. v0.2.0 queda con su fecha.
 
 ## v0.2.0 — 2026-10-31
 

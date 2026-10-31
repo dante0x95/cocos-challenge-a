@@ -82,7 +82,7 @@ for env in staging production; do gh secret list --env "$env"; done             
 
 ```bash
 git switch main && git pull
-HOST=18.227.203.30
+LIGHTSAIL_HOST=18.227.203.30
 LIGHTSAIL_KEY=~/.ssh/TU-CLAVE-DE-LIGHTSAIL.pem   # la clave por defecto que se descarga de la consola de Lightsail, con el nombre con que se guardó
 ```
 
@@ -97,10 +97,10 @@ ssh-keygen -t ed25519 -N '' -C cocos-deploy -f ~/.ssh/cocos-deploy
 2. Preparar el servidor con [`deploy/lightsail/setup.sh`](../../deploy/lightsail/setup.sh): el usuario `deploy` con esa clave, los secretos de cada entorno (generados en el servidor, sin imprimirse, un archivo cada uno en `/opt/cocos/<entorno>/secrets`) y Caddy. Es idempotente: volver a correrlo no cambia los secretos, actualiza el proxy y, con otra clave, la reemplaza.
 
 ```bash
-ssh -i "$LIGHTSAIL_KEY" "ubuntu@$HOST" rm -rf cocos-setup
-scp -i "$LIGHTSAIL_KEY" -r deploy/lightsail "ubuntu@${HOST}:cocos-setup"
-ssh -i "$LIGHTSAIL_KEY" "ubuntu@$HOST" "sudo bash cocos-setup/setup.sh '$(cat ~/.ssh/cocos-deploy.pub)'"
-ssh -i ~/.ssh/cocos-deploy -o IdentitiesOnly=yes "deploy@$HOST" docker ps
+ssh -i "$LIGHTSAIL_KEY" "ubuntu@${LIGHTSAIL_HOST}" rm -rf cocos-setup
+scp -i "$LIGHTSAIL_KEY" -r deploy/lightsail "ubuntu@${LIGHTSAIL_HOST}:cocos-setup"
+ssh -i "$LIGHTSAIL_KEY" "ubuntu@${LIGHTSAIL_HOST}" "sudo bash cocos-setup/setup.sh '$(cat ~/.ssh/cocos-deploy.pub)'"
+ssh -i ~/.ssh/cocos-deploy -o IdentitiesOnly=yes "deploy@${LIGHTSAIL_HOST}" docker ps
 ```
 
 El primero borra una copia anterior (con una copia ya en el servidor, `scp -r` copiaría adentro de ella). El último prueba la clave de deploy: tiene que listar el contenedor de Caddy.
@@ -108,14 +108,14 @@ El primero borra una copia anterior (con una copia ya en el servidor, `scp -r` c
 3. La clave del host, leída por la conexión que ya es de confianza (la de la clave por defecto), para fijarla en Actions:
 
 ```bash
-KNOWN="$HOST $(ssh -i "$LIGHTSAIL_KEY" "ubuntu@$HOST" cat /etc/ssh/ssh_host_ed25519_key.pub | cut -d' ' -f1,2)"
+KNOWN="${LIGHTSAIL_HOST} $(ssh -i "$LIGHTSAIL_KEY" "ubuntu@${LIGHTSAIL_HOST}" cat /etc/ssh/ssh_host_ed25519_key.pub | cut -d' ' -f1,2)"
 ```
 
 4. Los secretos de los environments `staging` y `production` (los mismos en los dos: es un solo servidor):
 
 ```bash
 for env in staging production; do
-  gh secret set LIGHTSAIL_HOST --env "$env" --body "$HOST"
+  gh secret set LIGHTSAIL_HOST --env "$env" --body "${LIGHTSAIL_HOST}"
   gh secret set LIGHTSAIL_SSH_KEY --env "$env" < ~/.ssh/cocos-deploy
   gh secret set LIGHTSAIL_KNOWN_HOSTS --env "$env" --body "$KNOWN"
 done
@@ -148,10 +148,10 @@ Un servidor preparado antes de #36 tiene los secretos en `db.env`, `migrate.env`
 1. Volver a correr `setup.sh` desde `main`, con la misma clave de deploy (los mismos comandos del paso 2 de arriba). Migra los `.env` de cada entorno a los archivos, con los mismos valores; no genera nada ni toca los `.env`. Tiene que decir, para los dos entornos, `secretos migrados de db.env, migrate.env y api.env, con los mismos valores`; si frena (un `.env` sin una variable, con una repetida o vacía), no escribió nada: corregir ese `.env` a mano y volver a correrlo.
 
 ```bash
-ssh -i "$LIGHTSAIL_KEY" "ubuntu@$HOST" rm -rf cocos-setup
-scp -i "$LIGHTSAIL_KEY" -r deploy/lightsail "ubuntu@${HOST}:cocos-setup"
-ssh -i "$LIGHTSAIL_KEY" "ubuntu@$HOST" "sudo bash cocos-setup/setup.sh '$(cat ~/.ssh/cocos-deploy.pub)'"
-ssh -i ~/.ssh/cocos-deploy -o IdentitiesOnly=yes "deploy@$HOST" 'ls -ln /opt/cocos/staging/secrets /opt/cocos/production/secrets'
+ssh -i "$LIGHTSAIL_KEY" "ubuntu@${LIGHTSAIL_HOST}" rm -rf cocos-setup
+scp -i "$LIGHTSAIL_KEY" -r deploy/lightsail "ubuntu@${LIGHTSAIL_HOST}:cocos-setup"
+ssh -i "$LIGHTSAIL_KEY" "ubuntu@${LIGHTSAIL_HOST}" "sudo bash cocos-setup/setup.sh '$(cat ~/.ssh/cocos-deploy.pub)'"
+ssh -i ~/.ssh/cocos-deploy -o IdentitiesOnly=yes "deploy@${LIGHTSAIL_HOST}" 'ls -ln /opt/cocos/staging/secrets /opt/cocos/production/secrets'
 ```
 
 El último tiene que listar los cinco archivos de cada entorno: `postgres_password` con `-rw-------` y los demás con `-rw-r-----` y el grupo `1000`.
@@ -161,7 +161,7 @@ El último tiene que listar los cinco archivos de cada entorno: `postgres_passwo
 3. Verificar que `docker inspect` no muestra ningún secreto (tiene que imprimir `0`):
 
 ```bash
-ssh -i ~/.ssh/cocos-deploy "deploy@$HOST" "docker inspect cocos-production-api-1 cocos-production-db-1 cocos-staging-api-1 cocos-staging-db-1 | grep -cE '(POSTGRES_PASSWORD|DATABASE_URL|DATABASE_ADMIN_URL|API_DB_PASSWORD|INTERNAL_TOKEN)='"
+ssh -i ~/.ssh/cocos-deploy "deploy@${LIGHTSAIL_HOST}" "docker inspect cocos-production-api-1 cocos-production-db-1 cocos-staging-api-1 cocos-staging-db-1 | grep -cE '(POSTGRES_PASSWORD|DATABASE_URL|DATABASE_ADMIN_URL|API_DB_PASSWORD|INTERNAL_TOKEN)='"
 ```
 
 4. Los `.env` quedan para la vuelta atrás a un release anterior a #36, cuyo `compose.yml` todavía los usa con `env_file`. Se borran cuando ningún `compose*.yml` del entorno los usa (después del segundo release con #36, cuando `compose.previous.yml` también es de esta versión): si `grep -l env_file /opt/cocos/<entorno>/compose*.yml` no imprime nada, `rm /opt/cocos/<entorno>/{db,migrate,api}.env`. `setup.sh` no los vuelve a leer.

@@ -59,7 +59,7 @@ La primera vez, antes del primer release: una clave de deploy dedicada, [`deploy
 
 ```bash
 for env in staging production; do
-  gh secret set LIGHTSAIL_HOST --env "$env" --body "$HOST"
+  gh secret set LIGHTSAIL_HOST --env "$env" --body "${LIGHTSAIL_HOST}"
   gh secret set LIGHTSAIL_SSH_KEY --env "$env" < ~/.ssh/cocos-deploy
   gh secret set LIGHTSAIL_KNOWN_HOSTS --env "$env" --body "$KNOWN"
 done

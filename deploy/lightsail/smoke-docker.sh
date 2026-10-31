@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # El smoke funcional (deploy/smoke.mjs, D-29, issue #51) contra una imagen levantada como en el
 # deploy: Docker Compose con deploy/lightsail/compose.yml, Postgres 18 y el bootstrap, por los
-# mismos pasos de deploy/lightsail/remote.sh (bootstrap, smoke-user, switch) sobre un /opt/cocos
-# temporal. Lo corre el CI (.github/workflows/ci.yml) con la imagen recién construida; también se
-# puede correr a mano, con Docker y su plugin compose, desde la raíz del repo:
+# mismos pasos de deploy/lightsail/remote.sh (bootstrap, smoke-user, switch, confirm) sobre un
+# /opt/cocos temporal. Lo corre el CI (.github/workflows/ci.yml) con la imagen recién construida;
+# también se puede correr a mano, con Docker y su plugin compose, desde la raíz del repo:
 #
 #   deploy/lightsail/smoke-docker.sh <imagen local>        (por ejemplo cocos:ci)
 #
@@ -174,12 +174,14 @@ nets="$(docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{printl
 
 echo "== 2. smoke write, dos veces con el mismo usuario ($USERID)"
 smoke write "$USERID" || fail "2: la primera corrida de write falló"
+remote confirm staging "$REF" "$SHA" || fail "2: confirm falló"
 # Otro deploy del mismo release: bootstrap otra vez (smoke-user lo exige) y el usuario sigue siendo el mismo.
 remote bootstrap staging "$REF" "$SHA" < "$ROOT_DIR/compose.yml" || fail "2: el segundo bootstrap falló"
 again="$(smoke_user 2)"
 [ "$again" = "$USERID" ] || fail "2: después de una corrida completa, smoke-user dio otro usuario ($again y no $USERID)"
 remote switch staging "$REF" "$SHA" || fail "2: el segundo switch falló"
 smoke write "$USERID" || fail "2: la segunda corrida de write falló: el flujo no es repetible"
+remote confirm staging "$REF" "$SHA" || fail "2: el segundo confirm falló"
 
 echo "== 3. smoke read"
 smoke read || fail "3: read falló"

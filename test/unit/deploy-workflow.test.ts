@@ -146,6 +146,7 @@ const RUN = {
   after: 'deploy/release-check.sh after',
   smokeWrite: 'deploy/smoke.mjs write',
   smokeRead: 'deploy/smoke.mjs read',
+  confirm: 'deploy/lightsail/deploy.sh confirm',
   rollback: 'deploy/lightsail/deploy.sh rollback',
 };
 /**
@@ -154,8 +155,8 @@ const RUN = {
  * producción corre el smoke de solo lectura.
  */
 const FLOWS: Record<string, string[]> = {
-  staging: [RUN.access, RUN.current, RUN.before, RUN.pull, RUN.bootstrap, RUN.smokeUser, RUN.switch, RUN.after, RUN.smokeWrite, RUN.rollback],
-  production: [RUN.access, RUN.current, RUN.before, RUN.pull, RUN.bootstrap, RUN.switch, RUN.after, RUN.smokeRead, RUN.rollback],
+  staging: [RUN.access, RUN.current, RUN.before, RUN.pull, RUN.bootstrap, RUN.smokeUser, RUN.switch, RUN.after, RUN.smokeWrite, RUN.confirm, RUN.rollback],
+  production: [RUN.access, RUN.current, RUN.before, RUN.pull, RUN.bootstrap, RUN.switch, RUN.after, RUN.smokeRead, RUN.confirm, RUN.rollback],
 };
 
 describe('workflow de deploy', () => {
@@ -285,7 +286,7 @@ describe('workflow de deploy', () => {
     const gate = envOf(step(block, 'El commit desciende del release actual'), 8);
     expect(gate).toEqual({ CURRENT: '${{ steps.serving.outputs.release }}', FIRST_DEPLOY: '${{ steps.serving.outputs.first }}' });
     const back = step(block, 'Volver a la versión anterior');
-    expect(keyIn(back, 'if')).toBe("failure() && steps.deploy.outcome != 'skipped'");
+    expect(keyIn(back, 'if')).toBe("failure() && (steps.deploy.outcome != 'skipped' || steps.serving.outputs.pending)");
     expect(envOf(back, 8)).toEqual({
       PREVIOUS_IMAGE: '${{ steps.serving.outputs.image }}',
       PREVIOUS_RELEASE: '${{ steps.serving.outputs.release }}',
@@ -957,6 +958,8 @@ describe('release-gate.sh', () => {
 // /health de esa API: ok con su RELEASE (o con SERVED, si está: otro release atendiendo), salvo
 // que esté en BROKEN (503, ok: false), y falla sin API.
 // DOCKER_FAIL (una regex sobre la llamada, con IMAGE y RELEASE) hace fallar las que coinciden.
+// CP_FAIL (una regex sobre el destino) hace que `cp` deje ese destino vacío y falle, como una
+// copia cortada o sin espacio en el disco.
 const GIT = { GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_AUTHOR_NAME: 'prueba',
   GIT_AUTHOR_EMAIL: 'prueba@example.com', GIT_COMMITTER_NAME: 'prueba', GIT_COMMITTER_EMAIL: 'prueba@example.com' };
 const TOKEN = 'ghs_tokenDelJobQueNoTieneQueQuedar0123456789';
@@ -1013,6 +1016,10 @@ function server() {
       'else printf \'{"ok":true,"db":"up","release":"%s","users":"4"}\' "$release"; fi',
     ].join('\n'),
     sleep: ':',
+    cp: [
+      'if [ -n "${CP_FAIL:-}" ] && [[ "${*: -1}" =~ $CP_FAIL ]]; then : > "${*: -1}"; echo "cp simulado: sin espacio" >&2; exit 1; fi',
+      'exec /bin/cp "$@"',
+    ].join('\n'),
     // deploy/smoke.mjs corre con `node` (su shebang): este lo anota con URL, SHA y SMOKE_USERID y
     // pasa si la API de ese entorno atiende, salvo que su release esté en SMOKE_BROKEN.
     node: [
@@ -1267,6 +1274,156 @@ describe.each(['staging', 'production'])('el job %s contra el servidor simulado'
     expect(execJob(s, name, s.shas[1], I1).status).toBe('success');
   });
 
+  // Issue #56: un job cortado entre el cambio y la vuelta atrás (cancelación, runner perdido,
+  // timeout) deja la API nueva atendiendo sin confirmar. El re-run no la toma como sana.
+  describe('un cambio cortado antes de confirmar', () => {
+    /**
+     * El compose.yml del checkout, distinto para cada release (un comentario con su nombre): así
+     * se ve cuál quedó en el servidor como el que atiende y cuál como el anterior.
+     */
+    const composeOf = (s: Server, label: string) => {
+      const text = `${read('deploy/lightsail/compose.yml')}# compose de ${label}\n`;
+      writeFileSync(join(s.repo, 'deploy/lightsail/compose.yml'), text);
+      return text;
+    };
+    /** bootstrap y switch de `sha` y nada más: el job se cortó ahí. Devuelve el switch. */
+    const switchOnly = (s: Server, sha: string, image: string, compose: string, extra: Record<string, string> = {}) => {
+      const env = { ENVIRONMENT: name, URL: URLS[name], IMAGE_REF: image, SHA: sha };
+      expect(s.run('deploy/lightsail/deploy.sh bootstrap', env, compose).status).toBe(0);
+      return s.run('deploy/lightsail/deploy.sh switch', { ...env, ...extra });
+    };
+    const interrupted = (s: Server, sha: string, image: string, compose = read('deploy/lightsail/compose.yml')) => {
+      expect(switchOnly(s, sha, image, compose).status).toBe(0);
+      expect(s.running(name)).toBe(`${image} ${sha}`);
+    };
+    const current = (s: Server) => {
+      const out = join(s.dir, 'out');
+      writeFileSync(out, '');
+      expect(s.run('deploy/lightsail/deploy.sh current', { ENVIRONMENT: name, GITHUB_OUTPUT: out }).status).toBe(0);
+      return readFileSync(out, 'utf8');
+    };
+    const migrate = (s: Server) => s.calls().filter((c) => / run --rm .* migrate /.test(c))
+      .map((c) => /-e RELEASE=(\S*) -e SERVING_RELEASE=(\S*) migrate /.exec(c)!.slice(1));
+
+    it('el re-run que vuelve a fallar vuelve al último release sano, no al que quedó a medio cambiar', () => {
+      const s = fresh();
+      const composeA = composeOf(s, 'A');
+      expect(execJob(s, name, s.shas[0], I0).status).toBe('success');
+      const composeB = composeOf(s, 'B');
+      interrupted(s, s.shas[1], I1, composeB);
+      expect(s.state(name)).toBe(releaseEnv(I1, s.shas[1], name));
+      expect(s.state(name, 'compose.previous.yml')).toBe(composeA);
+      // current anuncia A como lo que atiende (lo que guarda el gate y la vuelta atrás) y B como
+      // pendiente.
+      expect(current(s)).toBe(`release=${s.shas[0]}\nimage=${I0}\nfirst=false\npending=${s.shas[1]}\n`);
+
+      s.clearCalls();
+      const r = execJob(s, name, s.shas[1], I1, { BROKEN: s.shas[1] });
+      expect(r).toEqual({ ran: [...upTo(RUN.after), RUN.rollback], status: 'failure' });
+      // El bootstrap del re-run verifica el contrato de A, el release al que vuelve.
+      expect(migrate(s)).toEqual([[s.shas[1], s.shas[0]]]);
+      expect(s.running(name)).toBe(`${I0} ${s.shas[0]}`);
+      expect(s.state(name)).toBe(releaseEnv(I0, s.shas[0], name));
+      // Con la configuración de A, no la de B: el switch del re-run no pisó su respaldo.
+      expect(s.state(name, 'compose.yml')).toBe(composeA);
+      expect(s.state(name, 'switch.pending')).toBeNull();
+      expect(current(s)).toBe(`release=${s.shas[0]}\nimage=${I0}\nfirst=false\npending=\n`);
+    });
+
+    it('el re-run que termina bien confirma: el deploy siguiente guarda ese release como anterior', () => {
+      const s = fresh();
+      const composeA = composeOf(s, 'A');
+      execJob(s, name, s.shas[0], I0);
+      const composeB = composeOf(s, 'B');
+      interrupted(s, s.shas[1], I1, composeB);
+      // El switch del re-run no pisa el respaldo de A con el B sin confirmar.
+      expect(execJob(s, name, s.shas[1], I1)).toEqual({ ran: DEPLOY_FLOW.slice(0, -1), status: 'success' });
+      expect(s.state(name, 'switch.pending')).toBeNull();
+      expect(s.state(name, 'release.previous.env')).toBe(releaseEnv(I0, s.shas[0], name));
+      expect(s.state(name, 'compose.previous.yml')).toBe(composeA);
+      expect(current(s)).toBe(`release=${s.shas[1]}\nimage=${I1}\nfirst=false\npending=\n`);
+
+      composeOf(s, 'C');
+      expect(execJob(s, name, s.shas[2], I2).status).toBe('success');
+      expect(s.state(name, 'release.previous.env')).toBe(releaseEnv(I1, s.shas[1], name));
+      expect(s.state(name, 'compose.previous.yml')).toBe(composeB);
+    });
+
+    it('si la vuelta atrás no logra levantar A, la marca sigue: el re-run siguiente vuelve a intentarlo', () => {
+      const s = fresh();
+      execJob(s, name, s.shas[0], I0);
+      interrupted(s, s.shas[1], I1);
+      // El re-run falla en /health y la vuelta atrás copia A pero su API no levanta.
+      const r = execJob(s, name, s.shas[1], I1, { BROKEN: s.shas[1], DOCKER_FAIL: `--no-deps api \\[IMAGE=${ere(I0)}` });
+      expect(r).toEqual({ ran: [...upTo(RUN.after), RUN.rollback], status: 'failure' });
+      expect(s.running(name)).toBe(`${I1} ${s.shas[1]}`);
+      expect(s.state(name, 'switch.pending')).toBe(releaseEnv(I1, s.shas[1], name));
+      expect(current(s)).toBe(`release=${s.shas[0]}\nimage=${I0}\nfirst=false\npending=${s.shas[1]}\n`);
+      // Otro re-run que falla antes de cambiar todavía sabe que lo que atiende no es sano.
+      const again = execJob(s, name, s.shas[1], I1, { DOCKER_FAIL: 'run --rm' });
+      expect(again).toEqual({ ran: [...upTo(RUN.bootstrap), RUN.rollback], status: 'failure' });
+      expect(s.running(name)).toBe(`${I0} ${s.shas[0]}`);
+      expect(s.state(name, 'switch.pending')).toBeNull();
+    });
+
+    // La marca se escribe entera o no se escribe: una copia cortada no deja una marca a medias que
+    // frene el current del re-run.
+    it.each([
+      ['sin un cambio pendiente', false],
+      ['con B ya pendiente', true],
+    ])('si la marca no se puede escribir %s, el switch falla y current y el re-run siguen andando', (_label, pendingBefore) => {
+      const s = fresh();
+      execJob(s, name, s.shas[0], I0);
+      if (pendingBefore) interrupted(s, s.shas[1], I1);
+      const before = s.state(name, 'switch.pending');
+      const r = switchOnly(s, s.shas[1], I1, read('deploy/lightsail/compose.yml'), { CP_FAIL: 'switch\\.pending' });
+      expect(r.status).toBe(1);
+      expect(r.stderr).toContain('cp simulado');
+      expect(s.state(name, 'switch.pending')).toBe(before);
+      expect(current(s)).toBe(`release=${s.shas[0]}\nimage=${I0}\nfirst=false\npending=${pendingBefore ? s.shas[1] : ''}\n`);
+      const rerun = execJob(s, name, s.shas[1], I1, { BROKEN: s.shas[1] });
+      expect(rerun).toEqual({ ran: [...upTo(RUN.after), RUN.rollback], status: 'failure' });
+      expect(s.running(name)).toBe(`${I0} ${s.shas[0]}`);
+      expect(s.state(name, 'switch.pending')).toBeNull();
+    });
+
+    it('si el re-run falla antes de cambiar, también vuelve al último release sano', () => {
+      const s = fresh();
+      execJob(s, name, s.shas[0], I0);
+      interrupted(s, s.shas[1], I1);
+      s.clearCalls();
+      const r = execJob(s, name, s.shas[1], I1, { DOCKER_FAIL: 'run --rm' });
+      expect(r).toEqual({ ran: [...upTo(RUN.bootstrap), RUN.rollback], status: 'failure' });
+      expect(s.running(name)).toBe(`${I0} ${s.shas[0]}`);
+      expect(s.state(name)).toBe(releaseEnv(I0, s.shas[0], name));
+      expect(s.state(name, 'switch.pending')).toBeNull();
+    });
+
+    it('un re-run de un release anterior al pendiente pasa el gate contra el último sano', () => {
+      const s = fresh();
+      execJob(s, name, s.shas[0], I0);
+      interrupted(s, s.shas[2], I2);
+      // C nunca quedó sano: B desciende de A, el último confirmado, y se despliega.
+      expect(execJob(s, name, s.shas[1], I1).status).toBe('success');
+      expect(s.running(name)).toBe(`${I1} ${s.shas[1]}`);
+      expect(s.state(name, 'release.previous.env')).toBe(releaseEnv(I0, s.shas[0], name));
+    });
+
+    it('si el primer deploy se cortó, el re-run sigue siendo el primero: si falla, saca la API', () => {
+      const s = fresh();
+      expect(s.run('deploy/lightsail/deploy.sh access', { ENVIRONMENT: name, ...s.secrets }).status).toBe(0);
+      interrupted(s, s.shas[0], I0);
+      expect(current(s)).toBe(`release=\nimage=\nfirst=true\npending=${s.shas[0]}\n`);
+      s.clearCalls();
+      const r = execJob(s, name, s.shas[0], I0, { BROKEN: s.shas[0] });
+      expect(r).toEqual({ ran: [...upTo(RUN.after), RUN.rollback], status: 'failure' });
+      expect(migrate(s)).toEqual([[s.shas[0], '']]);
+      expect(s.running(name)).toBeNull();
+      expect(s.state(name)).toBeNull();
+      expect(s.state(name, 'switch.pending')).toBeNull();
+    });
+  });
+
   it('si el primer deploy falla, saca la API y el entorno queda sin release: el siguiente vuelve a ser el primero', () => {
     const s = fresh();
     const r = execJob(s, name, s.shas[1], I1, { BROKEN: s.shas[1] });
@@ -1353,7 +1510,7 @@ describe('el smoke funcional en el deploy', () => {
     execJob(s, 'staging', s.shas[0], I0);
     s.clearCalls();
     const r = execJob(s, 'staging', s.shas[1], I1, { SMOKE_BROKEN: s.shas[1] });
-    expect(r).toEqual({ ran: FLOWS.staging, status: 'failure' });
+    expect(r).toEqual({ ran: FLOWS.staging.filter((r) => r !== RUN.confirm), status: 'failure' });
     expect(s.running('staging')).toBe(`${I0} ${s.shas[0]}`);
     expect(s.state('staging')).toBe(releaseEnv(I0, s.shas[0], 'staging'));
     // El smoke corrió contra el release nuevo, ya atendiendo; la vuelta atrás, después.
@@ -1367,7 +1524,7 @@ describe('el smoke funcional en el deploy', () => {
   it('staging: si el primer deploy falla en el smoke, la API sale y el entorno queda sin release', () => {
     const s = fresh();
     const r = execJob(s, 'staging', s.shas[0], I0, { SMOKE_BROKEN: s.shas[0] });
-    expect(r).toEqual({ ran: FLOWS.staging, status: 'failure' });
+    expect(r).toEqual({ ran: FLOWS.staging.filter((r) => r !== RUN.confirm), status: 'failure' });
     expect(s.running('staging')).toBeNull();
     expect(s.state('staging')).toBeNull();
   });
@@ -1398,7 +1555,7 @@ describe('el smoke funcional en el deploy', () => {
     const s = fresh();
     execJob(s, 'production', s.shas[0], I0);
     const r = execJob(s, 'production', s.shas[1], I1, { SMOKE_BROKEN: s.shas[1] });
-    expect(r).toEqual({ ran: FLOWS.production, status: 'failure' });
+    expect(r).toEqual({ ran: FLOWS.production.filter((r) => r !== RUN.confirm), status: 'failure' });
     expect(s.running('production')).toBe(`${I0} ${s.shas[0]}`);
   });
 });
@@ -1445,9 +1602,9 @@ describe('deploy.sh y remote.sh', () => {
       const r = s.run('deploy/lightsail/deploy.sh current', { ENVIRONMENT: env, GITHUB_OUTPUT: out });
       return { ...r, output: readFileSync(out, 'utf8') };
     };
-    expect(current('staging').output).toBe('release=\nimage=\nfirst=true\n');
+    expect(current('staging').output).toBe('release=\nimage=\nfirst=true\npending=\n');
     writeFileSync(join(s.root, 'staging', 'release.env'), releaseEnv(I0, s.shas[0], 'staging'));
-    expect(current('staging').output).toBe(`release=${s.shas[0]}\nimage=${I0}\nfirst=false\n`);
+    expect(current('staging').output).toBe(`release=${s.shas[0]}\nimage=${I0}\nfirst=false\npending=\n`);
     rmSync(join(s.root, 'production', 'secrets', 'internal_token'));
     const r = current('production');
     expect(r.status).toBe(1);
@@ -1560,6 +1717,55 @@ describe('deploy.sh y remote.sh', () => {
     expect(r.status).toBe(1);
     expect(r.stderr).toContain('no se sabe a qué volver');
     expect(s.calls()).toEqual([]);
+  });
+
+  // Issue #56: confirm solo confirma lo que atiende, y una vuelta atrás con un cambio sin
+  // confirmar vuelve únicamente a lo guardado como anterior.
+  it('confirm frena si lo que atiende o el cambio pendiente no es ese release, sin borrar la marca', () => {
+    const s = fresh();
+    access(s);
+    const dir = join(s.root, 'staging');
+    const env = (sha: string, image: string) => ({ ENVIRONMENT: 'staging', IMAGE_REF: image, SHA: sha });
+    expect(s.run('deploy/lightsail/deploy.sh bootstrap', env(s.shas[0], I0), read('deploy/lightsail/compose.yml')).status).toBe(0);
+    expect(s.run('deploy/lightsail/deploy.sh switch', env(s.shas[0], I0)).status).toBe(0);
+    const r = s.run('deploy/lightsail/deploy.sh confirm', env(s.shas[1], imageOf('b')));
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('no se confirma');
+    expect(existsSync(join(dir, 'switch.pending'))).toBe(true);
+    writeFileSync(join(dir, 'switch.pending'), releaseEnv(imageOf('b'), s.shas[1], 'staging'));
+    expect(s.run('deploy/lightsail/deploy.sh confirm', env(s.shas[0], I0)).status).toBe(1);
+    expect(existsSync(join(dir, 'switch.pending'))).toBe(true);
+    writeFileSync(join(dir, 'switch.pending'), releaseEnv(I0, s.shas[0], 'staging'));
+    expect(s.run('deploy/lightsail/deploy.sh confirm', env(s.shas[0], I0)).status).toBe(0);
+    expect(existsSync(join(dir, 'switch.pending'))).toBe(false);
+  });
+
+  it('con un cambio sin confirmar, rollback vuelve solo a lo guardado como anterior, aunque release.env sea ese commit', () => {
+    const s = fresh();
+    access(s);
+    const dir = join(s.root, 'staging');
+    writeFileSync(join(dir, 'release.env'), releaseEnv(I0, s.shas[0], 'staging'));
+    writeFileSync(join(dir, 'switch.pending'), releaseEnv(I0, s.shas[0], 'staging'));
+    writeFileSync(join(dir, 'release.previous.env'), releaseEnv(imageOf('c'), s.shas[2], 'staging'));
+    s.clearCalls();
+    const r = s.run('deploy/lightsail/deploy.sh rollback', { ENVIRONMENT: 'staging', URL: URLS.staging,
+      FIRST_DEPLOY: 'false', PREVIOUS_IMAGE: I0, PREVIOUS_RELEASE: s.shas[0] });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('hay un cambio sin confirmar');
+    expect(s.calls().filter((c) => c.startsWith('docker '))).toEqual([]);
+    expect(existsSync(join(dir, 'switch.pending'))).toBe(true);
+  });
+
+  it('rollback sin release anterior no saca la API si el entorno tiene un release confirmado', () => {
+    const s = fresh();
+    access(s);
+    writeFileSync(join(s.root, 'staging', 'release.env'), releaseEnv(I0, s.shas[0], 'staging'));
+    s.clearCalls();
+    const r = s.run('deploy/lightsail/deploy.sh rollback', { ENVIRONMENT: 'staging', URL: URLS.staging, FIRST_DEPLOY: 'true' });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('tiene un release confirmado');
+    expect(s.calls().filter((c) => c.startsWith('docker '))).toEqual([]);
+    expect(s.state('staging')).toBe(releaseEnv(I0, s.shas[0], 'staging'));
   });
 
   it('rollback frena si ni lo que atiende ni lo guardado como anterior es el release anterior', () => {

@@ -10,28 +10,41 @@
 #                                         bootstrap de esa versión terminó bien: la exige switch
 #   compose.previous.yml, release.previous.env
 #                                         lo que atendía antes del último cambio (switch)
+#   switch.pending                        copia del release.env de un cambio sin confirmar
+#                                         (issue #56): la escribe switch y la borran confirm y
+#                                         rollback. Mientras exista, release.env es lo último a lo
+#                                         que se cambió pero no lo último sano: eso es
+#                                         release.previous.env (o ninguno, si no existe).
 #   secrets/                              un archivo por secreto (setup.sh), que compose.yml
 #                                         monta solo en el servicio que lo usa
 #
 #   remote.sh current <entorno>
-#       first=false, release=<sha> e image=<ref> de lo que atiende; first=true (y los dos vacíos)
-#       solo si no hay release.env: el entorno nunca se desplegó. Un release.env sin un RELEASE y
-#       una IMAGE válidos (vacío, truncado, editado a mano) frena: no es un primer deploy.
+#       first=false, release=<sha> e image=<ref> del último release confirmado (release.env, o
+#       release.previous.env con un cambio sin confirmar); first=true (y los dos vacíos) solo si
+#       no hay ninguno: el entorno nunca se desplegó, o su primer cambio no se confirmó. pending=
+#       el commit del cambio sin confirmar (vacío si no hay). Un archivo sin un RELEASE y una
+#       IMAGE válidos (vacío, truncado, editado a mano) frena: no es un primer deploy.
 #   remote.sh pull <entorno> <ref> <usuario>        (stdin: el token de GHCR)
 #       Baja la imagen con una configuración de docker temporal, que se borra al salir: el token
 #       no queda en el servidor (ni en ~/.docker ni en los argumentos de ningún proceso).
 #   remote.sh bootstrap <entorno> <ref> <sha>      (stdin: el compose.yml del release)
 #       Con la imagen nueva y la API anterior todavía atendiendo: levanta la base (con el compose
-#       nuevo) y corre el bootstrap, con RELEASE (el commit nuevo) y SERVING_RELEASE (el que
-#       atiende, de release.env). Si falla, sale con 1 y no cambió de versión. Borra la
-#       confirmación anterior al empezar y escribe bootstrap.ok solo si el bootstrap terminó bien.
+#       nuevo) y corre el bootstrap, con RELEASE (el commit nuevo) y SERVING_RELEASE (el último
+#       confirmado, el mismo que anuncia current). Si falla, sale con 1 y no cambió de versión.
+#       Borra la confirmación anterior al empezar y escribe bootstrap.ok solo si el bootstrap
+#       terminó bien.
 #   remote.sh switch <entorno> <ref> <sha>
 #       Exige el bootstrap terminado de esa misma imagen y commit (bootstrap.ok, que consume: otro
-#       cambio necesita otro bootstrap), guarda lo que atiende como previous y
-#       recrea la API con la imagen nueva; espera su healthcheck.
+#       cambio necesita otro bootstrap), guarda lo que atiende como previous, deja switch.pending
+#       y recrea la API con la imagen nueva; espera su healthcheck. Con un cambio anterior sin
+#       confirmar no toca previous: lo que atiende no es sano y lo guardado sí.
+#   remote.sh confirm <entorno> <ref> <sha>
+#       Después de /health y del smoke: lo que atiende es <ref> (<sha>) y queda confirmado (borra
+#       switch.pending). Desde acá, el próximo current lo anuncia y el próximo switch lo guarda.
 #   remote.sh rollback <entorno> <ref anterior> <sha anterior>
-#       Vuelve a lo que atendía antes del deploy, sin correr el bootstrap anterior. Sin release
-#       anterior (el primer deploy), saca la API y deja el entorno sin release.
+#       Vuelve al último release confirmado (el que anunció current), sin correr el bootstrap
+#       anterior, y borra switch.pending. Sin release anterior (el primer deploy), saca la API y
+#       deja el entorno sin release.
 #   remote.sh smoke-user staging                    (stdin: deploy/lightsail/smoke-user.sql)
 #       Solo en staging, después del bootstrap: deja listo el usuario del smoke (issue #51) y
 #       escribe userid=<id>. Corre el SQL con psql como superusuario dentro del contenedor de la
@@ -77,18 +90,34 @@ same_release() {   # archivo, ref, sha
   [ -f "$1" ] && [ "$(field IMAGE "$1")" = "$2" ] && [ "$(field RELEASE "$1")" = "$3" ]
 }
 
+valid_file() {   # archivo con IMAGE y RELEASE: frena si no los tiene válidos
+  [[ "$(field RELEASE "$1")" =~ ^[0-9a-f]{40}$ ]] && [[ "$(field IMAGE "$1")" =~ $REF_RE ]] \
+    || fail "$1 no tiene un RELEASE y una IMAGE válidos: revisarlo a mano (no es un primer deploy)"
+}
+# El archivo del último release confirmado: release.env, o release.previous.env mientras haya un
+# cambio sin confirmar. Vacío si no hay ninguno.
+confirmed() {
+  if [ -e "$DIR/switch.pending" ]; then
+    if [ -e "$DIR/release.previous.env" ]; then echo "$DIR/release.previous.env"; fi
+  elif [ -e "$DIR/release.env" ]; then
+    echo "$DIR/release.env"
+  fi
+}
+
 current() {
   use_env "$1"
-  local release image
-  if [ ! -e "$DIR/release.env" ]; then
-    printf 'first=true\nrelease=\nimage=\n'
+  local file pending=""
+  if [ -e "$DIR/switch.pending" ]; then
+    valid_file "$DIR/switch.pending"
+    pending="$(field RELEASE "$DIR/switch.pending")"
+  fi
+  file="$(confirmed)"
+  if [ -z "$file" ]; then
+    printf 'first=true\nrelease=\nimage=\npending=%s\n' "$pending"
     return 0
   fi
-  release="$(field RELEASE "$DIR/release.env")"
-  image="$(field IMAGE "$DIR/release.env")"
-  [[ "$release" =~ ^[0-9a-f]{40}$ ]] && [[ "$image" =~ $REF_RE ]] \
-    || fail "$DIR/release.env no tiene un RELEASE y una IMAGE válidos: revisarlo a mano (no es un primer deploy)"
-  printf 'first=false\nrelease=%s\nimage=%s\n' "$release" "$image"
+  valid_file "$file"
+  printf 'first=false\nrelease=%s\nimage=%s\npending=%s\n' "$(field RELEASE "$file")" "$(field IMAGE "$file")" "$pending"
 }
 
 pull() {
@@ -118,11 +147,12 @@ bootstrap() {
   printf 'IMAGE=%s\nRELEASE=%s\nENVIRONMENT=%s\n' "$ref" "$sha" "$ENV" > "$DIR/release.next.env"
   echo "== $ENV: base"
   compose next up -d --wait --wait-timeout "$WAIT" db || fail "la base de $ENV no quedó sana"
-  # El bootstrap verifica el contrato del release que atiende ahora (release.env; vacío si
-  # ninguno) y registra el de este con su SHA (D-24, issue #39): así una vuelta atrás vuelve a un
-  # release cuyo contrato el próximo bootstrap sigue exigiendo.
-  local serving=""
-  [ -f "$DIR/release.env" ] && serving="$(field RELEASE "$DIR/release.env")"
+  # El bootstrap verifica el contrato del último release confirmado (vacío si ninguno), que es a
+  # donde vuelve la vuelta atrás, y registra el de este con su SHA (D-24, issues #39 y #56): así
+  # una vuelta atrás vuelve a un release cuyo contrato el próximo bootstrap sigue exigiendo.
+  local serving="" file
+  file="$(confirmed)"
+  [ -z "$file" ] || serving="$(field RELEASE "$file")"
   echo "== $ENV: bootstrap con $ref (atiende: ${serving:-ninguno})"
   compose next run --rm -T --no-deps -e "RELEASE=$sha" -e "SERVING_RELEASE=$serving" migrate \
     || fail "el bootstrap falló: no se cambió de versión"
@@ -136,11 +166,17 @@ switch() {
   valid_sha "$sha"
   same_release "$DIR/release.next.env" "$ref" "$sha" && cmp -s "$DIR/release.next.env" "$DIR/bootstrap.ok" \
     || fail "el bootstrap de $ref ($sha) no terminó bien en $ENV: no se cambia de versión"
-  rm -f "$DIR/compose.previous.yml" "$DIR/release.previous.env"
-  if [ -f "$DIR/release.env" ]; then
-    cp -p "$DIR/compose.yml" "$DIR/compose.previous.yml"
-    cp -p "$DIR/release.env" "$DIR/release.previous.env"
+  # Con un cambio anterior sin confirmar (un job cortado antes de confirm o de rollback), lo que
+  # atiende no es sano: lo guardado como anterior es lo último que sí, y no se pisa (issue #56).
+  if [ ! -e "$DIR/switch.pending" ]; then
+    rm -f "$DIR/compose.previous.yml" "$DIR/release.previous.env"
+    if [ -f "$DIR/release.env" ]; then
+      cp -p "$DIR/compose.yml" "$DIR/compose.previous.yml"
+      cp -p "$DIR/release.env" "$DIR/release.previous.env"
+    fi
   fi
+  # Después del respaldo completo: si el cambio se corta antes, release.env sigue siendo lo sano.
+  cp -p "$DIR/release.next.env" "$DIR/switch.pending"
   mv "$DIR/compose.next.yml" "$DIR/compose.yml"
   mv "$DIR/release.next.env" "$DIR/release.env"
   rm -f "$DIR/bootstrap.ok"
@@ -148,22 +184,50 @@ switch() {
   compose "" up -d --wait --wait-timeout "$WAIT" --no-deps api || fail "la API de $sha no quedó sana"
 }
 
+confirm() {
+  use_env "$1"
+  local ref="$2" sha="$3"
+  valid_ref "$ref"
+  valid_sha "$sha"
+  same_release "$DIR/release.env" "$ref" "$sha" || fail "lo que atiende en $ENV no es $ref ($sha): no se confirma"
+  if [ ! -e "$DIR/switch.pending" ]; then
+    echo "== $ENV: $ref ($sha) ya estaba confirmado"
+    return 0
+  fi
+  same_release "$DIR/switch.pending" "$ref" "$sha" || fail "el cambio sin confirmar de $ENV no es $ref ($sha): no se confirma"
+  rm -f "$DIR/switch.pending"
+  echo "== $ENV: confirmado $ref ($sha)"
+}
+
 rollback() {
   use_env "$1"
   local ref="$2" sha="$3"
   if [ -z "$sha" ]; then
     # Primer deploy del entorno: no hay a qué volver. Sale la API y el entorno queda sin
-    # release, así el próximo deploy vuelve a ser el primero.
+    # release, así el próximo deploy vuelve a ser el primero. Con un release confirmado, no es
+    # un primer deploy: no se saca nada.
+    [ -z "$(confirmed)" ] || fail "$ENV tiene un release confirmado: no se saca la API"
     if [ -f "$DIR/release.env" ]; then
       compose "" rm -s -f api || fail "no se pudo sacar la API de $ENV"
       rm -f "$DIR/compose.yml" "$DIR/release.env"
     fi
+    rm -f "$DIR/switch.pending"
     echo "== $ENV: sin release anterior; la API quedó afuera"
     return 0
   fi
   valid_ref "$ref"
   valid_sha "$sha"
-  if same_release "$DIR/release.env" "$ref" "$sha"; then
+  if [ -e "$DIR/switch.pending" ]; then
+    # Un cambio sin confirmar: lo último sano es lo guardado como anterior, aunque release.env
+    # sea otra cosa (o ya sea el mismo commit, si un re-run lo volvió a cambiar). Se copia y no
+    # se mueve: si esto se corta, la marca sigue y la próxima vuelta atrás encuentra lo mismo.
+    same_release "$DIR/release.previous.env" "$ref" "$sha" \
+      || fail "hay un cambio sin confirmar en $ENV y lo guardado como anterior no es $ref ($sha): no se toca nada"
+    cp -p "$DIR/compose.previous.yml" "$DIR/compose.yml"
+    cp -p "$DIR/release.previous.env" "$DIR/release.env"
+    rm -f "$DIR/switch.pending"
+    echo "== $ENV: vuelve a $ref ($sha), sin el cambio sin confirmar"
+  elif same_release "$DIR/release.env" "$ref" "$sha"; then
     # El deploy falló antes de cambiar: lo que atiende ya es lo anterior.
     echo "== $ENV: sigue en $ref ($sha)"
   elif same_release "$DIR/release.previous.env" "$ref" "$sha"; then
@@ -195,7 +259,8 @@ case "${1:-}" in
   pull)      pull "${2:-}" "${3:-}" "${4:-}" ;;
   bootstrap) bootstrap "${2:-}" "${3:-}" "${4:-}" ;;
   switch)    switch "${2:-}" "${3:-}" "${4:-}" ;;
+  confirm)   confirm "${2:-}" "${3:-}" "${4:-}" ;;
   rollback)  rollback "${2:-}" "${3:-}" "${4:-}" ;;
   smoke-user) smoke_user "${2:-}" ;;
-  *)         echo "uso: $0 current|pull|bootstrap|switch|rollback|smoke-user <entorno> ..." >&2; exit 2 ;;
+  *)         echo "uso: $0 current|pull|bootstrap|switch|confirm|rollback|smoke-user <entorno> ..." >&2; exit 2 ;;
 esac

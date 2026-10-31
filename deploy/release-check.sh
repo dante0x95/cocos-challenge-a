@@ -6,9 +6,10 @@
 #   SHA=<commit> CURRENT=<release que atiende> FIRST_DEPLOY=<true|false> deploy/release-check.sh before
 #       El commit a desplegar desciende del release que atiende el entorno (los dos son SHA, no
 #       tags). CURRENT y FIRST_DEPLOY los lee el paso anterior del servidor
-#       (deploy/lightsail/deploy.sh current): lo último a lo que el deploy cambió, que no depende
-#       de que la API responda. Un re-run del workflow de un release viejo puede llegar después
-#       de uno más nuevo; acá se frena. Volver a desplegar el mismo commit pasa (también otro tag
+#       (deploy/lightsail/deploy.sh current): el último release confirmado, que no depende de que
+#       la API responda. Con un cambio sin confirmar (un job cortado; issue #56) es el anterior a
+#       ese cambio, que nunca quedó sano: su re-run pasa contra el confirmado. Un re-run del
+#       workflow de un release viejo puede llegar después de uno más nuevo; acá se frena. Volver a desplegar el mismo commit pasa (también otro tag
 #       sobre ese commit). El primer deploy del entorno (FIRST_DEPLOY=true y CURRENT vacío) pasa.
 #       Cualquier otra combinación (un CURRENT vacío sin FIRST_DEPLOY=true, por ejemplo, si el
 #       paso anterior no dejó su salida) frena: un release vacío no se toma como "no hay".

@@ -18,9 +18,12 @@
 # atendiendo; el cambio de la API; /health por la URL pública tiene que atender el commit
 # (release-check.sh after); el smoke funcional por esa URL (deploy/smoke.mjs, issue #51): en
 # staging el flujo de órdenes completo, con un usuario que existe solo ahí (deploy.sh smoke-user,
-# antes del cambio), y en producción solo lecturas. Si el cambio, /health o el smoke fallan, el
-# entorno vuelve solo a la imagen y el release anteriores y el job queda en rojo: un staging en
-# rojo deja producción sin desplegar. La primera vez: deploy/lightsail/setup.sh
+# antes del cambio), y en producción solo lecturas; y confirmar el cambio (issue #56): hasta ahí,
+# el servidor lo marca sin confirmar, y un job cortado a la mitad no hace pasar por sano al
+# release nuevo en el re-run. Si el cambio, /health, el smoke o la confirmación fallan (o un re-run
+# encuentra un cambio sin confirmar y falla en cualquier paso), el entorno vuelve solo al último
+# release confirmado y el job queda en rojo: un staging en rojo deja producción sin desplegar. La
+# primera vez: deploy/lightsail/setup.sh
 # en el servidor y los secretos LIGHTSAIL_* de cada environment (docs/api/operacion.md).
 # No hay deploy manual desde acá: un commit sin release, fuera de main o sin el CI en verde no
 # se despliega.
@@ -166,11 +169,18 @@ jobs:
         run: deploy/smoke.mjs write
         env:
           SMOKE_USERID: ${{ steps.smoke.outputs.userid }}
+      # Lo último: desde acá el servidor toma este release como sano (el próximo current lo
+      # anuncia y el próximo switch lo guarda como anterior).
+      - name: Confirmar el cambio
+        run: deploy/lightsail/deploy.sh confirm
       # Si algo falló desde que empezó el cambio: el cambio mismo (la API nueva no quedó sana) o
-      # las verificaciones de después (/health o el smoke). remote.sh mira el estado del servidor: si el cambio falló
-      # antes de tocar la API, sigue la anterior y solo verifica.
+      # las verificaciones de después (/health, el smoke o la confirmación). También si el
+      # servidor tenía un cambio sin confirmar (pending, de un job cortado; issue #56) y este job
+      # falló antes de cambiar: lo que atiende no es sano, y se vuelve al último confirmado.
+      # remote.sh mira el estado del servidor: si el cambio falló antes de tocar la API, sigue la
+      # anterior y solo verifica.
       - name: Volver a la versión anterior
-        if: failure() && steps.deploy.outcome != 'skipped'
+        if: failure() && (steps.deploy.outcome != 'skipped' || steps.serving.outputs.pending)
         run: deploy/lightsail/deploy.sh rollback
         env:
           PREVIOUS_IMAGE: ${{ steps.serving.outputs.image }}
@@ -237,11 +247,18 @@ jobs:
       # Solo lecturas: en producción el smoke no escribe órdenes.
       - name: Smoke de solo lectura
         run: deploy/smoke.mjs read
+      # Lo último: desde acá el servidor toma este release como sano (el próximo current lo
+      # anuncia y el próximo switch lo guarda como anterior).
+      - name: Confirmar el cambio
+        run: deploy/lightsail/deploy.sh confirm
       # Si algo falló desde que empezó el cambio: el cambio mismo (la API nueva no quedó sana) o
-      # las verificaciones de después (/health o el smoke). remote.sh mira el estado del servidor: si el cambio falló
-      # antes de tocar la API, sigue la anterior y solo verifica.
+      # las verificaciones de después (/health, el smoke o la confirmación). También si el
+      # servidor tenía un cambio sin confirmar (pending, de un job cortado; issue #56) y este job
+      # falló antes de cambiar: lo que atiende no es sano, y se vuelve al último confirmado.
+      # remote.sh mira el estado del servidor: si el cambio falló antes de tocar la API, sigue la
+      # anterior y solo verifica.
       - name: Volver a la versión anterior
-        if: failure() && steps.deploy.outcome != 'skipped'
+        if: failure() && (steps.deploy.outcome != 'skipped' || steps.serving.outputs.pending)
         run: deploy/lightsail/deploy.sh rollback
         env:
           PREVIOUS_IMAGE: ${{ steps.serving.outputs.image }}

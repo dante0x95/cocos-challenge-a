@@ -9,9 +9,10 @@
 #   deploy.sh access     Con LIGHTSAIL_HOST, LIGHTSAIL_SSH_KEY y LIGHTSAIL_KNOWN_HOSTS (secretos
 #                        del environment): escribe la clave y la configuración de SSH, con la
 #                        clave del host fijada (StrictHostKeyChecking yes). Solo este paso los lee.
-#   deploy.sh current    release= e image= de lo que atiende el entorno, y first=true si nunca
-#                        se desplegó (first=false si no), en $GITHUB_OUTPUT. Lo decide el
-#                        servidor (no hay release.env); un release.env inválido frena acá.
+#   deploy.sh current    release= e image= del último release confirmado del entorno, first=true
+#                        si no tiene ninguno (first=false si no) y pending= el commit de un
+#                        cambio sin confirmar (vacío si no hay; issue #56), en $GITHUB_OUTPUT. Lo
+#                        decide el servidor; un release.env inválido frena acá.
 #   deploy.sh pull       Baja la imagen en el servidor, con GITHUB_TOKEN por stdin (nunca en un
 #                        argumento) y GITHUB_ACTOR.
 #   deploy.sh bootstrap  Manda deploy/lightsail/compose.yml del commit y corre el bootstrap con la
@@ -19,7 +20,9 @@
 #   deploy.sh smoke-user Solo en staging, después del bootstrap: manda deploy/lightsail/smoke-user.sql
 #                        y deja userid= (el usuario del smoke, en cero) en $GITHUB_OUTPUT, para
 #                        deploy/smoke.mjs write (issue #51). En production frena sin tocar nada.
-#   deploy.sh switch     Cambia la API a la imagen nueva.
+#   deploy.sh switch     Cambia la API a la imagen nueva, como un cambio sin confirmar.
+#   deploy.sh confirm    Después de /health y del smoke: confirma el cambio. Hasta acá, un job
+#                        cortado deja al servidor sabiendo que lo sano es lo anterior.
 #   deploy.sh rollback   Vuelve a PREVIOUS_IMAGE / PREVIOUS_RELEASE (lo que anotó current) y
 #                        exige que /health (URL) lo atienda otra vez. En el primer deploy
 #                        (FIRST_DEPLOY=true, sin release anterior) saca la API. Sin esa salida de
@@ -63,19 +66,25 @@ EOF
 }
 
 current() {
-  local out release image first
+  local out release image first pending
   out="$(remote current "${ENVIRONMENT:?}" </dev/null)" || fail "no se pudo leer qué atiende $ENVIRONMENT"
   first="$(sed -n 's/^first=//p' <<<"$out")"
   release="$(sed -n 's/^release=//p' <<<"$out")"
   image="$(sed -n 's/^image=//p' <<<"$out")"
+  pending="$(sed -n 's/^pending=//p' <<<"$out")"
+  [[ "$pending" =~ ^([0-9a-f]{40})?$ ]] && grep -qx 'pending=.*' <<<"$out" \
+    || fail "respuesta inesperada del servidor sobre $ENVIRONMENT: $(tr '\n' ' ' <<<"$out")"
   # El servidor dice si es el primer deploy; acá solo se exige que lo demás coincida.
   case "$first:$([ -n "$release" ] && echo con || echo sin):$([ -n "$image" ] && echo con || echo sin)" in
     true:sin:sin)  echo "== $ENVIRONMENT no tiene release: es su primer deploy" ;;
     false:con:con) echo "== $ENVIRONMENT atiende $release ($image)" ;;
     *) fail "respuesta inesperada del servidor sobre $ENVIRONMENT: $(tr '\n' ' ' <<<"$out")" ;;
   esac
+  if [ -n "$pending" ]; then
+    echo "== $ENVIRONMENT tiene un cambio sin confirmar a $pending (un deploy cortado): no se toma como sano"
+  fi
   if [ -n "${GITHUB_OUTPUT:-}" ]; then
-    { echo "release=$release"; echo "image=$image"; echo "first=$first"; } >> "$GITHUB_OUTPUT"
+    { echo "release=$release"; echo "image=$image"; echo "first=$first"; echo "pending=$pending"; } >> "$GITHUB_OUTPUT"
   fi
 }
 
@@ -102,6 +111,10 @@ switch() {
   remote switch "${ENVIRONMENT:?}" "${IMAGE_REF:?}" "${SHA:?}" </dev/null
 }
 
+confirm() {
+  remote confirm "${ENVIRONMENT:?}" "${IMAGE_REF:?}" "${SHA:?}" </dev/null
+}
+
 rollback() {
   case "${FIRST_DEPLOY:-}:$([ -n "${PREVIOUS_RELEASE:-}" ] && [ -n "${PREVIOUS_IMAGE:-}" ] && echo con || echo sin)" in
     true:sin)
@@ -123,6 +136,7 @@ case "${1:-}" in
   bootstrap) bootstrap ;;
   smoke-user) smoke_user ;;
   switch)    switch ;;
+  confirm)   confirm ;;
   rollback)  rollback ;;
-  *)         echo "uso: $0 access|current|pull|bootstrap|smoke-user|switch|rollback" >&2; exit 2 ;;
+  *)         echo "uso: $0 access|current|pull|bootstrap|smoke-user|switch|confirm|rollback" >&2; exit 2 ;;
 esac

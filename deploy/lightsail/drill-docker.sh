@@ -19,12 +19,15 @@
 #      gid 1000, node lee un 640 del grupo 1000 y no un 600 (el control), y Postgres arranca con
 #      un postgres_password 600 (lo lee como root) y esa es la contraseña del superusuario.
 # Y sobre un /opt/cocos temporal y el proyecto cocos-staging:
-#   1. good: bootstrap y switch terminan bien y /health atiende su release. Ningún valor secreto
-#      aparece en `docker inspect` de db, api y migrate ni en el entorno del proceso principal de
-#      db y api, y cada uno monta en /run/secrets solo los suyos.
+#   1. good: bootstrap, switch y confirm terminan bien y /health atiende su release. Ningún valor
+#      secreto aparece en `docker inspect` de db, api y migrate ni en el entorno del proceso
+#      principal de db y api, y cada uno monta en /run/secrets solo los suyos.
 #   2. bad-boot: el bootstrap falla, y un switch de esa versión se rechaza; sigue good.
 #   3. bad-health: el bootstrap pasa, el switch falla (el healthcheck), rollback vuelve a good y
 #      /health atiende otra vez su release.
+#   4. Un switch cortado (issue #56): el switch de bad-health falla y nadie vuelve atrás; current
+#      anuncia good con bad-health pendiente, el re-run vuelve a fallar en el switch y rollback
+#      vuelve a good.
 # Al final borra todo lo que creó (contenedores, volúmenes, red, registro e imágenes). remote.sh usa
 # el proyecto fijo cocos-staging, y `down -v` borraría su volumen aunque no fuera de este ensayo:
 # si en este Docker ya hay algo de ese proyecto (contenedores o volúmenes, también sin
@@ -172,6 +175,7 @@ echo "== 1. good: bootstrap y switch"
 remote bootstrap staging "$GOOD" "$SHA_GOOD" < deploy/lightsail/compose.yml || fail "1: el bootstrap de good falló"
 remote switch staging "$GOOD" "$SHA_GOOD" || fail "1: el switch de good falló"
 serving "$SHA_GOOD" 1
+remote confirm staging "$GOOD" "$SHA_GOOD" || fail "1: confirm de good falló"
 # Ningún valor secreto en `docker inspect` ni en el entorno del proceso principal, y cada servicio
 # con sus secretos y nada más. migrate corre con `run --rm`: se crea, sin arrancarlo, para mirar
 # su configuración.
@@ -207,4 +211,16 @@ remote rollback staging "$GOOD" "$SHA_GOOD" || fail "3: rollback falló"
 serving "$SHA_GOOD" 3
 [ "$(sed -n 's/^RELEASE=//p' "$DIR/release.env")" = "$SHA_GOOD" ] || fail "3: release.env no volvió a good"
 
-echo "== ENSAYO OK: bootstrap fallido y API sin salud rechazados; atiende $SHA_GOOD"
+echo "== 4. switch cortado: el re-run vuelve a fallar y rollback vuelve a good"
+remote bootstrap staging "$HEALTH" "$SHA_HEALTH" < deploy/lightsail/compose.yml || fail "4: el bootstrap de bad-health falló"
+if remote switch staging "$HEALTH" "$SHA_HEALTH"; then fail "4: el switch a una API que responde 503 terminó bien"; fi
+# El job se cortó acá: nadie vuelve atrás. El re-run tiene que ver good como lo último sano.
+expected="$(printf 'first=false\nrelease=%s\nimage=%s\npending=%s' "$SHA_GOOD" "$GOOD" "$SHA_HEALTH")"
+[ "$(remote current staging)" = "$expected" ] || fail "4: current no anuncia good con bad-health pendiente: $(remote current staging | tr '\n' ' ')"
+remote bootstrap staging "$HEALTH" "$SHA_HEALTH" < deploy/lightsail/compose.yml || fail "4: el bootstrap del re-run falló"
+if remote switch staging "$HEALTH" "$SHA_HEALTH"; then fail "4: el switch del re-run terminó bien"; fi
+remote rollback staging "$GOOD" "$SHA_GOOD" || fail "4: rollback no volvió a good"
+serving "$SHA_GOOD" 4
+[ ! -e "$DIR/switch.pending" ] || fail "4: la vuelta atrás dejó el cambio sin confirmar"
+
+echo "== ENSAYO OK: bootstrap fallido, API sin salud y switch cortado; atiende $SHA_GOOD"

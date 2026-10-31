@@ -29,9 +29,12 @@
 #     ese nombre (otra ejecución que pasó las mismas comprobaciones al mismo tiempo); en ese caso
 #     no sigue ni toca nada. Con el registro suyo, comprueba que no haya nada del proyecto ni la
 #     red, y si hay, no sigue.
-#   - Al terminar borra solo lo que esta ejecución creó, por su id: el registro (con su volumen),
-#     la red, la etiqueta de la imagen y, si llegó al bootstrap, el proyecto (`down -v`, desde su
-#     directorio temporal).
+#   - Al terminar borra solo lo que esta ejecución creó, por su id o su nombre único: si llegó al
+#     bootstrap, el proyecto (`down -v`, desde su directorio temporal), la etiqueta de la imagen
+#     (smoke-<id de la ejecución>, de nadie más), la red y, al final, el registro (con su
+#     volumen). El candado se suelta recién ahí: mientras quede algo compartido por borrar, otra
+#     ejecución no puede empezar. Si algo no se pudo borrar, el registro queda (las ejecuciones
+#     siguientes se rechazan) y sale con 1 diciendo qué limpiar a mano.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
@@ -59,19 +62,29 @@ docker image inspect "$LOCAL_IMAGE" >/dev/null 2>&1 || refuse "no está la image
 # Lo que esta ejecución creó, por id: la limpieza no toca nada más.
 ROOT_DIR="$(mktemp -d)"
 REGISTRY_ID=""; EDGE_ID=""; TAGGED=""
+IMAGE_TAG="$REG:smoke-${ROOT_DIR##*/}"   # única por ejecución: ninguna otra la usa
 export COCOS_ROOT="$ROOT_DIR" COCOS_PROJECT="$PREFIX" COMPOSE_WAIT_TIMEOUT="${COMPOSE_WAIT_TIMEOUT:-90}"
 DIR="$ROOT_DIR/staging"
 
+# Lo compartido primero y el candado al final: mientras algo quede, otra ejecución se rechaza.
 cleanup() {
+  local status=$? left=()
   if [ -f "$DIR/compose.yml" ] || [ -f "$DIR/compose.next.yml" ]; then
     local f="$DIR/compose.yml" e="$DIR/release.env"
     [ -f "$f" ] || { f="$DIR/compose.next.yml"; e="$DIR/release.next.env"; }
-    docker compose -p "$PROJECT" --project-directory "$DIR" -f "$f" --env-file "$e" down -v >/dev/null 2>&1 || true
+    docker compose -p "$PROJECT" --project-directory "$DIR" -f "$f" --env-file "$e" down -v >/dev/null 2>&1 || left+=("el proyecto $PROJECT")
   fi
-  [ -z "$REGISTRY_ID" ] || docker rm -f -v "$REGISTRY_ID" >/dev/null 2>&1 || true   # -v: su volumen anónimo
-  [ -z "$EDGE_ID" ] || docker network rm "$EDGE_ID" >/dev/null 2>&1 || true
-  [ -z "$TAGGED" ] || docker rmi "$REG:smoke" >/dev/null 2>&1 || true
+  if [ -n "$TAGGED" ]; then docker rmi "$IMAGE_TAG" >/dev/null 2>&1 || left+=("la imagen $IMAGE_TAG"); fi
+  if [ -n "$EDGE_ID" ]; then docker network rm "$EDGE_ID" >/dev/null 2>&1 || left+=("la red $EDGE"); fi
+  if [ ${#left[@]} -gt 0 ]; then
+    # El registro queda como candado: borrarlo dejaría empezar a otra encima de lo que quedó.
+    echo "SMOKE CON DOCKER: no se pudo borrar ${left[*]}; queda el registro $REGISTRY como candado: limpiar a mano y después docker rm -f -v $REGISTRY" >&2
+    [ "$status" != 0 ] || status=1
+  elif [ -n "$REGISTRY_ID" ]; then
+    docker rm -f -v "$REGISTRY_ID" >/dev/null 2>&1 || true   # -v: su volumen anónimo
+  fi
   rm -rf "$ROOT_DIR"
+  exit "$status"
 }
 trap cleanup EXIT
 
@@ -85,14 +98,14 @@ absent "la red $EDGE" docker network ls -q --filter "name=^$EDGE\$"
 
 echo "== imagen $LOCAL_IMAGE por digest"
 docker start "$REGISTRY_ID" >/dev/null || fail "no arrancó el registro local (¿el puerto $PORT está ocupado?)"
-docker tag "$LOCAL_IMAGE" "$REG:smoke"
+docker tag "$LOCAL_IMAGE" "$IMAGE_TAG"
 TAGGED=1
 for ((i = 1; ; i++)); do
-  docker push -q "$REG:smoke" >/dev/null 2>&1 && break
+  docker push -q "$IMAGE_TAG" >/dev/null 2>&1 && break
   [ "$i" -lt 20 ] || fail "no se pudo publicar la imagen en el registro local"
   sleep 1
 done
-REF="$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$REG:smoke" | grep "^$REG@sha256:" | head -1)"
+REF="$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$IMAGE_TAG" | grep "^$REG@sha256:" | head -1)"
 [ -n "$REF" ] || fail "la imagen publicada no tiene digest"
 
 echo "== servidor en $ROOT_DIR"

@@ -1651,9 +1651,13 @@ describe('smoke-user', () => {
 // su compose al hacer `up` y sale con `down`). Usa su propio proyecto (cocos-smoke-staging, nunca
 // cocos-staging ni cocos) y su propia red externa (cocos-smoke-edge): el api-staging de un staging
 // local en cocos-edge sigue siendo el único destino de ese nombre. El registro es el candado: si
-// otra ejecución lo tiene, no sigue ni borra nada ajeno. Corre bootstrap, smoke-user y switch de
-// remote.sh y el smoke dos veces con el mismo usuario; si la API no queda sana (una imagen que no
-// arranca), no corre el smoke, falla y limpia solo lo suyo.
+// otra ejecución lo tiene, no sigue ni borra nada ajeno, y se suelta recién al final de la
+// limpieza. El estado que comparten las ejecuciones (el registro, la red del ensayo, el proyecto
+// y las etiquetas de imagen, con su dueño) vive en $STATE, como en un Docker de verdad. Con
+// INTERLEAVE, antes de cada paso de la limpieza (y después del último) arranca otra ejecución,
+// completa, en ese punto. Corre bootstrap, smoke-user y switch de remote.sh y el smoke dos veces
+// con el mismo usuario; si la API no queda sana (una imagen que no arranca), no corre el smoke,
+// falla y limpia solo lo suyo.
 describe('smoke-docker.sh', () => {
   const dirs: string[] = [];
   afterEach(() => {
@@ -1663,46 +1667,74 @@ describe('smoke-docker.sh', () => {
   const HEAD = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: ROOT, encoding: 'utf8' }).stdout.trim();
   /** Un staging local ya levantado: su API, con el alias api-staging, en cocos-edge, que usa su Caddy. */
   const EXISTING_EDGE = 'api-staging cocos-staging\ncaddy cocos-proxy\n';
-  const run = (env: Record<string, string> = {}) => {
+  const SCRIPT = join(ROOT, 'deploy/lightsail/smoke-docker.sh');
+  const run = (env: Record<string, string> = {}, prepare?: (state: string) => void) => {
     const f = fakeBin({
       docker: [
+        'me="${NESTED:-a}"',
         'echo "docker $*" >> "$CALLS"',
         '[ -n "${FAIL:-}" ] && [[ "$*" =~ $FAIL ]] && { echo "docker simulado: falla: $*" >&2; exit 1; }',
         'file=""; project=""; a=("$@")',
         'for ((i = 0; i < ${#a[@]}; i++)); do case "${a[i]}" in -f) file="${a[i+1]}" ;; -p) project="${a[i+1]}" ;; esac; done',
+        // Otra ejecución completa, en este punto de la limpieza de la primera: anota si salió y si
+        // llegó a tener el candado.
+        'other() {',
+        '  n=$(( $(ls "$STATE" | grep -c "^b[0-9]*\\.calls$" || true) + 1 )); c="$STATE/b$n.calls"',
+        '  NESTED=b$n CALLS="$c" bash "$SCRIPT" cocos:ci >/dev/null 2>"$STATE/b$n.err"; st=$?',
+        '  if grep -qx "b$n" "$STATE/acquired" 2>/dev/null; then lock=sí; else lock=no; fi',
+        '  echo "$1 $2: otra salió con $st, candado: $lock" >> "$STATE/interleave"',
+        '}',
+        'cleanup_step=""',
+        'case "$*" in "compose "*" down -v" | "rmi "* | "network rm "* | "rm -f -v "*) cleanup_step="$*" ;; esac',
+        '[ -n "${INTERLEAVE:-}" ] && [ "$me" = a ] && [ -n "$cleanup_step" ] && other antes "$cleanup_step"',
         'case "$*" in',
-        '  *"ps -aq --filter label=com.docker.compose.project=cocos-smoke-staging") printf "%s" "${PS_PROJECT:-}" ;;',
+        '  *"ps -aq --filter label=com.docker.compose.project=cocos-smoke-staging") cat "$STATE/project" 2>/dev/null; printf "%s" "${PS_PROJECT:-}" ;;',
         '  *"volume ls -q --filter name=cocos-smoke-staging_") printf "%s" "${VOL_NAME:-}" ;;',
-        '  *"network ls -q --filter name=^cocos-smoke-edge$") printf "%s" "${NET_EDGE:-}" ;;',
-        // El nombre de un contenedor es único: si otra ejecución ya lo tomó, create falla.
-        '  "create --name cocos-smoke-registry "*) [ -z "${REGISTRY_TAKEN:-}" ] || { echo "Conflict: name in use" >&2; exit 1; }; echo reg123 ;;',
-        '  "run -d --name cocos-smoke-registry "*) [ -z "${REGISTRY_TAKEN:-}" ] || { echo "Conflict: name in use" >&2; exit 1; } ;;',
-        '  "network create "*) touch "$CALLS.net.$3"; echo net456 ;;',
+        '  *"network ls -q --filter name=^cocos-smoke-edge$") cat "$STATE/net.cocos-smoke-edge" 2>/dev/null; printf "%s" "${NET_EDGE:-}" ;;',
+        // El nombre de un contenedor es único: si otro ya lo tiene, create (y run) fallan.
+        '  "create --name cocos-smoke-registry "* | "run -d --name cocos-smoke-registry "*)',
+        '    [ ! -e "$STATE/registry" ] || { echo "Conflict: name in use" >&2; exit 1; }',
+        '    echo "reg-$me" > "$STATE/registry"; echo "$me" >> "$STATE/acquired"; echo "reg-$me" ;;',
+        // Borra el registro por id o por nombre (lo que haga el script), sea de quien sea.
+        '  "rm -f -v "*) case "$(cat "$STATE/registry" 2>/dev/null)" in "$4" | "") ;; *) [ "$4" = cocos-smoke-registry ] || exit 1 ;; esac',
+        '    rm -f "$STATE/registry" ;;',
+        '  "network create "*) [ ! -e "$STATE/net.$3" ] || exit 1; echo "net-$me" > "$STATE/net.$3"; touch "$CALLS.net.$3"; echo "net-$me" ;;',
+        '  "network rm "*) for n in "$STATE"/net.*; do [ "$(cat "$n" 2>/dev/null)" = "$3" ] && rm -f "$n"; done ;;',
+        // Cada etiqueta con su dueño; rmi anota si borró la de otra ejecución.
+        '  "tag "*) echo "$me" > "$STATE/tag.${3//[\\/:]/_}" ;;',
+        '  "rmi "*) t="$STATE/tag.${2//[\\/:]/_}"; [ -e "$t" ] || exit 1; [ "$(cat "$t")" = "$me" ] || echo "$me borró la etiqueta $2 de $(cat "$t")" >> "$STATE/stolen"; rm -f "$t" ;;',
         `  "image inspect --format"*) echo '${DIGEST}' ;;`,
         '  *" exec -T db psql "*) cat >/dev/null; n=$(grep -c " exec -T db psql " "$CALLS"); if [ "$n" = 1 ]; then echo 31; else echo "${SECOND_ID:-31}"; fi ;;',
         // La API entra a la red interna de su proyecto y a la red edge de su compose, con su alias
         // (API_EXTRA_NET: además a otra, como si el compose la nombrara).
-        '  "compose "*" up "*" api") cp "$file" "$CALLS.compose"; edge="$(sed -n "s/^    name: //p" "$file")"',
+        '  "compose "*" up "*" api") cp "$file" "$CALLS.compose"; edge="$(sed -n "s/^    name: //p" "$file")"; echo "$me" > "$STATE/project"',
         '    for n in "$edge" ${API_EXTRA_NET:-}; do sed -i.bak "/ $project\\$/d" "$CALLS.net.$n" 2>/dev/null || true; echo "api-staging $project" >> "$CALLS.net.$n"; done',
         '    printf "%s\\n" "${project}_default" "$edge" ${API_EXTRA_NET:-} > "$CALLS.api-nets" ;;',
+        '  "compose "*" up "*) echo "$me" > "$STATE/project" ;;',
         '  "compose "*" ps -q api") echo api789 ;;',
         '  "inspect -f "*" api789") cat "$CALLS.api-nets" ;;',
-        '  "compose "*" down -v") for n in "$CALLS".net.*; do case "$n" in *.bak) ;; *) sed -i.bak "/ $project\\$/d" "$n" ;; esac; done ;;',
+        '  "compose "*" down -v") rm -f "$STATE/project"; for n in "$CALLS".net.*; do case "$n" in *.bak) ;; *) sed -i.bak "/ $project\\$/d" "$n" ;; esac; done ;;',
         '  *"/smoke/smoke.mjs "*) [ -z "${SMOKE_FAIL:-}" ] || exit 1 ;;',
         'esac',
+        '[ -n "${INTERLEAVE:-}" ] && [ "$me" = a ] && [[ "$cleanup_step" == "rm -f -v "* ]] && other después "$cleanup_step"',
         'exit 0',
       ].join('\n'),
     });
     dirs.push(f.dir);
+    const state = join(f.dir, 'state');
+    mkdirSync(state);
+    prepare?.(state);
     writeFileSync(`${f.log}.net.cocos-edge`, EXISTING_EDGE);
-    const r = runScript('deploy/lightsail/smoke-docker.sh', ['cocos:ci'], f.bin, { CALLS: f.log, TMPDIR: f.dir, ...env });
+    const r = runScript('deploy/lightsail/smoke-docker.sh', ['cocos:ci'], f.bin, { CALLS: f.log, TMPDIR: f.dir, STATE: state, SCRIPT, ...env });
     const calls = f.calls();
     const net = (name: string) => (existsSync(`${f.log}.net.${name}`) ? readFileSync(`${f.log}.net.${name}`, 'utf8') : null);
     const compose = existsSync(`${f.log}.compose`) ? readFileSync(`${f.log}.compose`, 'utf8') : null;
-    return { ...r, calls, net, compose,
+    const lines = (name: string) => (existsSync(join(state, name)) ? readFileSync(join(state, name), 'utf8').split('\n').filter(Boolean) : []);
+    return { ...r, calls, net, compose, state, interleave: lines('interleave'), stolen: lines('stolen'),
+      shared: readdirSync(state).filter((e) => /^(registry|project|net\.|tag\.)/.test(e)).sort(),
       smokes: calls.filter((c) => c.includes('/smoke/smoke.mjs')).map((c) => c.split(' ').slice(-2).join(' ')),
       removed: calls.filter((c) => /^docker (rm|rmi|network rm|volume rm) |^docker compose .* down/.test(c)),
-      leftovers: readdirSync(f.dir).filter((e) => e !== 'bin' && !e.startsWith('calls')) };
+      leftovers: readdirSync(f.dir).filter((e) => !['bin', 'state'].includes(e) && !e.startsWith('calls')) };
   };
 
   it('sin la imagen local no empieza', () => {
@@ -1720,7 +1752,7 @@ describe('smoke-docker.sh', () => {
     const r = run(existing);
     expect(r.status).toBe(2);
     expect(r.stderr).toContain(`NO SE CORRE: ya hay ${what}`);
-    expect(r.removed).toEqual(['docker rm -f -v reg123']);
+    expect(r.removed).toEqual(['docker rm -f -v reg-a']);
     expect(r.calls.some((c) => /network create|^docker compose|^docker tag/.test(c))).toBe(false);
     expect(r.leftovers).toEqual([]);
   });
@@ -1728,11 +1760,47 @@ describe('smoke-docker.sh', () => {
   // CR-5: no hay nada antes de empezar, pero otra ejecución toma el registro primero (create falla
   // por el nombre). La rechazada no sigue y no borra el registro, la red ni la imagen de la otra.
   it('si otra ejecución tiene el registro, no sigue ni borra nada', () => {
-    const r = run({ REGISTRY_TAKEN: '1' });
+    const r = run({}, (state) => {
+      writeFileSync(join(state, 'registry'), 'reg-otra\n');
+      writeFileSync(join(state, 'tag.localhost_5056_cocos-smoke_smoke-otra'), 'otra\n');
+    });
     expect(r.status).toBe(2);
     expect(r.stderr).toContain('NO SE CORRE: ya hay un contenedor cocos-smoke-registry');
     expect(r.removed).toEqual([]);
     expect(r.calls.some((c) => /^docker (start|tag|push|network)|^docker compose/.test(c))).toBe(false);
+    // Lo de la otra sigue ahí.
+    expect(readFileSync(join(r.state, 'registry'), 'utf8')).toBe('reg-otra\n');
+    expect(r.shared).toEqual(['registry', 'tag.localhost_5056_cocos-smoke_smoke-otra']);
+    expect(r.leftovers).toEqual([]);
+  });
+
+  // CR-6 y CR-7: otra ejecución que arranca en cualquier punto de la limpieza de la primera no
+  // consigue el candado mientras quede algo compartido por borrar (el proyecto, la etiqueta, la
+  // red); el candado se suelta al final, y recién ahí la otra corre entera. Ninguna borra la
+  // etiqueta de la otra: cada ejecución etiqueta con un nombre propio.
+  it('una ejecución que arranca durante la limpieza de otra no consigue el candado hasta el final', () => {
+    const r = run({ INTERLEAVE: '1' });
+    expect(r.stderr).not.toContain('FALLIDO');
+    expect(r.status).toBe(0);
+    expect(r.interleave).toEqual([
+      expect.stringMatching(/^antes compose -p cocos-smoke-staging .* down -v: otra salió con 2, candado: no$/),
+      expect.stringMatching(/^antes rmi localhost:5056\/cocos-smoke:smoke-tmp\.\S+: otra salió con 2, candado: no$/),
+      'antes network rm net-a: otra salió con 2, candado: no',
+      'antes rm -f -v reg-a: otra salió con 2, candado: no',
+      'después rm -f -v reg-a: otra salió con 0, candado: sí',
+    ]);
+    expect(r.stolen).toEqual([]);
+    expect(r.shared).toEqual([]);
+    expect(r.leftovers).toEqual([]);
+  });
+
+  it('si no puede borrar algo compartido, deja el registro como candado y sale con 1', () => {
+    const r = run({ FAIL: '^network rm ' });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('no se pudo borrar la red cocos-smoke-edge; queda el registro cocos-smoke-registry como candado');
+    expect(r.removed.some((c) => c.startsWith('docker rm -f -v'))).toBe(false);
+    expect(r.shared).toEqual(['net.cocos-smoke-edge', 'registry']);
+    // La ejecución siguiente se rechaza sin tocar nada.
     expect(r.leftovers).toEqual([]);
   });
 
@@ -1747,9 +1815,10 @@ describe('smoke-docker.sh', () => {
     const compose = r.calls.filter((c) => c.startsWith('docker compose'));
     expect(compose.every((c) => c.includes(' -p cocos-smoke-staging '))).toBe(true);
     expect(r.calls.some((c) => / -p cocos-(staging|production) | -p cocos /.test(c))).toBe(false);
-    // Borra lo suyo, por id, y nada más.
+    // Borra lo suyo, por id o por su nombre único, y el candado al final.
     expect(r.removed).toEqual([expect.stringMatching(/^docker compose -p cocos-smoke-staging .* down -v$/),
-      'docker rm -f -v reg123', 'docker network rm net456', 'docker rmi localhost:5056/cocos-smoke:smoke']);
+      expect.stringMatching(/^docker rmi localhost:5056\/cocos-smoke:smoke-tmp\.\S+$/), 'docker network rm net-a', 'docker rm -f -v reg-a']);
+    expect(r.shared).toEqual([]);
     expect(r.leftovers).toEqual([]);
   });
 

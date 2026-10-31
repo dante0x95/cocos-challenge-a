@@ -11,6 +11,7 @@ Nada.
 ### Operación y deploy
 
 - **Volver a correr un deploy cortado ya no borra el último release sano** ([#65](https://github.com/dante0x95/cocos-challenge-a/pull/65)): el cambio de versión queda sin confirmar hasta que pasan `/health` y el smoke (`switch.pending`, que borra el paso nuevo `Confirmar el cambio`). Si el job se corta antes (cancelado, runner perdido, timeout), el re-run toma como lo que atiende el último release confirmado, no pisa su respaldo y, si vuelve a fallar en cualquier paso, vuelve a él. Antes, el re-run tomaba el release roto como el anterior y la vuelta atrás no tenía a dónde volver. No borrar `switch.pending` a mano ([operación](docs/api/operacion.md#operación)).
+- **Re-ejecutar el deploy de un release viejo ya no reinstala sus funciones sobre la base de uno más nuevo** ([#61](https://github.com/dante0x95/cocos-challenge-a/pull/61)): después de una vuelta atrás, la base queda con las migraciones del release que falló; si se vuelve a correr el deploy del anterior, su bootstrap frena antes de tocar nada y nombra las migraciones que no conoce, y la versión que atiende sigue igual. Un release cuyas funciones escriben algo que el anterior no sabe leer trae una migración ([D-24](docs/decisiones.md#d-24)).
 
 ### Documentación
 

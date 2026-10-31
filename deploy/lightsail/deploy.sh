@@ -16,6 +16,9 @@
 #                        argumento) y GITHUB_ACTOR.
 #   deploy.sh bootstrap  Manda deploy/lightsail/compose.yml del commit y corre el bootstrap con la
 #                        imagen nueva, antes de cambiar de versión.
+#   deploy.sh smoke-user Solo en staging, después del bootstrap: manda deploy/lightsail/smoke-user.sql
+#                        y deja userid= (el usuario del smoke, en cero) en $GITHUB_OUTPUT, para
+#                        deploy/smoke.mjs write (issue #51). En production frena sin tocar nada.
 #   deploy.sh switch     Cambia la API a la imagen nueva.
 #   deploy.sh rollback   Vuelve a PREVIOUS_IMAGE / PREVIOUS_RELEASE (lo que anotó current) y
 #                        exige que /health (URL) lo atienda otra vez. En el primer deploy
@@ -85,6 +88,16 @@ bootstrap() {
   remote bootstrap "${ENVIRONMENT:?}" "${IMAGE_REF:?}" "${SHA:?}" < deploy/lightsail/compose.yml
 }
 
+smoke_user() {
+  [ "${ENVIRONMENT:?}" = staging ] || fail "el usuario del smoke existe solo en staging, no en $ENVIRONMENT"
+  local out userid
+  out="$(remote smoke-user "$ENVIRONMENT" < deploy/lightsail/smoke-user.sql)" || fail "no se pudo preparar el usuario del smoke en $ENVIRONMENT"
+  userid="$(sed -n 's/^userid=//p' <<<"$out")"
+  [[ "$userid" =~ ^[1-9][0-9]*$ ]] || fail "respuesta inesperada del servidor sobre el usuario del smoke: $(tr '\n' ' ' <<<"$out")"
+  echo "== usuario del smoke en $ENVIRONMENT: $userid"
+  if [ -n "${GITHUB_OUTPUT:-}" ]; then echo "userid=$userid" >> "$GITHUB_OUTPUT"; fi
+}
+
 switch() {
   remote switch "${ENVIRONMENT:?}" "${IMAGE_REF:?}" "${SHA:?}" </dev/null
 }
@@ -108,7 +121,8 @@ case "${1:-}" in
   current)   current ;;
   pull)      pull ;;
   bootstrap) bootstrap ;;
+  smoke-user) smoke_user ;;
   switch)    switch ;;
   rollback)  rollback ;;
-  *)         echo "uso: $0 access|current|pull|bootstrap|switch|rollback" >&2; exit 2 ;;
+  *)         echo "uso: $0 access|current|pull|bootstrap|smoke-user|switch|rollback" >&2; exit 2 ;;
 esac

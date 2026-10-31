@@ -1,5 +1,6 @@
-# Tipos, tests unitarios, tests contra Postgres 18 real, compatibilidad con el release anterior y
-# build de la imagen (docs/testing.md).
+# Tipos, tests unitarios, tests contra Postgres 18 real, compatibilidad con el release anterior,
+# build de la imagen y el smoke funcional contra esa imagen levantada como en el deploy
+# (docs/testing.md).
 # El check "ci" es obligatorio para mergear en main, y tiene que estar en verde antes de
 # correr la revisión de Codex (CONTRIBUTING.md).
 name: ci
@@ -54,4 +55,8 @@ jobs:
         run: scripts/previous-release.sh
       # Desde el checkout limpio: la imagen se arma solo con lo versionado.
       - name: Imagen de Docker
-        run: docker build .
+        run: docker build -t cocos:ci .
+      # Esa imagen con Docker Compose, Postgres 18 y el bootstrap, por los pasos de remote.sh, y
+      # deploy/smoke.mjs contra ella: el flujo de órdenes dos veces y las lecturas (D-29, issue #51).
+      - name: Smoke funcional contra la imagen
+        run: deploy/lightsail/smoke-docker.sh cocos:ci

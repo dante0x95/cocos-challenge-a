@@ -17,6 +17,10 @@ Nada.
 
 - **Un usuario con la historia fuera de los tipos recibe `409`, no `500` para siempre** ([#62](https://github.com/dante0x95/cocos-challenge-a/pull/62)): si su historia heredada no entra en los tipos del cálculo (`overflow` en el log del bootstrap), `GET /portfolio` y `POST /orders` responden `409 HISTORY_OVERFLOW` y dicen que no se reintenta; consultar y cancelar sus órdenes sigue andando. El executor lo informa en `overflow_users` y deja sus LIMIT pendientes, en vez de anotarlas en `errors` en cada corrida. La reserva del portfolio ya no responde `500` cuando las pendientes heredadas suman más que un `bigint`.
 
+### Proceso
+
+- **`ready-gate` vuelve a devolver a borrador un PR marcado ready sin `codex/review`** ([#59](https://github.com/dante0x95/cocos-challenge-a/pull/59)): el `GITHUB_TOKEN` del workflow no podía convertirlo ("Resource not accessible by integration") porque `convertPullRequestToDraft` exige `contents: write` además de `pull-requests: write`. El merge ya lo frenaba el ruleset; ahora también vuelve a valer la regla de CONTRIBUTING.
+
 ### Documentación
 
 - **Los comandos del servidor funcionan en zsh** ([#55](https://github.com/dante0x95/cocos-challenge-a/pull/55)): `docs/api/operacion.md` y el README llaman `LIGHTSAIL_HOST` a la IP del servidor y la escriben `${LIGHTSAIL_HOST}`: en zsh, `HOST` ya existe (el nombre de la Mac), así que si no se definía los comandos apuntaban en silencio a la propia máquina, y `$HOST:c` se comía los dos puntos del `scp`, que copiaba en local. La clave de Lightsail queda como marcador. v0.2.0 queda con su fecha.

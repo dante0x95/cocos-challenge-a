@@ -43,8 +43,8 @@
 #       switch.pending). Desde acá, el próximo current lo anuncia y el próximo switch lo guarda.
 #   remote.sh rollback <entorno> <ref anterior> <sha anterior>
 #       Vuelve al último release confirmado (el que anunció current), sin correr el bootstrap
-#       anterior, y borra switch.pending. Sin release anterior (el primer deploy), saca la API y
-#       deja el entorno sin release.
+#       anterior, y borra switch.pending recién con esa API sana. Sin release anterior (el primer
+#       deploy), saca la API y deja el entorno sin release.
 #   remote.sh smoke-user staging                    (stdin: deploy/lightsail/smoke-user.sql)
 #       Solo en staging, después del bootstrap: deja listo el usuario del smoke (issue #51) y
 #       escribe userid=<id>. Corre el SQL con psql como superusuario dentro del contenedor de la
@@ -176,7 +176,10 @@ switch() {
     fi
   fi
   # Después del respaldo completo: si el cambio se corta antes, release.env sigue siendo lo sano.
-  cp -p "$DIR/release.next.env" "$DIR/switch.pending"
+  # Por un temporal y un rename: una copia cortada (o sin espacio) no deja una marca a medias, y
+  # una marca anterior sigue entera hasta que la nueva está completa.
+  cp -p "$DIR/release.next.env" "$DIR/switch.pending.tmp"
+  mv -f "$DIR/switch.pending.tmp" "$DIR/switch.pending"
   mv "$DIR/compose.next.yml" "$DIR/compose.yml"
   mv "$DIR/release.next.env" "$DIR/release.env"
   rm -f "$DIR/bootstrap.ok"
@@ -217,15 +220,17 @@ rollback() {
   fi
   valid_ref "$ref"
   valid_sha "$sha"
+  local pending=""
   if [ -e "$DIR/switch.pending" ]; then
     # Un cambio sin confirmar: lo último sano es lo guardado como anterior, aunque release.env
     # sea otra cosa (o ya sea el mismo commit, si un re-run lo volvió a cambiar). Se copia y no
-    # se mueve: si esto se corta, la marca sigue y la próxima vuelta atrás encuentra lo mismo.
+    # se mueve, y la marca se borra recién con la API anterior sana: si esto se corta o la API no
+    # levanta, la marca sigue y la próxima vuelta atrás (o el re-run) encuentra lo mismo.
     same_release "$DIR/release.previous.env" "$ref" "$sha" \
       || fail "hay un cambio sin confirmar en $ENV y lo guardado como anterior no es $ref ($sha): no se toca nada"
+    pending=1
     cp -p "$DIR/compose.previous.yml" "$DIR/compose.yml"
     cp -p "$DIR/release.previous.env" "$DIR/release.env"
-    rm -f "$DIR/switch.pending"
     echo "== $ENV: vuelve a $ref ($sha), sin el cambio sin confirmar"
   elif same_release "$DIR/release.env" "$ref" "$sha"; then
     # El deploy falló antes de cambiar: lo que atiende ya es lo anterior.
@@ -238,6 +243,7 @@ rollback() {
     fail "ni lo que atiende ni lo guardado como anterior es $ref ($sha): no se toca nada"
   fi
   compose "" up -d --wait --wait-timeout "$WAIT" --no-deps api || fail "la API de $sha no quedó sana"
+  [ -z "$pending" ] || rm -f "$DIR/switch.pending"
 }
 
 smoke_user() {

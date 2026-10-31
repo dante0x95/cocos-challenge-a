@@ -2,7 +2,7 @@
   "info": {
     "_postman_id": "6f1d3a52-49c0-4c6e-9a49-2d6c0c0c0049",
     "name": "Cocos challenge — API",
-    "description": "Los endpoints de la API con verificaciones (docs/api/). Se corre entera con el Collection Runner o con newman, contra uno de los environments de postman/:\n\n- local: docker compose up (http://localhost:3000, token de desarrollo).\n- staging: el token interno va vacío; se completa como valor actual (no se exporta) o el folder Interno se saltea.\n- production: solo lecturas (allowWrites = \"false\"): Órdenes e Interno se saltean.\n\nLas claves de idempotencia salen de runId, nuevo en cada corrida: repetirla no choca con la anterior.",
+    "description": "Los endpoints de la API con verificaciones (docs/api/). Se corre entera con el Collection Runner o con newman, contra uno de los environments de postman/:\n\n- local: docker compose up (http://localhost:3000, token de desarrollo).\n- staging: el token interno va vacío; se completa como valor actual (no se exporta) o el folder Interno se saltea.\n- production: solo lecturas (allowWrites = \"false\"): Órdenes e Interno se saltean.\n\nLas claves de idempotencia llevan runId: un request reenviado (por ejemplo, después de un timeout) usa la misma clave y recupera el resultado. Una corrida completa de Órdenes vacía runId al terminar, así que la siguiente usa claves nuevas; después de una corrida cortada, vaciar runId para empezar otra intención.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "event": [
@@ -11,7 +11,8 @@
       "script": {
         "type": "text/javascript",
         "exec": [
-          "// runId: prefijo de las claves de idempotencia. Lo renueva el depósito al principio de Órdenes.",
+          "// runId: prefijo de las claves de idempotencia. Se crea si está vacío y no cambia hasta que una",
+          "// corrida completa de Órdenes lo vacía: reenviar un request sin respuesta usa la misma clave.",
           "if (!pm.collectionVariables.get('runId')) pm.collectionVariables.set('runId', pm.variables.replaceIn('{{$guid}}'));"
         ]
       }
@@ -20,6 +21,10 @@
   "variable": [
     {
       "key": "runId",
+      "value": ""
+    },
+    {
+      "key": "limitOrder",
       "value": ""
     },
     {
@@ -401,16 +406,6 @@
           "name": "Depositar pesos (CASH_IN)",
           "event": [
             {
-              "listen": "prerequest",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "    // Corrida nueva: claves de idempotencia nuevas.",
-                  "    pm.collectionVariables.set('runId', pm.variables.replaceIn('{{$guid}}'));"
-                ]
-              }
-            },
-            {
               "listen": "test",
               "script": {
                 "type": "text/javascript",
@@ -760,7 +755,13 @@
                   "  pm.expect(pm.response.headers.get('Location')).to.eql(`/orders/${o.id}?userid=${o.userid}`);",
                   "  pm.expect(pm.response.headers.get('Idempotent-Replay')).to.eql('false');",
                   "});",
-                  "    pm.collectionVariables.set('limitId', pm.response.json().id);"
+                  "    // La LIMIT queda atada a esta corrida y a este environment (ver limitGuard).",
+                  "    pm.collectionVariables.set('limitOrder', JSON.stringify({",
+                  "      id: pm.response.json().id,",
+                  "      baseUrl: pm.environment.get('baseUrl'),",
+                  "      userid: pm.environment.get('userid'),",
+                  "      runId: pm.collectionVariables.get('runId'),",
+                  "    }));"
                 ]
               }
             }
@@ -801,6 +802,26 @@
           "name": "Consultar la LIMIT",
           "event": [
             {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "let limit = null;",
+                  "try { limit = JSON.parse(pm.collectionVariables.get('limitOrder') || 'null'); } catch (e) { limit = null; }",
+                  "const ours = !!limit && typeof limit.id === 'string' && limit.id !== ''",
+                  "  && limit.baseUrl === pm.environment.get('baseUrl')",
+                  "  && limit.userid === pm.environment.get('userid')",
+                  "  && limit.runId === pm.collectionVariables.get('runId');",
+                  "if (ours) {",
+                  "  pm.variables.set('limitId', limit.id);",
+                  "} else {",
+                  "  console.log('salteado: no hay una LIMIT de esta corrida en este environment');",
+                  "  pm.execution.skipRequest();",
+                  "}"
+                ]
+              }
+            },
+            {
               "listen": "test",
               "script": {
                 "type": "text/javascript",
@@ -808,7 +829,7 @@
                   "    pm.test('200 NEW', () => {",
                   "      pm.response.to.have.status(200);",
                   "      const o = pm.response.json();",
-                  "      pm.expect(o.id).to.eql(pm.collectionVariables.get('limitId'));",
+                  "      pm.expect(o.id).to.eql(pm.variables.get('limitId'));",
                   "      pm.expect(o.status).to.eql('NEW');",
                   "      pm.expect(o.cancel_reason).to.eql(null);",
                   "    });"
@@ -840,6 +861,26 @@
         {
           "name": "Consultar la LIMIT como otro usuario → 404",
           "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "let limit = null;",
+                  "try { limit = JSON.parse(pm.collectionVariables.get('limitOrder') || 'null'); } catch (e) { limit = null; }",
+                  "const ours = !!limit && typeof limit.id === 'string' && limit.id !== ''",
+                  "  && limit.baseUrl === pm.environment.get('baseUrl')",
+                  "  && limit.userid === pm.environment.get('userid')",
+                  "  && limit.runId === pm.collectionVariables.get('runId');",
+                  "if (ours) {",
+                  "  pm.variables.set('limitId', limit.id);",
+                  "} else {",
+                  "  console.log('salteado: no hay una LIMIT de esta corrida en este environment');",
+                  "  pm.execution.skipRequest();",
+                  "}"
+                ]
+              }
+            },
             {
               "listen": "test",
               "script": {
@@ -880,6 +921,26 @@
           "name": "Consultar sin userid → 400",
           "event": [
             {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "let limit = null;",
+                  "try { limit = JSON.parse(pm.collectionVariables.get('limitOrder') || 'null'); } catch (e) { limit = null; }",
+                  "const ours = !!limit && typeof limit.id === 'string' && limit.id !== ''",
+                  "  && limit.baseUrl === pm.environment.get('baseUrl')",
+                  "  && limit.userid === pm.environment.get('userid')",
+                  "  && limit.runId === pm.collectionVariables.get('runId');",
+                  "if (ours) {",
+                  "  pm.variables.set('limitId', limit.id);",
+                  "} else {",
+                  "  console.log('salteado: no hay una LIMIT de esta corrida en este environment');",
+                  "  pm.execution.skipRequest();",
+                  "}"
+                ]
+              }
+            },
+            {
               "listen": "test",
               "script": {
                 "type": "text/javascript",
@@ -913,6 +974,26 @@
           "name": "Cancelar la LIMIT",
           "event": [
             {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "let limit = null;",
+                  "try { limit = JSON.parse(pm.collectionVariables.get('limitOrder') || 'null'); } catch (e) { limit = null; }",
+                  "const ours = !!limit && typeof limit.id === 'string' && limit.id !== ''",
+                  "  && limit.baseUrl === pm.environment.get('baseUrl')",
+                  "  && limit.userid === pm.environment.get('userid')",
+                  "  && limit.runId === pm.collectionVariables.get('runId');",
+                  "if (ours) {",
+                  "  pm.variables.set('limitId', limit.id);",
+                  "} else {",
+                  "  console.log('salteado: no hay una LIMIT de esta corrida en este environment');",
+                  "  pm.execution.skipRequest();",
+                  "}"
+                ]
+              }
+            },
+            {
               "listen": "test",
               "script": {
                 "type": "text/javascript",
@@ -920,7 +1001,7 @@
                   "    pm.test('200 CANCELLED por el usuario', () => {",
                   "      pm.response.to.have.status(200);",
                   "      const o = pm.response.json();",
-                  "      pm.expect(o.id).to.eql(pm.collectionVariables.get('limitId'));",
+                  "      pm.expect(o.id).to.eql(pm.variables.get('limitId'));",
                   "      pm.expect(o.status).to.eql('CANCELLED');",
                   "      pm.expect(o.cancel_reason).to.eql('USER');",
                   "    });"
@@ -961,6 +1042,26 @@
         {
           "name": "Cancelar otra vez → 409",
           "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "let limit = null;",
+                  "try { limit = JSON.parse(pm.collectionVariables.get('limitOrder') || 'null'); } catch (e) { limit = null; }",
+                  "const ours = !!limit && typeof limit.id === 'string' && limit.id !== ''",
+                  "  && limit.baseUrl === pm.environment.get('baseUrl')",
+                  "  && limit.userid === pm.environment.get('userid')",
+                  "  && limit.runId === pm.collectionVariables.get('runId');",
+                  "if (ours) {",
+                  "  pm.variables.set('limitId', limit.id);",
+                  "} else {",
+                  "  console.log('salteado: no hay una LIMIT de esta corrida en este environment');",
+                  "  pm.execution.skipRequest();",
+                  "}"
+                ]
+              }
+            },
             {
               "listen": "test",
               "script": {
@@ -1294,7 +1395,10 @@
                   "      const p = pm.response.json();",
                   "      pm.expect(p.positions.some((x) => x.ticker === 'PAMP')).to.eql(true);",
                   "      pm.expect(p.cash.reservado).to.be.a('string');",
-                  "    });"
+                  "    });",
+                  "    // Fin de una corrida completa: la próxima usa claves nuevas y su propia LIMIT.",
+                  "    pm.collectionVariables.set('runId', '');",
+                  "    pm.collectionVariables.set('limitOrder', '');"
                 ]
               }
             }

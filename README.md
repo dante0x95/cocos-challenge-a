@@ -25,19 +25,23 @@ Para operar a mano está [`rest-client/cocos.http`](rest-client/cocos.http) (ext
 
 ```bash
 pnpm install
-cp .env.example .env            # ajustar las URLs
+cp .env.example .env
 export $(grep -v '^#' .env | xargs)
 pnpm db:bootstrap
 pnpm dev
 ```
 
+Después de copiar `.env`, ajustar sus URLs antes de exportarlo.
+
 ## Pruebas
 
 ```bash
-docker compose up -d db         # basta con la base
+docker compose up -d db
 pnpm install
 pnpm test
 ```
+
+Basta con la base (`db`).
 
 Crean su propia base `cocos_test` con el mismo bootstrap que producción. Las suites: unitarias, el test funcional de órdenes por HTTP, invariantes de la base, concurrencia con dos conexiones reales, propiedad contra un oráculo independiente y bootstrap. Qué demuestra cada una: [`docs/testing.md`](docs/testing.md).
 
@@ -59,13 +63,13 @@ La primera vez, antes del primer release: una clave de deploy dedicada, [`deploy
 
 ```bash
 for env in staging production; do
-  gh secret set LIGHTSAIL_HOST --env "$env" --body "$HOST"
+  gh secret set LIGHTSAIL_HOST --env "$env" --body "${LIGHTSAIL_HOST}"
   gh secret set LIGHTSAIL_SSH_KEY --env "$env" < ~/.ssh/cocos-deploy
   gh secret set LIGHTSAIL_KNOWN_HOSTS --env "$env" --body "$KNOWN"
 done
 ```
 
-Los comandos completos, en orden (de dónde salen `HOST` y `KNOWN`, cómo correr `setup.sh` y cómo restringir los environments a tags `v*`): [`docs/api/operacion.md`](docs/api/operacion.md#la-primera-vez). Los ensayos (un release que llega a producción y un re-run del deploy de un release viejo que se frena) se corren a mano con `deploy/drills.sh`; no corren en el CI.
+Los comandos completos, en orden (de dónde salen `LIGHTSAIL_HOST` y `KNOWN`, cómo correr `setup.sh` y cómo restringir los environments a tags `v*`): [`docs/api/operacion.md`](docs/api/operacion.md#la-primera-vez). Los ensayos (un release que llega a producción y un re-run del deploy de un release viejo que se frena) se corren a mano con `deploy/drills.sh`; no corren en el CI.
 
 ## Cómo está hecho, en cinco ideas
 

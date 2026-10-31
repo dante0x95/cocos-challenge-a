@@ -4,8 +4,13 @@
 # deploy desde el commit del release (deploy/lightsail/remote.sh); no se usa a mano.
 #
 # Las variables vienen de release.env, que escribe el deploy: IMAGE (la imagen de GHCR por
-# digest), RELEASE (el SHA que GET /health devuelve) y ENVIRONMENT. Los secretos, de los .env
-# que genera deploy/lightsail/setup.sh (600, del usuario deploy): db.env, migrate.env y api.env.
+# digest), RELEASE (el SHA que GET /health devuelve) y ENVIRONMENT. Los secretos no son variables
+# de entorno (`docker inspect` las muestra): son archivos de secrets/, uno por secreto, que genera
+# deploy/lightsail/setup.sh, y compose monta en /run/secrets/<nombre>, de solo lectura, solo en el
+# servicio que lo usa; el servicio recibe la ruta en <VAR>_FILE (issue #36). Sin Swarm, el montaje
+# conserva el dueño y el modo del archivo del servidor: setup.sh deja postgres_password en 600 (lo
+# lee el entrypoint de Postgres como root, antes de bajar a postgres) y los demás en 640 con el
+# grupo 1000, el de node, el usuario con el que corren api y migrate.
 #
 #   db       Postgres 18 con un volumen. Sin puertos publicados y en una red interna, sin salida.
 #   migrate  el bootstrap (D-24). Solo con `docker compose run`, antes de cambiar de versión: es
@@ -26,7 +31,8 @@ services:
     environment:
       POSTGRES_USER: postgres
       POSTGRES_DB: cocos
-    env_file: [db.env]
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets: [postgres_password]
     volumes:
       - pgdata:/var/lib/postgresql
     healthcheck:
@@ -41,7 +47,10 @@ services:
     pull_policy: never
     profiles: [migrate]
     command: ["node", "dist/db/bootstrap.js"]
-    env_file: [migrate.env]
+    environment:
+      DATABASE_ADMIN_URL_FILE: /run/secrets/database_admin_url
+      API_DB_PASSWORD_FILE: /run/secrets/api_db_password
+    secrets: [database_admin_url, api_db_password]
     logging: *logging
 
   api:
@@ -55,7 +64,9 @@ services:
       # Limpieza de idempotencia dentro del proceso de la API (docs/api/operacion.md).
       JOBS_ENABLED: "true"
       RELEASE: ${RELEASE:?falta RELEASE}
-    env_file: [api.env]
+      DATABASE_URL_FILE: /run/secrets/database_url
+      INTERNAL_TOKEN_FILE: /run/secrets/internal_token
+    secrets: [database_url, internal_token]
     networks:
       default: {}
       edge:
@@ -75,3 +86,16 @@ networks:
 
 volumes:
   pgdata:
+
+# Relativos al directorio del entorno (/opt/cocos/<entorno>/secrets).
+secrets:
+  postgres_password:
+    file: secrets/postgres_password
+  database_admin_url:
+    file: secrets/database_admin_url
+  api_db_password:
+    file: secrets/api_db_password
+  database_url:
+    file: secrets/database_url
+  internal_token:
+    file: secrets/internal_token

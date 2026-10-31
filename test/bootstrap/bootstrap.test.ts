@@ -131,6 +131,56 @@ describe('bootstrap', () => {
     expect(after.migrations.map((m) => m.name)).not.toContain('999_cli_falla.sql');
   }, 60_000);
 
+  // D-29, issue #36: en el servidor, el contenedor migrate recibe los dos secretos como archivos
+  // (/run/secrets) y la CLI lee DATABASE_ADMIN_URL_FILE y API_DB_PASSWORD_FILE, sin el salto final.
+  // Con la variable y su _FILE juntas, o un archivo que no se lee, falla antes de conectarse.
+  it('la CLI lee DATABASE_ADMIN_URL_FILE y API_DB_PASSWORD_FILE; con la variable y su _FILE juntas, o sin el archivo, no toca la base', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cocos-secrets-'));
+    const admin = join(dir, 'database_admin_url');
+    const apiPassword = join(dir, 'api_db_password');
+    writeFileSync(admin, `${url}\n`, { mode: 0o600 });
+    writeFileSync(apiPassword, 'clave-del-archivo\n', { mode: 0o600 });
+    const { DATABASE_ADMIN_URL: _a, API_DB_PASSWORD: _p, ...base } = process.env;
+    const cli = (env: Record<string, string>) => spawnSync(resolve('node_modules/.bin/tsx'), [resolve('src/db/bootstrap.ts')], {
+      encoding: 'utf8', env: { ...base, ...env },
+    });
+    const canConnect = async (password: string) => {
+      const c = new pg.Client({ connectionString: dbUrl(DB, { name: 'api', password }) });
+      try { await c.connect(); return true; } catch { return false; } finally { await c.end().catch(() => undefined); }
+    };
+    try {
+      const ok = cli({ DATABASE_ADMIN_URL_FILE: admin, API_DB_PASSWORD_FILE: apiPassword });
+      expect(ok.stderr).toBe('');
+      expect(ok.status).toBe(0);
+      expect(ok.stdout).toContain('bootstrap OK');
+      // La contraseña del rol api es la del archivo, sin el salto de línea.
+      expect(await canConnect('clave-del-archivo')).toBe(true);
+      expect(await canConnect('clave-del-archivo\n')).toBe(false);
+      expect(await stateOf(url)).toEqual(first);
+
+      for (const [env, message] of [
+        [{ DATABASE_ADMIN_URL: url, DATABASE_ADMIN_URL_FILE: admin, API_DB_PASSWORD_FILE: apiPassword }, 'DATABASE_ADMIN_URL y DATABASE_ADMIN_URL_FILE están las dos'],
+        [{ DATABASE_ADMIN_URL_FILE: admin, API_DB_PASSWORD: 'otra', API_DB_PASSWORD_FILE: apiPassword }, 'API_DB_PASSWORD y API_DB_PASSWORD_FILE están las dos'],
+        [{ DATABASE_ADMIN_URL_FILE: join(dir, 'no-existe'), API_DB_PASSWORD_FILE: apiPassword }, `DATABASE_ADMIN_URL_FILE: no se pudo leer '${join(dir, 'no-existe')}' (ENOENT)`],
+        [{ DATABASE_ADMIN_URL_FILE: admin, API_DB_PASSWORD_FILE: join(dir, 'no-existe') }, `API_DB_PASSWORD_FILE: no se pudo leer '${join(dir, 'no-existe')}' (ENOENT)`],
+      ] as [Record<string, string>, string][]) {
+        const bad = cli(env);
+        expect(bad.status, message).toBe(2);
+        expect(bad.stderr).toContain(`bootstrap FALLÓ: ${message}`);
+        expect(bad.stdout).toBe('');
+        // No llegó a conectarse: la contraseña sigue siendo la del archivo.
+        expect(await canConnect('clave-del-archivo')).toBe(true);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+      // El rol api es del servidor, no de esta base: vuelve a la contraseña que usan las demás pruebas.
+      const c = new pg.Client({ connectionString: url });
+      await c.connect();
+      await c.query("ALTER ROLE api WITH PASSWORD 'api'");
+      await c.end();
+    }
+  }, 60_000);
+
   // D-24, D-29: la verificación de la historia corre después de migrar. Si rechaza el bootstrap,
   // la migración, sus efectos, las funciones nuevas y la contraseña nueva del rol api tampoco
   // quedan: un release rechazado no deja la base cambiada debajo de la versión anterior.

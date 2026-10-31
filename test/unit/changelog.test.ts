@@ -97,15 +97,20 @@ describe('CHANGELOG.md', () => {
   // Controles: el chequeo ve lo que tiene que ver.
   it('control: sin la línea de #43 o sin el paso de setup.sh, falla', () => {
     const withoutPr = CHANGELOG.split('\n').filter((l) => !l.includes('/pull/43)')).join('\n');
-    expect(problems(withoutPr, ['v0.1.0'], [43])).toEqual(expect.arrayContaining(['v0.2.0 no nombra #43', 'v0.2.0 no nombra #43, que entró después del último tag']));
+    expect(problems(withoutPr, tags, [])).toContain('v0.2.0 no nombra #43');
     const withoutSetup = CHANGELOG.replace(/^1\. \*\*Volver a correr `setup\.sh`.*$/m, '1. Nada.');
     expect(withoutSetup).not.toBe(CHANGELOG);
     expect(problems(withoutSetup, ['v0.1.0'], [])).toContain('v0.2.0: "Antes de publicar" no pide volver a correr setup.sh según "Secretos como archivos"');
   });
 
   it('control: un PR nuevo sin nombrar, o una versión publicada sin fecha, falla', () => {
-    expect(problems(CHANGELOG, ['v0.1.0'], [999])).toEqual(['v0.2.0 no nombra #999, que entró después del último tag']);
-    expect(problems(CHANGELOG, ['v0.2.0', 'v0.1.0'], [])).toEqual(['v0.2.0 ya se publicó: su sección necesita la fecha']);
-    expect(problems(CHANGELOG, ['v0.3.0', 'v0.1.0'], [])).toContain('falta la sección de v0.3.0, que ya se publicó');
+    // Sobre el CHANGELOG de hoy, sea cual sea la versión "sin publicar": así el control no se rompe
+    // cada vez que una versión se publica y se abre la siguiente.
+    const next = sections(CHANGELOG).find((s) => s.label === 'sin publicar')!.version;
+    expect(problems(CHANGELOG, tags, [999])).toEqual([`${next} no nombra #999, que entró después del último tag`]);
+    const published = sections(CHANGELOG).find((s) => s.label !== 'sin publicar')!;
+    const undated = CHANGELOG.replace(`## ${published.version} — ${published.label}`, `## ${published.version} — sin publicar`);
+    expect(problems(undated, tags, [])).toContain(`${published.version} ya se publicó: su sección necesita la fecha`);
+    expect(problems(CHANGELOG, ['v9.9.9', ...tags], [])).toContain('falta la sección de v9.9.9, que ya se publicó');
   });
 });

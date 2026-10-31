@@ -2,6 +2,16 @@
 
 Una sección por versión publicada (un GitHub Release `vX.Y.Z`, que despliega en staging y después en producción: [D-29](docs/decisiones.md#d-29)). Cada línea dice qué cambia para quien usa la API o la opera, con el PR que lo trae. **Antes de publicar** lista los pasos de operación que la versión exige: se hacen antes de `gh release create` ([`docs/api/operacion.md`](docs/api/operacion.md#desplegar-en-lightsail)). Este archivo es la fuente de las notas; `--generate-notes` solo agrega la lista de PRs.
 
+## v0.2.1 — sin publicar
+
+### Antes de publicar
+
+Nada.
+
+### Documentación
+
+- **Los comandos del servidor funcionan en zsh** ([#55](https://github.com/dante0x95/cocos-challenge-a/pull/55)): `docs/api/operacion.md` usa `${HOST}` en los `scp` (en zsh, `$HOST:c` se come los dos puntos y `scp` copia en local) y la clave de Lightsail como marcador. v0.2.0 queda con su fecha.
+
 ## v0.2.0 — 2026-10-31
 
 ### Antes de publicar

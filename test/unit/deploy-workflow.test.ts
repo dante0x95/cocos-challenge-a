@@ -1646,10 +1646,14 @@ describe('smoke-user', () => {
   });
 });
 
-// deploy/lightsail/smoke-docker.sh, el smoke del CI, con un `docker` simulado: usa su propio
-// proyecto (cocos-smoke-staging, nunca cocos-staging ni cocos) y no empieza encima de algo suyo;
-// corre bootstrap, smoke-user y switch de remote.sh y el smoke dos veces con el mismo usuario; si
-// la API no queda sana (una imagen que no arranca), no corre el smoke, falla y limpia.
+// deploy/lightsail/smoke-docker.sh, el smoke del CI, con un `docker` simulado que lleva qué
+// alias hay en cada red ($CALLS.net.<red>: "alias proyecto" por línea; la API entra a las redes de
+// su compose al hacer `up` y sale con `down`). Usa su propio proyecto (cocos-smoke-staging, nunca
+// cocos-staging ni cocos) y su propia red externa (cocos-smoke-edge): el api-staging de un staging
+// local en cocos-edge sigue siendo el único destino de ese nombre. El registro es el candado: si
+// otra ejecución lo tiene, no sigue ni borra nada ajeno. Corre bootstrap, smoke-user y switch de
+// remote.sh y el smoke dos veces con el mismo usuario; si la API no queda sana (una imagen que no
+// arranca), no corre el smoke, falla y limpia solo lo suyo.
 describe('smoke-docker.sh', () => {
   const dirs: string[] = [];
   afterEach(() => {
@@ -1657,26 +1661,48 @@ describe('smoke-docker.sh', () => {
   });
   const DIGEST = `localhost:5056/cocos-smoke@sha256:${'d'.repeat(64)}`;
   const HEAD = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: ROOT, encoding: 'utf8' }).stdout.trim();
+  /** Un staging local ya levantado: su API, con el alias api-staging, en cocos-edge, que usa su Caddy. */
+  const EXISTING_EDGE = 'api-staging cocos-staging\ncaddy cocos-proxy\n';
   const run = (env: Record<string, string> = {}) => {
     const f = fakeBin({
       docker: [
         'echo "docker $*" >> "$CALLS"',
         '[ -n "${FAIL:-}" ] && [[ "$*" =~ $FAIL ]] && { echo "docker simulado: falla: $*" >&2; exit 1; }',
+        'file=""; project=""; a=("$@")',
+        'for ((i = 0; i < ${#a[@]}; i++)); do case "${a[i]}" in -f) file="${a[i+1]}" ;; -p) project="${a[i+1]}" ;; esac; done',
         'case "$*" in',
         '  *"ps -aq --filter label=com.docker.compose.project=cocos-smoke-staging") printf "%s" "${PS_PROJECT:-}" ;;',
         '  *"volume ls -q --filter name=cocos-smoke-staging_") printf "%s" "${VOL_NAME:-}" ;;',
+        '  *"network ls -q --filter name=^cocos-smoke-edge$") printf "%s" "${NET_EDGE:-}" ;;',
+        // El nombre de un contenedor es único: si otra ejecución ya lo tomó, create falla.
+        '  "create --name cocos-smoke-registry "*) [ -z "${REGISTRY_TAKEN:-}" ] || { echo "Conflict: name in use" >&2; exit 1; }; echo reg123 ;;',
+        '  "run -d --name cocos-smoke-registry "*) [ -z "${REGISTRY_TAKEN:-}" ] || { echo "Conflict: name in use" >&2; exit 1; } ;;',
+        '  "network create "*) touch "$CALLS.net.$3"; echo net456 ;;',
         `  "image inspect --format"*) echo '${DIGEST}' ;;`,
         '  *" exec -T db psql "*) cat >/dev/null; n=$(grep -c " exec -T db psql " "$CALLS"); if [ "$n" = 1 ]; then echo 31; else echo "${SECOND_ID:-31}"; fi ;;',
+        // La API entra a la red interna de su proyecto y a la red edge de su compose, con su alias
+        // (API_EXTRA_NET: además a otra, como si el compose la nombrara).
+        '  "compose "*" up "*" api") cp "$file" "$CALLS.compose"; edge="$(sed -n "s/^    name: //p" "$file")"',
+        '    for n in "$edge" ${API_EXTRA_NET:-}; do sed -i.bak "/ $project\\$/d" "$CALLS.net.$n" 2>/dev/null || true; echo "api-staging $project" >> "$CALLS.net.$n"; done',
+        '    printf "%s\\n" "${project}_default" "$edge" ${API_EXTRA_NET:-} > "$CALLS.api-nets" ;;',
+        '  "compose "*" ps -q api") echo api789 ;;',
+        '  "inspect -f "*" api789") cat "$CALLS.api-nets" ;;',
+        '  "compose "*" down -v") for n in "$CALLS".net.*; do case "$n" in *.bak) ;; *) sed -i.bak "/ $project\\$/d" "$n" ;; esac; done ;;',
         '  *"/smoke/smoke.mjs "*) [ -z "${SMOKE_FAIL:-}" ] || exit 1 ;;',
         'esac',
         'exit 0',
       ].join('\n'),
     });
     dirs.push(f.dir);
+    writeFileSync(`${f.log}.net.cocos-edge`, EXISTING_EDGE);
     const r = runScript('deploy/lightsail/smoke-docker.sh', ['cocos:ci'], f.bin, { CALLS: f.log, TMPDIR: f.dir, ...env });
     const calls = f.calls();
-    return { ...r, calls, smokes: calls.filter((c) => c.includes('/smoke/smoke.mjs')).map((c) => c.split(' ').slice(-2).join(' ')),
-      leftovers: readdirSync(f.dir).filter((e) => !['bin', 'calls'].includes(e)) };
+    const net = (name: string) => (existsSync(`${f.log}.net.${name}`) ? readFileSync(`${f.log}.net.${name}`, 'utf8') : null);
+    const compose = existsSync(`${f.log}.compose`) ? readFileSync(`${f.log}.compose`, 'utf8') : null;
+    return { ...r, calls, net, compose,
+      smokes: calls.filter((c) => c.includes('/smoke/smoke.mjs')).map((c) => c.split(' ').slice(-2).join(' ')),
+      removed: calls.filter((c) => /^docker (rm|rmi|network rm|volume rm) |^docker compose .* down/.test(c)),
+      leftovers: readdirSync(f.dir).filter((e) => e !== 'bin' && !e.startsWith('calls')) };
   };
 
   it('sin la imagen local no empieza', () => {
@@ -1689,11 +1715,24 @@ describe('smoke-docker.sh', () => {
   it.each([
     ['contenedores del proyecto', { PS_PROJECT: 'abc' }, 'contenedores del proyecto cocos-smoke-staging'],
     ['un volumen del proyecto', { VOL_NAME: 'cocos-smoke-staging_pgdata' }, 'volúmenes cocos-smoke-staging_*'],
-  ])('con %s no empieza: no crea ni borra nada', (_name, existing, what) => {
+    ['la red del ensayo', { NET_EDGE: 'fed' }, 'la red cocos-smoke-edge'],
+  ])('con %s no sigue: borra solo el registro que acaba de crear', (_name, existing, what) => {
     const r = run(existing);
     expect(r.status).toBe(2);
     expect(r.stderr).toContain(`NO SE CORRE: ya hay ${what}`);
-    expect(r.calls.some((c) => /run -d|down -v|^docker compose|rm -f/.test(c))).toBe(false);
+    expect(r.removed).toEqual(['docker rm -f -v reg123']);
+    expect(r.calls.some((c) => /network create|^docker compose|^docker tag/.test(c))).toBe(false);
+    expect(r.leftovers).toEqual([]);
+  });
+
+  // CR-5: no hay nada antes de empezar, pero otra ejecución toma el registro primero (create falla
+  // por el nombre). La rechazada no sigue y no borra el registro, la red ni la imagen de la otra.
+  it('si otra ejecución tiene el registro, no sigue ni borra nada', () => {
+    const r = run({ REGISTRY_TAKEN: '1' });
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain('NO SE CORRE: ya hay un contenedor cocos-smoke-registry');
+    expect(r.removed).toEqual([]);
+    expect(r.calls.some((c) => /^docker (start|tag|push|network)|^docker compose/.test(c))).toBe(false);
     expect(r.leftovers).toEqual([]);
   });
 
@@ -1708,9 +1747,33 @@ describe('smoke-docker.sh', () => {
     const compose = r.calls.filter((c) => c.startsWith('docker compose'));
     expect(compose.every((c) => c.includes(' -p cocos-smoke-staging '))).toBe(true);
     expect(r.calls.some((c) => / -p cocos-(staging|production) | -p cocos /.test(c))).toBe(false);
-    expect(compose.at(-1)).toMatch(/ down -v$/);
-    expect(r.calls).toContain('docker rm -f -v cocos-smoke-registry');
+    // Borra lo suyo, por id, y nada más.
+    expect(r.removed).toEqual([expect.stringMatching(/^docker compose -p cocos-smoke-staging .* down -v$/),
+      'docker rm -f -v reg123', 'docker network rm net456', 'docker rmi localhost:5056/cocos-smoke:smoke']);
     expect(r.leftovers).toEqual([]);
+  });
+
+  // CR-1 y CR-4: el aislamiento no es solo el nombre del proyecto. Con un staging local en
+  // cocos-edge (su API con el alias api-staging, lo que resuelve su Caddy), el ensayo no entra a
+  // esa red: su compose usa cocos-smoke-edge, y api-staging en cocos-edge sigue siendo uno solo.
+  it('no entra a cocos-edge: el api-staging existente sigue siendo el único destino de ese nombre', () => {
+    const r = run();
+    expect(r.status).toBe(0);
+    expect(r.net('cocos-edge')).toBe(EXISTING_EDGE);
+    expect(r.calls.filter((c) => c.includes('cocos-edge') && !c.includes('cocos-smoke-edge'))).toEqual([]);
+    expect(r.calls).toContain('docker network create cocos-smoke-edge');
+    // El compose instalado es el del commit con la red edge renombrada, y nada más.
+    expect(r.compose).toBe(read('deploy/lightsail/compose.yml').replace(/^ {4}name: cocos-edge$/m, '    name: cocos-smoke-edge'));
+    expect(r.compose!.split('\n').filter((l) => !l.trim().startsWith('#') && l.includes('cocos-edge'))).toEqual([]);
+  });
+
+  it('frena si la API del ensayo quedó también en otra red, sin correr el smoke', () => {
+    const r = run({ API_EXTRA_NET: 'cocos-edge' });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('la API del ensayo está en las redes');
+    expect(r.smokes).toEqual([]);
+    // Al limpiar, down -v la saca: el api-staging existente vuelve a ser el único.
+    expect(r.net('cocos-edge')).toBe(EXISTING_EDGE);
   });
 
   it('una imagen cuya API no arranca frena en el switch, sin correr el smoke, y limpia', () => {

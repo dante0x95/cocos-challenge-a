@@ -17,13 +17,21 @@
 # El smoke corre dentro de la imagen (tiene Node), en la red interna del proyecto, contra
 # http://api:3000: no publica ningún puerto salvo el del registro.
 #
-# Usa su propio proyecto (SMOKE_PROJECT, por defecto cocos-smoke: el proyecto es
-# cocos-smoke-staging) y su registro (cocos-smoke-registry, en SMOKE_REGISTRY_PORT, 5056), así
-# que no choca con docker compose (cocos), con el ensayo (drill-docker.sh) ni con un cocos-staging
-# local. Si ya hay algo de ese proyecto o ese registro, no empieza ni crea nada: al terminar borra
-# todo lo que creó (contenedores, volumen, red, registro e imágenes), y `down -v` borraría un
-# volumen que no fuera suyo. La red cocos-edge de compose.yml es externa: si no existe la crea y
-# al final la borra.
+# Aislado de lo que haya en este Docker (un docker compose, un staging local con su Caddy, otro
+# ensayo), por sus nombres y no por suerte:
+#   - Su propio proyecto (SMOKE_PROJECT, por defecto cocos-smoke: el proyecto es
+#     cocos-smoke-staging), su registro (cocos-smoke-registry, en SMOKE_REGISTRY_PORT, 5056) y su
+#     red externa (cocos-smoke-edge). El compose.yml que instala es el del commit con una sola
+#     diferencia: la red edge se llama cocos-smoke-edge y no cocos-edge, así que el alias
+#     api-staging de la API del ensayo existe solo ahí y un Caddy en cocos-edge nunca lo resuelve
+#     a ella. Después del switch exige que la API esté solo en sus dos redes.
+#   - El registro es el candado: lo crea con `docker create --name`, que falla si otro ya tiene
+#     ese nombre (otra ejecución que pasó las mismas comprobaciones al mismo tiempo); en ese caso
+#     no sigue ni toca nada. Con el registro suyo, comprueba que no haya nada del proyecto ni la
+#     red, y si hay, no sigue.
+#   - Al terminar borra solo lo que esta ejecución creó, por su id: el registro (con su volumen),
+#     la red, la etiqueta de la imagen y, si llegó al bootstrap, el proyecto (`down -v`, desde su
+#     directorio temporal).
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
@@ -45,14 +53,12 @@ absent() {   # descripción, comando de docker que lista; vacío = no hay
   out="$("$@")" || refuse "no se pudo consultar Docker ($*)"
   [ -z "$out" ] || refuse "ya hay $what en este Docker ($(tr '\n' ' ' <<<"$out")): no se corre encima"
 }
+EDGE="$PREFIX-edge"
 docker image inspect "$LOCAL_IMAGE" >/dev/null 2>&1 || refuse "no está la imagen $LOCAL_IMAGE (docker build -t $LOCAL_IMAGE .)"
-absent "contenedores del proyecto $PROJECT" docker ps -aq --filter "label=com.docker.compose.project=$PROJECT"
-absent "volúmenes del proyecto $PROJECT" docker volume ls -q --filter "label=com.docker.compose.project=$PROJECT"
-absent "volúmenes ${PROJECT}_*" docker volume ls -q --filter "name=${PROJECT}_"
-absent "un contenedor $REGISTRY" docker ps -aq --filter "name=^$REGISTRY\$"
 
+# Lo que esta ejecución creó, por id: la limpieza no toca nada más.
 ROOT_DIR="$(mktemp -d)"
-NETWORK_CREATED=""
+REGISTRY_ID=""; EDGE_ID=""; TAGGED=""
 export COCOS_ROOT="$ROOT_DIR" COCOS_PROJECT="$PREFIX" COMPOSE_WAIT_TIMEOUT="${COMPOSE_WAIT_TIMEOUT:-90}"
 DIR="$ROOT_DIR/staging"
 
@@ -62,16 +68,25 @@ cleanup() {
     [ -f "$f" ] || { f="$DIR/compose.next.yml"; e="$DIR/release.next.env"; }
     docker compose -p "$PROJECT" --project-directory "$DIR" -f "$f" --env-file "$e" down -v >/dev/null 2>&1 || true
   fi
-  docker rm -f -v "$REGISTRY" >/dev/null 2>&1 || true   # -v: el volumen anónimo del registro
-  [ -z "$NETWORK_CREATED" ] || docker network rm cocos-edge >/dev/null 2>&1 || true
-  docker rmi "$REG:smoke" >/dev/null 2>&1 || true
+  [ -z "$REGISTRY_ID" ] || docker rm -f -v "$REGISTRY_ID" >/dev/null 2>&1 || true   # -v: su volumen anónimo
+  [ -z "$EDGE_ID" ] || docker network rm "$EDGE_ID" >/dev/null 2>&1 || true
+  [ -z "$TAGGED" ] || docker rmi "$REG:smoke" >/dev/null 2>&1 || true
   rm -rf "$ROOT_DIR"
 }
 trap cleanup EXIT
 
+# El candado: si otro tiene el registro, no sigue (y no lo borra: no es suyo).
+REGISTRY_ID="$(docker create --name "$REGISTRY" -p "127.0.0.1:$PORT:5000" registry:2 2>/dev/null)" \
+  || { REGISTRY_ID=""; refuse "ya hay un contenedor $REGISTRY (otra ejecución del smoke?): no se corre encima"; }
+absent "contenedores del proyecto $PROJECT" docker ps -aq --filter "label=com.docker.compose.project=$PROJECT"
+absent "volúmenes del proyecto $PROJECT" docker volume ls -q --filter "label=com.docker.compose.project=$PROJECT"
+absent "volúmenes ${PROJECT}_*" docker volume ls -q --filter "name=${PROJECT}_"
+absent "la red $EDGE" docker network ls -q --filter "name=^$EDGE\$"
+
 echo "== imagen $LOCAL_IMAGE por digest"
-docker run -d --name "$REGISTRY" -p "127.0.0.1:$PORT:5000" registry:2 >/dev/null
+docker start "$REGISTRY_ID" >/dev/null || fail "no arrancó el registro local (¿el puerto $PORT está ocupado?)"
 docker tag "$LOCAL_IMAGE" "$REG:smoke"
+TAGGED=1
 for ((i = 1; ; i++)); do
   docker push -q "$REG:smoke" >/dev/null 2>&1 && break
   [ "$i" -lt 20 ] || fail "no se pudo publicar la imagen en el registro local"
@@ -97,7 +112,12 @@ pg="$(openssl rand -hex 24)"; api="$(openssl rand -hex 24)"
   node_secrets=(database_admin_url api_db_password database_url internal_token)
   if chgrp 1000 "${node_secrets[@]}" 2>/dev/null; then chmod 640 "${node_secrets[@]}"; else chmod 644 "${node_secrets[@]}"; fi
 )
-docker network inspect cocos-edge >/dev/null 2>&1 || { docker network create cocos-edge >/dev/null; NETWORK_CREATED=1; }
+EDGE_ID="$(docker network create "$EDGE")" || { EDGE_ID=""; fail "no se pudo crear la red $EDGE"; }
+
+# El compose.yml del commit, con la red edge del ensayo en lugar de cocos-edge: el único cambio.
+sed "s/^    name: cocos-edge\$/    name: $EDGE/" deploy/lightsail/compose.yml > "$ROOT_DIR/compose.yml"
+[ "$(grep -c "^    name: $EDGE\$" "$ROOT_DIR/compose.yml")" = 1 ] && ! grep -v '^ *#' "$ROOT_DIR/compose.yml" | grep -q cocos-edge \
+  || fail "deploy/lightsail/compose.yml ya no declara la red edge como 'name: cocos-edge': actualizar este script"
 
 # Lo que en el deploy hace deploy.sh smoke-user: el SQL por stdin y userid= en la salida.
 smoke_user() {
@@ -113,14 +133,20 @@ smoke() {   # modo, userid
 }
 
 echo "== 1. bootstrap, usuario del smoke y switch con $REF"
-remote bootstrap staging "$REF" "$SHA" < deploy/lightsail/compose.yml || fail "1: el bootstrap falló"
+remote bootstrap staging "$REF" "$SHA" < "$ROOT_DIR/compose.yml" || fail "1: el bootstrap falló"
 USERID="$(smoke_user 1)"
 remote switch staging "$REF" "$SHA" || fail "1: el switch falló: la API de la imagen no arrancó o no quedó sana"
+# La API del ensayo, solo en sus redes: ni cocos-edge ni ninguna otra, así que su alias api-staging
+# no le llega a un Caddy de este Docker.
+api_id="$(docker compose -p "$PROJECT" --project-directory "$DIR" -f "$DIR/compose.yml" --env-file "$DIR/release.env" ps -q api)"
+nets="$(docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{println $k}}{{end}}' "$api_id" | sed '/^$/d' | sort | paste -sd, -)"
+[ "$nets" = "$(printf '%s\n' "${PROJECT}_default" "$EDGE" | sort | paste -sd, -)" ] \
+  || fail "1: la API del ensayo está en las redes '$nets', no solo en ${PROJECT}_default y $EDGE"
 
 echo "== 2. smoke write, dos veces con el mismo usuario ($USERID)"
 smoke write "$USERID" || fail "2: la primera corrida de write falló"
 # Otro deploy del mismo release: bootstrap otra vez (smoke-user lo exige) y el usuario sigue siendo el mismo.
-remote bootstrap staging "$REF" "$SHA" < deploy/lightsail/compose.yml || fail "2: el segundo bootstrap falló"
+remote bootstrap staging "$REF" "$SHA" < "$ROOT_DIR/compose.yml" || fail "2: el segundo bootstrap falló"
 again="$(smoke_user 2)"
 [ "$again" = "$USERID" ] || fail "2: después de una corrida completa, smoke-user dio otro usuario ($again y no $USERID)"
 remote switch staging "$REF" "$SHA" || fail "2: el segundo switch falló"

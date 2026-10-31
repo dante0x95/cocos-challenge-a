@@ -7,6 +7,8 @@
 // Necesita DATABASE_ADMIN_URL (un rol que pueda crear roles, esquemas y cambiar dueños), o
 // DATABASE_ADMIN_URL_FILE con la ruta de un archivo que la tenga (en el servidor, D-29).
 //
+// 0. Si public.schema_migrations tiene una migración que no está en db/migrations, la base es de
+//    un release posterior (issue #58): aborta antes de tocar nada, sin reinstalar sus funciones.
 // 1. db/migrations/*.sql, en orden y UNA sola vez (public.schema_migrations guarda nombre y
 //    checksum; un archivo ya aplicado que cambió aborta el bootstrap). 000_seed.sql es el
 //    database.sql del challenge: si la base ya tiene las tablas del challenge (datos propios),
@@ -193,6 +195,16 @@ async function run(db: pg.Pool, dbDir: string, opts: BootstrapOptions, log: (m: 
     const done = new Map((await client.query<{ name: string; checksum: string }>(
       'SELECT name, checksum FROM public.schema_migrations')).rows.map((r) => [r.name, r.checksum]));
 
+    // Una base que migró un release posterior (issue #58): tiene migraciones que este no trae, y
+    // sus funciones son las de ese release. Las de este no conocen lo que significan esos datos, y
+    // el paso 2 las reinstalaría sin error. Frena antes de tomar la barrera: no toca nada.
+    const migDir = join(dbDir, 'migrations');
+    const migrations = sqlFiles(migDir);
+    const unknown = [...done.keys()].filter((name) => !migrations.includes(name)).sort();
+    if (unknown.length) {
+      throw new Error(`la base tiene migraciones de un release posterior: ${unknown.join(', ')}; este release no puede reinstalar sus funciones`);
+    }
+
     // 1 a 5, en una transacción. La barrera exclusiva espera a las escrituras en curso y frena
     // las nuevas hasta el COMMIT. Una que ya entró a la función anterior y quedó esperando la
     // barrera sigue con ese cuerpo: si choca con el esquema nuevo, la migración tiene que hacerla
@@ -202,8 +214,7 @@ async function run(db: pg.Pool, dbDir: string, opts: BootstrapOptions, log: (m: 
       await client.query("SELECT pg_advisory_xact_lock(hashtext('deploy'))");
 
       // 1. Migraciones
-      const migDir = join(dbDir, 'migrations');
-      for (const f of sqlFiles(migDir)) {
+      for (const f of migrations) {
         const sql = readFileSync(join(migDir, f), 'utf8');
         const sum = sha256(sql);
         if (done.has(f)) {

@@ -1049,3 +1049,75 @@ describe('deploy con la API atendiendo (issue #13)', () => {
     expect(await cashInOrders()).toBe(before + keys.length);
   }, 60_000);
 });
+
+// Issue #58: después de una vuelta atrás la base queda con las migraciones y las funciones del
+// release que falló (B), y atiende A (D-29). Si se vuelve a correr el deploy de A, su bootstrap
+// no puede reinstalar sus funciones: no conocen lo que B escribe. Frena antes de tocar nada.
+describe('bootstrap de un release anterior sobre una base que migró uno posterior (issue #58)', () => {
+  const OLD_HEALTH = 'SELECT (SELECT count(*) FROM app.users)';
+  /** B: una migración que A no trae y una función de A con otro cuerpo, con la misma firma. */
+  const releaseB = (dir: string) => {
+    cpSync(resolve('db'), dir, { recursive: true });
+    writeFileSync(join(dir, 'migrations', '999_b_commission.sql'), 'ALTER TABLE app.users ADD COLUMN b_commission int NOT NULL DEFAULT 0;\n');
+    const f040 = readFileSync(join(dir, 'functions', '040_ops.sql'), 'utf8');
+    if (!f040.includes(OLD_HEALTH)) throw new Error('040_ops.sql cambió app.health(): actualizar la prueba');
+    writeFileSync(join(dir, 'functions', '040_ops.sql'), f040.replace(OLD_HEALTH, 'SELECT (SELECT count(*) FROM app.users WHERE b_commission = 0)'));
+  };
+  /** Todo lo que el bootstrap de A podría cambiar: funciones de app con su cuerpo y permisos, migraciones y contratos. */
+  const snapshot = async (db: pg.Client) => ({
+    functions: (await db.query(`SELECT p.oid::regprocedure::text AS fn, pg_get_functiondef(p.oid) AS def, p.proacl::text AS acl
+      FROM pg_proc p WHERE p.pronamespace = 'app'::regnamespace AND p.prokind = 'f' ORDER BY p.oid::regprocedure::text COLLATE "C"`)).rows,
+    migrations: (await db.query('SELECT name, checksum, mode FROM public.schema_migrations ORDER BY name')).rows,
+    contracts: (await db.query('SELECT release, signature FROM public.api_contract ORDER BY release, signature COLLATE "C"')).rows,
+  });
+
+  it('A frena con 1 antes de la barrera, sin cambiar ninguna función, migración, contrato ni la contraseña de api; B y uno posterior siguen pasando', async () => {
+    await recreateDatabase(DB);
+    await bootstrap({ adminUrl: url, apiPassword: 'api', release: 'a', servingRelease: '', ...quiet });
+    const dirB = mkdtempSync(join(tmpdir(), 'cocos-db-58-b-'));
+    const db = new pg.Client({ connectionString: url });
+    await db.connect();
+    // Una escritura de A en curso: tiene la barrera de despliegue en modo compartido. Un bootstrap
+    // que llegara a tomarla en modo exclusivo quedaría esperando y la prueba vencería.
+    const writer = new pg.Client({ connectionString: url });
+    await writer.connect();
+    try {
+      releaseB(dirB);
+      const b = await bootstrap({ adminUrl: url, apiPassword: 'api', dbDir: dirB, release: 'b', servingRelease: 'a', ...quiet });
+      expect(b.applied).toEqual(['999_b_commission.sql']);
+      // Vuelta atrás: atiende A, con las funciones y el esquema de B (no corre ningún bootstrap).
+      const before = await snapshot(db);
+      expect(before.functions.find((f) => f.fn === 'app.health()')!.def).toContain('b_commission = 0');
+
+      const message = 'la base tiene migraciones de un release posterior: 999_b_commission.sql; este release no puede reinstalar sus funciones';
+      await expect(bootstrap({ adminUrl: url, apiPassword: 'otra-clave', release: 'a', servingRelease: 'a', ...quiet }))
+        .rejects.toThrow(message);
+      // La CLI, que es lo que corre el deploy: sale con 1 y el deploy se corta antes del cambio de
+      // versión. Con una escritura en curso, porque frena antes de tomar la barrera.
+      await writer.query('BEGIN');
+      await writer.query("SELECT pg_advisory_xact_lock_shared(hashtext('deploy'))");
+      const cli = spawnSync(resolve('node_modules/.bin/tsx'), [resolve('src/db/bootstrap.ts')], {
+        encoding: 'utf8',
+        env: { ...process.env, DATABASE_ADMIN_URL: url, API_DB_PASSWORD: 'otra-clave', DB_DIR: resolve('db'), RELEASE: 'a', SERVING_RELEASE: 'a' },
+      });
+      expect(cli.status, cli.stderr).toBe(1);
+      expect(cli.stderr).toContain(`bootstrap FALLÓ: ${message}`);
+      await writer.query('COMMIT');
+
+      expect(await snapshot(db)).toEqual(before);
+      const api = new pg.Client({ connectionString: dbUrl(DB, { name: 'api', password: 'api' }) });
+      await api.connect();
+      await api.end();
+
+      // El propio B, vuelto a correr, y un release posterior que trae las migraciones de B, pasan.
+      expect((await bootstrap({ adminUrl: url, apiPassword: 'api', dbDir: dirB, release: 'b', servingRelease: 'a', ...quiet })).applied).toEqual([]);
+      writeFileSync(join(dirB, 'migrations', '999_c_next.sql'), 'SELECT 1;\n');
+      expect((await bootstrap({ adminUrl: url, apiPassword: 'api', dbDir: dirB, release: 'c', servingRelease: 'a', ...quiet })).applied).toEqual(['999_c_next.sql']);
+    } finally {
+      await writer.query('ROLLBACK').catch(() => undefined);
+      await writer.end();
+      await db.end();
+      rmSync(dirB, { recursive: true, force: true });
+    }
+  }, 60_000);
+});

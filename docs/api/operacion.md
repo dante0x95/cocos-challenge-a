@@ -83,7 +83,7 @@ for env in staging production; do gh secret list --env "$env"; done             
 ```bash
 git switch main && git pull
 HOST=18.227.203.30
-LIGHTSAIL_KEY=~/.ssh/LightsailDefaultKey-us-east-2.pem
+LIGHTSAIL_KEY=~/.ssh/TU-CLAVE-DE-LIGHTSAIL.pem   # la clave por defecto que se descarga de la consola de Lightsail, con el nombre con que se guardó
 ```
 
 La primera conexión SSH a la instancia (el primer comando del paso 2) pide aceptar la huella de la clave del host. Antes de aceptarla, compararla con la que muestra `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` en la consola de Lightsail (Connect using SSH, en el navegador): el paso 3 lee la clave del host por esa conexión y la fija en Actions, así que una huella aceptada sin verificar es la que el deploy va a dar por buena.
@@ -98,7 +98,7 @@ ssh-keygen -t ed25519 -N '' -C cocos-deploy -f ~/.ssh/cocos-deploy
 
 ```bash
 ssh -i "$LIGHTSAIL_KEY" "ubuntu@$HOST" rm -rf cocos-setup
-scp -i "$LIGHTSAIL_KEY" -r deploy/lightsail "ubuntu@$HOST:cocos-setup"
+scp -i "$LIGHTSAIL_KEY" -r deploy/lightsail "ubuntu@${HOST}:cocos-setup"
 ssh -i "$LIGHTSAIL_KEY" "ubuntu@$HOST" "sudo bash cocos-setup/setup.sh '$(cat ~/.ssh/cocos-deploy.pub)'"
 ssh -i ~/.ssh/cocos-deploy -o IdentitiesOnly=yes "deploy@$HOST" docker ps
 ```
@@ -149,7 +149,7 @@ Un servidor preparado antes de #36 tiene los secretos en `db.env`, `migrate.env`
 
 ```bash
 ssh -i "$LIGHTSAIL_KEY" "ubuntu@$HOST" rm -rf cocos-setup
-scp -i "$LIGHTSAIL_KEY" -r deploy/lightsail "ubuntu@$HOST:cocos-setup"
+scp -i "$LIGHTSAIL_KEY" -r deploy/lightsail "ubuntu@${HOST}:cocos-setup"
 ssh -i "$LIGHTSAIL_KEY" "ubuntu@$HOST" "sudo bash cocos-setup/setup.sh '$(cat ~/.ssh/cocos-deploy.pub)'"
 ssh -i ~/.ssh/cocos-deploy -o IdentitiesOnly=yes "deploy@$HOST" 'ls -ln /opt/cocos/staging/secrets /opt/cocos/production/secrets'
 ```

@@ -2,7 +2,7 @@
 
 Una sección por versión publicada (un GitHub Release `vX.Y.Z`, que despliega en staging y después en producción: [D-29](docs/decisiones.md#d-29)). Cada línea dice qué cambia para quien usa la API o la opera, con el PR que lo trae. **Antes de publicar** lista los pasos de operación que la versión exige: se hacen antes de `gh release create` ([`docs/api/operacion.md`](docs/api/operacion.md#desplegar-en-lightsail)). Este archivo es la fuente de las notas; `--generate-notes` solo agrega la lista de PRs.
 
-## v0.2.0 — sin publicar
+## v0.2.0 — 2026-10-31
 
 ### Antes de publicar
 

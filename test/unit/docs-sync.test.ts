@@ -13,6 +13,23 @@ const suiteOf = (file: string) => file.replace(/\.test\.ts$/, '').replace(/\/([^
 const fileOf = (suite: string) =>
   [`${suite}.test.ts`, `${suite}/${suite.split('/').at(-1)}.test.ts`].find((file) => existsSync(resolve(ROOT, file)));
 
+/**
+ * Lo que está mal en las filas de la tabla: una suite que no existe, una que no usa el nombre de
+ * `suiteOf` (`test/bootstrap/bootstrap` en vez de `test/bootstrap`) y una cuyo archivo ya tiene
+ * fila, aunque se llame distinto: se compara el archivo, no el texto de la celda.
+ */
+const rowProblems = (table: string[]) => {
+  const seen = new Set<string>();
+  return table.flatMap((suite) => {
+    const file = fileOf(suite);
+    if (!file) return [`${suite}: no existe`];
+    const problems = suiteOf(file) === suite ? [] : [`${suite}: el nombre de la suite es ${suiteOf(file)}`];
+    if (seen.has(file)) problems.push(`${suite}: repite ${file}`);
+    seen.add(file);
+    return problems;
+  });
+};
+
 /** Cada `test/**\/*.test.ts` del árbol de trabajo, también los que todavía no se versionaron. */
 const testFiles = () =>
   readdirSync(resolve(ROOT, 'test'), { recursive: true, encoding: 'utf8' })
@@ -29,8 +46,10 @@ const suitesInTable = (markdown: string) => {
   return [...section.matchAll(/^\| `(test\/[^`]+)` \|/gm)].map((match) => match[1]);
 };
 
-// El otro repositorio es `cocos-challenge`, sin `-a`. La barra final deja afuera a este.
-const OTHER_REPO = /github\.com\/dante0x95\/cocos-challenge\//g;
+// El otro repositorio es `cocos-challenge`, sin `-a`: con ruta, en la raíz, con `.git`, con ancla o
+// al final de una oración. El nombre termina donde no sigue un carácter que podría continuarlo
+// (`-a`, `_b`, `.github.io` son otros repositorios). GitHub no distingue mayúsculas.
+const OTHER_REPO = /github\.com\/dante0x95\/cocos-challenge(?:\.git)?(?![\w-]|\.[\w-])/gi;
 
 const linksToOtherRepo = (text: string) =>
   [...text.matchAll(OTHER_REPO)].map((match) => text.slice(0, match.index).split('\n').length);
@@ -75,9 +94,19 @@ describe('tabla de suites de docs/testing.md', () => {
     expect(files.map(suiteOf).filter((suite) => !table.includes(suite))).toEqual([]);
   });
 
-  it('cada fila nombra una suite que existe, una sola vez', () => {
-    expect(table.filter((suite) => !fileOf(suite))).toEqual([]);
-    expect(table.filter((suite, index) => table.indexOf(suite) !== index)).toEqual([]);
+  it('control: dos filas para el mismo archivo, con nombres distintos, se detectan', () => {
+    expect(rowProblems(['test/unit/money', 'test/bootstrap', 'test/bootstrap/bootstrap'])).toEqual([
+      'test/bootstrap/bootstrap: el nombre de la suite es test/bootstrap',
+      'test/bootstrap/bootstrap: repite test/bootstrap/bootstrap.test.ts',
+    ]);
+    expect(rowProblems(['test/unit/money', 'test/unit/money'])).toEqual([
+      'test/unit/money: repite test/unit/money.test.ts',
+    ]);
+    expect(rowProblems(['test/unit/no-existe'])).toEqual(['test/unit/no-existe: no existe']);
+  });
+
+  it('cada fila nombra una suite que existe, con su nombre, una sola vez', () => {
+    expect(rowProblems(table)).toEqual([]);
   });
 });
 
@@ -91,7 +120,20 @@ describe('links al otro repositorio', () => {
     expect(linksToOtherRepo(text)).toEqual([1]);
   });
 
-  it('ningún .md versionado ni .env.example apunta a github.com/dante0x95/cocos-challenge/', () => {
+  it('detecta también un link a la raíz del repo sin -a, con o sin barra, y no a otro repo que empieza igual', () => {
+    const text = [
+      'El otro repo: https://github.com/dante0x95/cocos-challenge',
+      'Entre paréntesis ([variante B](https://github.com/dante0x95/cocos-challenge)).',
+      'Al final de una oración: https://github.com/dante0x95/cocos-challenge.',
+      'Con ancla: https://github.com/dante0x95/cocos-challenge#readme y con .git: https://github.com/dante0x95/cocos-challenge.git',
+      'En mayúsculas: https://GitHub.com/dante0x95/Cocos-Challenge/issues/1',
+      'Este: https://github.com/dante0x95/cocos-challenge-a y https://github.com/dante0x95/cocos-challenge-a/',
+      'Otros: https://github.com/dante0x95/cocos-challenge_b, https://github.com/dante0x95/cocos-challenge.github.io',
+    ].join('\n');
+    expect(linksToOtherRepo(text)).toEqual([1, 2, 3, 4, 4, 5]);
+  });
+
+  it('ningún .md versionado ni .env.example enlaza al repositorio dante0x95/cocos-challenge', () => {
     const files = versionedDocs();
     expect(files).toContain('docs/testing.md');
     expect(files).toContain('.env.example');

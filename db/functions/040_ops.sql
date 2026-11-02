@@ -41,6 +41,10 @@ END $$;
 --   'cash'     el cash del fold no coincide con una suma directa de importes (cálculo
 --              independiente del fold). El bootstrap aborta.
 --   'short'    una posición queda en corto (historia heredada, D-01). Se tolera y se señala.
+--   'cash negativo'  el cash del fold queda negativo: una compra o un retiro heredados sin
+--              fondos (D-01, issue #68). Se tolera y se señala, como 'short'. Es el cash final,
+--              el mismo que marca has_inconsistent_history; con cash negativo place_order rechaza
+--              las compras y los retiros hasta que un depósito lo cubra.
 --   'overflow' la historia no entra en los tipos (APP07 del fold: importe, cash o costo por
 --              encima de los tipos, D-14). Se informa en vez de abortar el bootstrap entero: ese
 --              usuario no puede operar hasta que se corrija su historia (la API le responde 409
@@ -92,6 +96,11 @@ BEGIN
       INTO sum_cash FROM app.orders o WHERE o.userid = u AND o.status = 'FILLED';
     IF fold_cash IS DISTINCT FROM sum_cash THEN
       userid := u; problem := 'cash'; detail := format('fold %s ≠ suma %s (centavos)', fold_cash, sum_cash);
+      RETURN NEXT;
+    END IF;
+    IF fold_cash < 0 THEN
+      userid := u; problem := 'cash negativo';
+      detail := format('cash %s (centavos): historia con una compra o un retiro sin fondos (se tolera y se señala, D-01)', fold_cash);
       RETURN NEXT;
     END IF;
     FOREACH detail IN ARRAY shorts LOOP

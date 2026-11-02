@@ -87,16 +87,16 @@ export async function bootstrap(opts: BootstrapOptions): Promise<BootstrapResult
 
 /**
  * Paso 4 del bootstrap: verifica la historia, dentro de su transacción. Aborta (excepción) si el
- * cash del fold no coincide con la suma directa de importes. Un corto heredado (D-01) o una
- * historia fuera de lo representable (D-14) solo se informan. Las NEW por encima del tope de
- * D-14 y después las LIMIT NEW sin respaldo se cancelan usuario por usuario, bajo su lock
+ * cash del fold no coincide con la suma directa de importes. Un corto o un cash negativo
+ * heredados (D-01) o una historia fuera de lo representable (D-14) solo se informan. Las NEW por
+ * encima del tope de D-14 y después las LIMIT NEW sin respaldo se cancelan usuario por usuario, bajo su lock
  * (app.cancel_over_cap y app.cancel_unbacked vuelven a decidir con el estado del momento), y se
  * informan con su id. Primero el tope: lo que esas reservaban no cuenta para el respaldo de las demás.
  */
 export async function verifyLedger(db: pg.Pool | pg.PoolClient, log: (m: string) => void): Promise<{ ledger: LedgerProblem[]; unbacked: string[]; overCap: string[] }> {
   const ledger = (await db.query<LedgerProblem>('SELECT userid, problem, detail FROM app.verify_ledger()')).rows;
   for (const p of ledger) log(`  historia: usuario ${p.userid} — ${p.problem}: ${p.detail}`);
-  const tolerated = new Set(['short', 'overflow', 'reserva', 'tope']);
+  const tolerated = new Set(['short', 'cash negativo', 'overflow', 'reserva', 'tope']);
   const broken = ledger.filter((p) => !tolerated.has(p.problem));
   if (broken.length) throw new Error(`verificación de la historia falló para ${broken.length} usuario(s)`);
   const overCap: string[] = [];

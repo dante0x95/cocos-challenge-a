@@ -71,7 +71,7 @@ Usuario 1 de los datos del challenge:
 | `cash.reservado` | ARS, 2 dec. | Σ `size × límite` de las compras LIMIT pendientes (`NEW`). |
 | `cash.disponible` | ARS, 2 dec. | `neto − reservado`. Lo que el usuario puede usar. |
 | `valuation_complete` | bool | `false` si alguna posición no tiene cotización válida: su `valor` es `null` y no suma al total. |
-| `has_inconsistent_history` | bool | La historia tuvo alguna venta sin tenencia ([D-01](../decisiones.md#d-01), [D-02](../decisiones.md#d-02)). |
+| `has_inconsistent_history` | bool | La historia tuvo alguna venta sin tenencia, o `cash.neto` es negativo por una compra o un retiro heredados sin fondos ([D-01](../decisiones.md#d-01), [D-02](../decisiones.md#d-02)). |
 | `positions[]` | | Una por instrumento con tenencia distinta de 0, ordenadas por `instrumentid`. |
 | `qty` | acciones | Compras − ventas `FILLED`. Negativa solo en un corto heredado. |
 | `acciones_reservadas` | acciones | Σ `size` de las ventas LIMIT pendientes. |

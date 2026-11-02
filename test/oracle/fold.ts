@@ -9,13 +9,14 @@ export interface OracleOrder {
 }
 export interface OracleState {
   cashCents: bigint;
+  soldShort: boolean;                      // alguna venta sin tenencia en la historia (D-01)
   positions: Map<number, OraclePosition>;
   pendingBuys: Map<bigint, OracleOrder>;   // NEW BUY  → reserva cash
   pendingSells: Map<bigint, OracleOrder>;  // NEW SELL → reserva acciones
 }
 
 export function newState(): OracleState {
-  return { cashCents: 0n, positions: new Map(), pendingBuys: new Map(), pendingSells: new Map() };
+  return { cashCents: 0n, soldShort: false, positions: new Map(), pendingBuys: new Map(), pendingSells: new Map() };
 }
 
 function roundHalfEvenDiv(a: bigint, b: bigint): bigint {
@@ -41,6 +42,8 @@ export function reservedShares(s: OracleState, instrumentid: number): bigint {
   return t;
 }
 export function available(s: OracleState): bigint { return s.cashCents - reservedCash(s); }
+/** D-02: has_inconsistent_history. Una venta sin tenencia alguna vez, o el cash negativo ahora (issue #68). */
+export function inconsistentHistory(s: OracleState): boolean { return s.soldShort || s.cashCents < 0n; }
 export function position(s: OracleState, i: number): OraclePosition {
   return s.positions.get(i) ?? { qty: 0n, cost: 0n, short: false };
 }
@@ -59,7 +62,7 @@ export function fill(s: OracleState, side: 'BUY' | 'SELL', instrumentid: number,
     p.short = p.qty < 0n;
   } else {
     s.cashCents += imp;
-    if (size > p.qty) { p.qty -= size; p.cost = 0n; p.short = p.qty < 0n; }
+    if (size > p.qty) { p.qty -= size; p.cost = 0n; p.short = p.qty < 0n; s.soldShort = true; }
     else {
       p.cost = roundHalfEvenDiv(p.cost * (p.qty - size), p.qty);
       p.qty -= size;

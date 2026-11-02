@@ -12,7 +12,7 @@ export interface PortfolioRow {
   name: string | null;
   qty: string;                  // kind 0: cash en centavos; kind 1: acciones
   cost_total: string;           // micro-ARS
-  inconsistent: boolean;        // kind 0: la historia tuvo una venta sin tenencia; kind 1: en corto ahora
+  inconsistent: boolean;        // kind 0: la historia tuvo una venta sin tenencia o el cash es negativo; kind 1: en corto ahora
   reserved: string;             // kind 0: centavos reservados (BUY NEW); kind 1: acciones reservadas (SELL NEW)
   close: string | null;
   previousclose: string | null;

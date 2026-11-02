@@ -12,12 +12,23 @@ API en Node.js + Express + PostgreSQL que resuelve el [challenge de backend](htt
 
 ## Correr
 
+Hace falta Docker con Compose v2. Para correr la API sin Docker o las pruebas, también Node.js 22 o más nuevo y pnpm 10 (`corepack enable` instala la versión que fija `package.json`).
+
 ```bash
+git clone https://github.com/dante0x95/cocos-challenge-a.git
+cd cocos-challenge-a
 docker compose up --build
+```
+
+Levanta Postgres 18, corre el bootstrap (carga el `database.sql` del challenge, migra, instala funciones y verifica) y arranca la API en `:3000` cuando todo terminó bien. En otra terminal:
+
+```bash
 curl -s localhost:3000/portfolio/1
 ```
 
-Levanta Postgres 18, corre el bootstrap (carga el `database.sql` del challenge, migra, instala funciones y verifica) y arranca la API en `:3000` cuando todo terminó bien.
+El usuario 1 del challenge tiene `cash` con `neto` 753000.00, `reservado` 125500.00 y `disponible` 627500.00.
+
+Si el puerto 3000 o el 5432 ya están ocupados, `API_PORT` y `DB_PORT` eligen otros, por ejemplo `API_PORT=3001 DB_PORT=55432 docker compose up --build` (la API queda en `localhost:3001`). `docker compose down -v` borra los contenedores y la base.
 
 Para operar a mano está [`rest-client/cocos.http`](rest-client/cocos.http) (extensión REST Client de VS Code), con un request por caso: depósito, replay, compra por cantidad y por monto, LIMIT, cancelación, venta rechazada y errores. Los mismos casos, con verificaciones, están en la colección de Postman de [`postman/`](postman), con un environment para `local`, `staging` y `production`: cómo importarla y de dónde sale el token interno, en [`docs/api/operacion.md`](docs/api/operacion.md#colección-de-postman).
 
@@ -41,7 +52,7 @@ pnpm install
 pnpm test
 ```
 
-Basta con la base (`db`).
+Basta con la base (`db`). Si antes se levantó todo con `docker compose up`, apagar la API (`docker compose stop api`): una prueba cuenta las conexiones del rol `api` y contaría también las de ese contenedor. Las pruebas se conectan a `localhost:5432` como `postgres`; si la base quedó en otro puerto (`DB_PORT`), se lo indica `TEST_PG_URL`, por ejemplo `TEST_PG_URL=postgresql://postgres:postgres@localhost:55432/postgres pnpm test`.
 
 Crean su propia base `cocos_test` con el mismo bootstrap que producción. Las suites: unitarias, el test funcional de órdenes por HTTP, invariantes de la base, concurrencia con dos conexiones reales, propiedad contra un oráculo independiente y bootstrap. Qué demuestra cada una: [`docs/testing.md`](docs/testing.md).
 
@@ -112,7 +123,8 @@ db/
   migrations/     000 seed del challenge (sin modificar) · 001 esquema y roles · 002 auditoría
                   003 libro de órdenes · 005 motivo de cancelación · 006 plazo de idempotencia
                   007 motivo UNBACKED · 008 índices del executor de LIMIT
-                  009 búsqueda con pg_trgm y unaccent — corren una vez
+                  009 búsqueda con pg_trgm y unaccent · 010 y 011 verificación de la historia
+                  (tope por orden, cash negativo heredado) — corren una vez
   functions/      010 base · 020 balance · 030 órdenes · 040 operación · 090 privilegios — repetibles
 src/
   db/             pool (una sentencia por escritura) · bootstrap (migraciones, funciones, verificación)
@@ -122,7 +134,7 @@ src/
   http/           errores (SQLSTATE → HTTP) y log por request
   jobs/           limpieza periódica de claves de idempotencia
 test/             unit · db · concurrency · property · bootstrap · oracle (fold independiente)
-docs/             decisiones · benchmark del balance · pruebas · contratos de la API
+docs/             decisiones · benchmark del balance y su resumen (comparaciones) · pruebas · contratos de la API
 rest-client/      colección de requests (REST Client de VS Code)
 postman/          colección de Postman y sus environments: local · staging · production
 deploy/           gate del workflow, verificaciones y ensayos · lightsail/: el servidor (compose, Caddy, setup y deploy)

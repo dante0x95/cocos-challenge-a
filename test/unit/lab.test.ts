@@ -173,7 +173,7 @@ describe('lo que exige lab/check.ts (lab/check-lib.ts)', () => {
     expect(compareZ(1, withPosition(z, { costo_total: '1063.33' }), a, expectedZ(rows))).not.toEqual([]);
   });
 
-  it('el redondeo de Z es el de round() de Postgres: los empates hacia afuera', () => {
+  it('el redondeo de Z: los empates hacia afuera', () => {
     expect([roundHalfAway(5n, 2n), roundHalfAway(-5n, 2n), roundHalfAway(7n, 3n), roundHalfAway(-7n, 3n), roundHalfAway(8n, 3n)]).toEqual([3n, -3n, 2n, -2n, 3n]);
   });
 

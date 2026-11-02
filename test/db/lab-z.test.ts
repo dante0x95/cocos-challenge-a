@@ -5,7 +5,9 @@
 //     2^53 centavos, donde un double ya no representa los centavos: el cash de este usuario es de
 //     ~4·10^17 pesos.
 //   - El costo es el promedio de todas las compras (decisión en #72): compra 10 @ 100, venta 4 @ 120,
-//     recompra 5 @ 90 → 1.450 / 15 × 11 = 1.063,333333 (A daría 1.050).
+//     recompra 5 @ 90 → 1.450 / 15 × 11 = 1.063,333333 (A daría 1.050). Exacto también con costos
+//     de 15 cifras enteras, donde la división de numeric de Postgres deja 4 decimales y el redondeo
+//     a 6 daba otro número (CR-14 de la revisión del PR #76).
 //   - La búsqueda toma q como texto: %, _ y \ no son comodines; un carácter de control da 400.
 //   - Todo lo que no es GET ni HEAD responde 403.
 import type { AddressInfo } from 'node:net';
@@ -25,6 +27,8 @@ let base: string;
 let user: number;
 let inst: number;
 let bigCashIn: number;
+let bigCost: number;
+let bigInst: number;
 
 const get = async (path: string) => {
   const r = await fetch(`${base}${path}`);
@@ -52,6 +56,14 @@ beforeAll(async () => {
   await order(inst, 2, '150.00', 'LIMIT', 'SELL', 'NEW');
   await order(inst, 1, '50.00', 'LIMIT', 'BUY', 'NEW');
   await order(inst, 3, '80.00', 'LIMIT', 'BUY', 'CANCELLED');
+  // Tres compras de 1.000.000.000 acciones, dos a 100.000,00 y una a 100.000,01, y la venta de una:
+  // 300.000.010.000.000 × (3.000.000.000 − 1) / 3.000.000.000 = 300.000.009.899.999,99666…
+  bigCost = (await pool.query<{ id: number }>("INSERT INTO users (email, accountnumber) VALUES ('z-big@lab.test', '2') RETURNING id")).rows[0].id;
+  bigInst = (await pool.query<{ id: number }>("INSERT INTO instruments (ticker, name, type) VALUES ('GCX', 'Gran Costo S.A.', 'ACCIONES') RETURNING id")).rows[0].id;
+  for (const [size, price, side] of [[1_000_000_000, '100000.00', 'BUY'], [1_000_000_000, '100000.00', 'BUY'], [1_000_000_000, '100000.01', 'BUY'], [1, '100000.00', 'SELL']] as const) {
+    await pool.query(`INSERT INTO orders (instrumentid, userid, size, price, type, side, status, datetime) VALUES ($1, $2, $3, $4, 'MARKET', $5, 'FILLED', '2026-10-01 10:00:00')`,
+      [bigInst, bigCost, size, price, side]);
+  }
   server = createZApp(pool).listen(0);
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 });
@@ -85,6 +97,19 @@ describe('Z del lab (lab/z/server.ts) sobre database.sql', () => {
     });
     // Control: con Number, como el Z del benchmark, el cash ya no es el mismo.
     expect((2 * 2_000_000_000 * 99999999.99 - 970).toFixed(2)).not.toBe('399999999959999030.00');
+  });
+
+  it('costo exacto con 15 cifras enteras: sin el redondeo intermedio de la división de numeric', async () => {
+    const r = await get(`/portfolio/${bigCost}`);
+    expect(r.status).toBe(200);
+    expect(r.body.positions).toEqual([expect.objectContaining({
+      instrumentid: bigInst, qty: '2999999999', costo_total: '300000009899999.996667', costo_unitario: '100000.0033',
+      price: null, valor: null, resultado: null, rendimiento_pct: null,
+    })]);
+    expect(r.body.valuation_complete).toBe(false);
+    // Control: la división de numeric seguida de round(…, 6), como antes, da otro número.
+    const { rows: [{ v }] } = await pool.query<{ v: string }>('SELECT round(300000010000000.00 * 2999999999 / 3000000000, 6)::text AS v');
+    expect(v).not.toBe('300000009899999.996667');
   });
 
   it('una orden con su importe exacto; ajena o inexistente, 404; id inválido, 400', async () => {

@@ -9,8 +9,10 @@
 //     BUY", no el fold de D-09, que necesita el orden de ejecución que database.sql no guarda. Por
 //     eso costo, resultado y rendimiento de Z no coinciden con v2 y v3 cuando hubo ventas; cash,
 //     cantidades, reservas, valor y total sí (decisión en #72, lab/README.md).
-//   - Las cuentas, en numeric de Postgres: la respuesta sale como strings exactos, como en v2
-//     (D-13). round() de Postgres redondea los empates hacia afuera.
+//   - Las sumas, en numeric de Postgres; las divisiones (costo, costo unitario, rendimientos), con
+//     cociente y resto enteros (BigInt), porque la división de numeric elige una escala que con
+//     importes grandes deja menos decimales que los de la respuesta. La respuesta sale como
+//     strings exactos, como en v2 (D-13), con los empates redondeados hacia afuera.
 //   - Sin escrituras: el lab es de solo lectura y todo lo que no es GET ni HEAD responde 403.
 // Base: src/naive/app.ts del benchmark, que usaba Number. NO es correcta: es la vara.
 import { pathToFileURL } from 'node:url';
@@ -35,6 +37,18 @@ const fromCents = (c: bigint): string => {
   const neg = c < 0n;
   const s = (neg ? -c : c).toString().padStart(3, '0');
   return `${neg ? '-' : ''}${s.slice(0, -2)}.${s.slice(-2)}`;
+};
+
+/** n / d redondeado a entero, con los empates hacia afuera. d > 0. */
+const divRound = (n: bigint, d: bigint): bigint => {
+  const q = ((n < 0n ? -n : n) * 2n + d) / (2n * d);
+  return n < 0n ? -q : q;
+};
+/** Un entero en unidades de 10^-scale, como decimal. */
+const fixed = (v: bigint, scale: number): string => {
+  const neg = v < 0n;
+  const s = (neg ? -v : v).toString().padStart(scale + 1, '0');
+  return `${neg ? '-' : ''}${s.slice(0, s.length - scale)}.${s.slice(s.length - scale)}`;
 };
 
 type Handler = (req: express.Request, res: express.Response) => Promise<void>;
@@ -68,10 +82,9 @@ export function createZApp(pool: pg.Pool) {
                        CASE side WHEN 'CASH_IN' THEN size*price WHEN 'SELL' THEN size*price ELSE -size*price END END), 0) AS neto,
                      COALESCE(SUM(CASE WHEN status = 'NEW' AND side = 'BUY' THEN size*price END), 0) AS reservado
                 FROM orders WHERE userid = $1) t`, [userid])).rows[0];
-    const pos = (await pool.query<{ instrumentid: number; ticker: string; name: string; qty: string; reserved: string; costo_total: string; costo_unitario: string | null }>(`
-      SELECT instrumentid, ticker, name, qty::text, reserved::text,
-             round(CASE WHEN bought_qty > 0 THEN bought_amt * qty / bought_qty ELSE 0 END, 6)::text AS costo_total,
-             CASE WHEN qty > 0 AND bought_qty > 0 THEN round(bought_amt / bought_qty, 4)::text END AS costo_unitario
+    // Por instrumento: cantidad, reservas y lo comprado (acciones e importe en centavos), todo entero.
+    const pos = (await pool.query<{ instrumentid: number; ticker: string; name: string; qty: string; reserved: string; bought_qty: string; bought_cents: string }>(`
+      SELECT instrumentid, ticker, name, qty::text, reserved::text, bought_qty::text, trunc(bought_amt * 100)::text AS bought_cents
         FROM (SELECT o.instrumentid, i.ticker, i.name,
                      SUM(CASE WHEN o.status = 'FILLED' THEN CASE o.side WHEN 'BUY' THEN o.size WHEN 'SELL' THEN -o.size ELSE 0 END ELSE 0 END) AS qty,
                      SUM(CASE WHEN o.status = 'FILLED' AND o.side = 'BUY' THEN o.size ELSE 0 END)        AS bought_qty,
@@ -86,23 +99,40 @@ export function createZApp(pool: pg.Pool) {
     let complete = true;
     const positions = [];
     for (const p of pos) {
-      // La última cotización, con valor, resultado y rendimientos calculados sobre ella.
-      const px = (await pool.query<{ price: string; price_date: string; valor: string; resultado: string | null; rendimiento_pct: string | null; retorno_diario_pct: string | null }>(`
-        SELECT m.close::text AS price, m.date AS price_date,
-               round($2::numeric * m.close, 2)::text AS valor,
-               CASE WHEN $3::numeric > 0 THEN round($2::numeric * m.close - $3::numeric, 2)::text END AS resultado,
-               CASE WHEN $3::numeric > 0 THEN round(($2::numeric * m.close - $3::numeric) / $3::numeric * 100, 2)::text END AS rendimiento_pct,
-               CASE WHEN m.previousclose > 0 THEN round((m.close - m.previousclose) / m.previousclose * 100, 2)::text END AS retorno_diario_pct
-          FROM (SELECT close, previousclose, date FROM marketdata WHERE instrumentid = $1 ORDER BY date DESC LIMIT 1) m`,
-        [p.instrumentid, p.qty, p.costo_total])).rows[0];
-      if (px) total += cents(px.valor); else complete = false;
+      const qty = BigInt(p.qty);
+      const boughtQty = BigInt(p.bought_qty);
+      const boughtCents = BigInt(p.bought_cents);
+      // costo = Σ compras / Σ acciones compradas × qty, en micro-ARS: centavos × 10^4 × qty / acciones
+      const costMicro = boughtQty > 0n ? divRound(boughtCents * 10_000n * qty, boughtQty) : 0n;
+      // La última cotización: una consulta por posición, sobre marketdata sin índices.
+      const px = (await pool.query<{ close: string; previousclose: string | null; date: string }>(
+        'SELECT close::text, previousclose::text, date FROM marketdata WHERE instrumentid = $1 ORDER BY date DESC LIMIT 1', [p.instrumentid])).rows[0];
+      let valor: string | null = null;
+      let resultado: string | null = null;
+      let rendimiento: string | null = null;
+      let diario: string | null = null;
+      if (px) {
+        const valorCents = qty * cents(px.close);
+        total += valorCents;
+        valor = fromCents(valorCents);
+        if (costMicro > 0n) {
+          const diffMicro = valorCents * 10_000n - costMicro;
+          resultado = fixed(divRound(diffMicro, 10_000n), 2);
+          rendimiento = fixed(divRound(diffMicro * 10_000n, costMicro), 2);
+        }
+        const prev = px.previousclose === null ? 0n : cents(px.previousclose);
+        if (prev > 0n) diario = fixed(divRound((cents(px.close) - prev) * 10_000n, prev), 2);
+      } else {
+        complete = false;
+      }
       positions.push({
         instrumentid: p.instrumentid, ticker: p.ticker, name: p.name,
-        qty: p.qty, acciones_reservadas: p.reserved, acciones_disponibles: (BigInt(p.qty) - BigInt(p.reserved)).toString(),
-        costo_total: p.costo_total, costo_unitario: p.costo_unitario,
-        price: px?.price ?? null, price_date: px?.price_date ?? null, valor: px?.valor ?? null,
-        resultado: px?.resultado ?? null, rendimiento_pct: px?.rendimiento_pct ?? null, retorno_diario_pct: px?.retorno_diario_pct ?? null,
-        inconsistent: BigInt(p.qty) < 0n,
+        qty: p.qty, acciones_reservadas: p.reserved, acciones_disponibles: (qty - BigInt(p.reserved)).toString(),
+        costo_total: fixed(costMicro, 6),
+        costo_unitario: qty > 0n && boughtQty > 0n ? fixed(divRound(boughtCents * 100n, boughtQty), 4) : null,
+        price: px?.close ?? null, price_date: px?.date ?? null, valor,
+        resultado, rendimiento_pct: rendimiento, retorno_diario_pct: diario,
+        inconsistent: qty < 0n,
       });
     }
     res.json({

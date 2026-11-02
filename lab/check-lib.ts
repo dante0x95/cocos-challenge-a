@@ -3,8 +3,9 @@
 //   - expectedA: el oráculo de los tests (test/oracle/fold.ts) plegado sobre las órdenes del dataset:
 //     lo que tiene que responder v2, y v3 byte a byte.
 //   - expectedZ: la definición de costo de Z (lab/z/server.ts), calculada acá con enteros: Σ importes
-//     de compra / Σ acciones compradas × cantidad, redondeado como round() de Postgres (los empates
-//     hacia afuera). Z calcula en numeric, así que se compara exacto, string contra string.
+//     de compra / Σ acciones compradas × cantidad, con los empates redondeados hacia afuera. Z
+//     calcula exacto (sumas en numeric, divisiones con enteros), así que se compara string contra
+//     string.
 import * as O from '../test/oracle/fold.js';
 
 /** Una fila de orders.csv del dataset, ya parseada. price en centavos. */
@@ -88,7 +89,7 @@ export function compareA(id: number, p: any, e: ExpectedA): string[] {
 
 const SAME_IN_Z = ['instrumentid', 'ticker', 'name', 'qty', 'acciones_reservadas', 'acciones_disponibles', 'price', 'price_date', 'valor', 'retorno_diario_pct', 'inconsistent'] as const;
 
-/** num / den redondeado a entero, con los empates hacia afuera (round() de numeric en Postgres). den > 0. */
+/** num / den redondeado a entero, con los empates hacia afuera (como Z). den > 0. */
 export function roundHalfAway(num: bigint, den: bigint): bigint {
   const neg = num < 0n;
   const abs = neg ? -num : num;

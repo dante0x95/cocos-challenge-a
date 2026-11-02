@@ -6,6 +6,7 @@
 #   umbrales    sale con 99 (no cumplió los umbrales)     → run.sh termina bien: es un resultado
 #   falla       sale con 1 sin JSON, con uno viejo en RESULTS → run.sh falla y borra el viejo
 #   sin-json    sale con 0 sin escribir el JSON          → run.sh falla
+#   cero        sale con 99 y un JSON con 0 iteraciones  → run.sh falla y lo borra: no hubo medición
 # No corre en el CI. Uso: bench/test/run-guard.sh
 set -euo pipefail
 cd "$(dirname "$0")/../.."
@@ -28,6 +29,7 @@ case "$MODE" in
   umbrales) echo '{"metrics":{"iterations":{"values":{"count":10}}}}' > "$FILE"; exit 99 ;;
   falla)    exit 1 ;;
   sin-json) exit 0 ;;
+  cero)     echo '{"metrics":{"iterations":{"values":{"count":0}}}}' > "$FILE"; exit 99 ;;
 esac
 STUB
 printf '#!/usr/bin/env bash\nexit 0\n' > "$WORK/bin/psql"
@@ -57,4 +59,5 @@ caso ok 0
 caso umbrales 0
 caso falla no-0
 caso sin-json no-0
+caso cero no-0
 exit "$FAILED"

@@ -56,7 +56,7 @@ Una celda es un escenario a una tasa sobre una variante. Para cada una, `run.sh`
 4. **Precalienta** `WARMUP` (2 min) con el mismo escenario y tasa, sin medir → `-warmup.json`.
 5. Pone en cero `pg_stat_statements` y **mide** `DURATION` (5 min) → `.json` (el resumen de k6, la fuente de los números) y `-k6.txt` (la salida de k6). Mientras tanto, `docker stats` cada 10 s → `-stats.csv`.
 
-   En los pasos 4 y 5, k6 puede salir con 99: la corrida no cumplió los umbrales, que es el resultado de una celda que colapsa, y la matriz sigue. Cualquier otro código (Docker, el script, el JSON que no se pudo escribir) es un fallo técnico y `run.sh` corta con error. El JSON se borra antes de correr k6 y se exige después, con iteraciones: una celda nunca termina "completa" con el JSON de una corrida anterior.
+   En los pasos 4 y 5, k6 puede salir con 99: la corrida no cumplió los umbrales, que es el resultado de una celda que colapsa, y la matriz sigue. Cualquier otro código (Docker, el script, el JSON que no se pudo escribir) es un fallo técnico y `run.sh` corta con error. El JSON se borra antes de correr k6 y se exige después, con iteraciones: una celda nunca termina "completa" con el JSON de una corrida anterior, y uno sin iteraciones se borra (si no, `SKIP_DONE=1` tomaría la celda por hecha).
 6. Guarda las 5 sentencias con más tiempo total → `-pgss.txt`.
 7. Guarda el `EXPLAIN (ANALYZE, BUFFERS)` de la lectura de un usuario mediano (36000) y de una ballena (1004) → `-explain.txt`. En Z, una consulta de posiciones como la de su API, solo para el mediano.
 8. En C, cuántos snapshots hay, cuándo se publicó el último, cuánto ocupan y las filas muertas de `snapshot_positions` → `-snapshots.txt`.
@@ -112,7 +112,7 @@ Otras celdas cambian `VARIANT` (`Z`, `A`, `C-frio`, `C-caliente`; Z necesita ade
 
 **Controles del harness**, que no corren en el CI:
 
-- [`bench/test/run-guard.sh`](../../bench/test/run-guard.sh) corre `run.sh` de verdad con `docker`, `psql` y `curl` simulados (no necesita Docker) y un k6 simulado que termina bien, con 99, con un error o sin escribir el JSON: los dos primeros tienen que dar una celda completa con el JSON nuevo, y los dos últimos, un error de `run.sh` sin "corrida completa" y sin el JSON viejo que había en el directorio.
+- [`bench/test/run-guard.sh`](../../bench/test/run-guard.sh) corre `run.sh` de verdad con `docker`, `psql` y `curl` simulados (no necesita Docker) y un k6 simulado que termina bien, con 99, con un error, sin escribir el JSON o con un JSON de cero iteraciones: los dos primeros tienen que dar una celda completa con el JSON nuevo, y los otros tres, un error de `run.sh` sin "corrida completa" y sin ningún JSON en el directorio (ni el viejo que había ni el vacío).
 - [`bench/check-results.ts`](../../bench/check-results.ts) se controla a sí mismo con mutaciones de las tablas (ver [resultados](resultados.md)).
 - [`bench/test/verify-negative.sh`](../../bench/test/verify-negative.sh) es el control de `verify.ts` ([datos](datos.md#la-verificación-contra-el-oráculo)).
 

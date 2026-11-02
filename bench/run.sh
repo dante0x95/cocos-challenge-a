@@ -49,12 +49,13 @@ port_for() { case "$1" in small) echo 5433;; medium) echo 5434;; large) echo 543
 # k6 sale con 99 cuando la corrida no cumple los umbrales (las celdas que colapsan): eso es un
 # resultado. Cualquier otro código es un fallo técnico (Docker, el script, el JSON que no se pudo
 # escribir) y corta la matriz. El JSON se borra antes de correr y se exige después, con iteraciones:
-# nunca queda uno de una corrida anterior.
+# nunca queda uno de una corrida anterior. Uno sin iteraciones se borra, para que SKIP_DONE=1 no tome
+# la celda por hecha.
 #   k6_ok <código de salida> <json> <qué corrida>
 k6_ok() {
-  if [ "$1" != 0 ] && [ "$1" != 99 ]; then echo "ERROR: k6 ($3) salió con $1" >&2; return 1; fi
+  if [ "$1" != 0 ] && [ "$1" != 99 ]; then echo "ERROR: k6 ($3) salió con $1" >&2; rm -f "$2"; return 1; fi
   if ! jq -e '(.metrics.iterations.values.count // 0) > 0' "$2" >/dev/null 2>&1; then
-    echo "ERROR: k6 ($3) no dejó $2 con iteraciones" >&2; return 1
+    echo "ERROR: k6 ($3) no dejó $2 con iteraciones" >&2; rm -f "$2"; return 1
   fi
 }
 

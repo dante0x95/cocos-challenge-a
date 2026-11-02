@@ -19,7 +19,7 @@ import { createReadStream, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import {
-  ORDERS_HEADER, compareA, compareTimed, compareZ, expectedA, expectedZ, expectedZSearch, parseInstruments, parseRow, seedInstruments,
+  ORDERS_HEADER, compareA, compareTimed, compareZ, compareZSearch, expectedA, expectedZ, expectedZSearch, parseInstruments, parseRow, seedInstruments,
   zCostDiffers, type Row,
 } from './check-lib.js';
 
@@ -134,13 +134,11 @@ for (const s of searches) {
   const [z, a, c] = await all(path);
   if (z.status !== 200 || a.status !== 200 || c.status !== 200) { fail(`GET ${path}: ${z.status} / ${a.status} / ${c.status}`); continue; }
   if (c.text !== a.text) fail(`GET ${path}: v3 no responde lo mismo que v2`);
-  const want = expectedZSearch(instruments, s.q, !!s.cash);
-  const [gz, ga] = [idsOf(z), idsOf(a)];
-  if (want.length <= s.limit) {
-    if (JSON.stringify([...gz].sort((x, y) => x - y)) !== JSON.stringify(want)) fail(`GET ${path}: v1 ${gz.length} resultados, su definición da ${want.length} (${want.slice(0, 10).join(', ')}…)`);
-    if (want.some((id) => !ga.includes(id)) && ga.length < s.limit) fail(`GET ${path}: v2 no encuentra todo lo que contiene "${s.q}"`);
-  } else if (gz.length !== s.limit || gz.some((id: number) => !want.includes(id))) {
-    fail(`GET ${path}: v1 tiene que devolver ${s.limit} de los ${want.length} que contienen "${s.q}", devolvió ${gz.length}`);
+  fail(...compareZSearch(`GET /v1${path}`, z.body?.results, instruments, s.q, !!s.cash, s.limit));
+  // A encuentra todo lo que contiene q (y además, por trigramas, lo parecido), salvo que corte en el límite.
+  const ga = idsOf(a);
+  if (ga.length < s.limit && expectedZSearch(instruments, s.q, !!s.cash).some((id) => !ga.includes(id))) {
+    fail(`GET /v2${path}: no encuentra todo lo que contiene "${s.q}"`);
   }
   if (s.first && a.body.results[0]?.ticker !== s.first) fail(`GET ${path}: el primero de v2 no es ${s.first}`);
 }

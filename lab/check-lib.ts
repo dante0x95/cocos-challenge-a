@@ -178,3 +178,19 @@ export function expectedZSearch(all: Instrument[], q: string, includeCash: boole
       && (i.ticker.toLowerCase().includes(needle) || i.name.toLowerCase().includes(needle)))
     .map((i) => i.id).sort((a, b) => a - b);
 }
+
+/**
+ * La respuesta de /v1/instruments contra la definición de Z: los mismos instrumentos, con sus
+ * campos, ordenados por ticker y hasta `limit`. Con más candidatos que `limit`, los primeros
+ * `limit` por ticker. El orden se compara por código de carácter, que coincide con el de Postgres
+ * para tickers de mayúsculas y dígitos (los del dataset y los de database.sql).
+ */
+export function compareZSearch(label: string, results: unknown, all: Instrument[], q: string, includeCash: boolean, limit: number): string[] {
+  if (!Array.isArray(results)) return [`${label}: v1 sin results`];
+  const byId = new Map(all.map((i) => [i.id, i]));
+  const want = expectedZSearch(all, q, includeCash).map((id) => byId.get(id)!)
+    .sort((a, b) => (a.ticker < b.ticker ? -1 : a.ticker > b.ticker ? 1 : 0)).slice(0, limit);
+  const got = JSON.stringify(results);
+  return got === JSON.stringify(want) ? []
+    : [`${label}: v1 ${results.length} resultados, su definición da ${want.length}: ${want.slice(0, 5).map((i) => i.ticker).join(', ')}…`];
+}

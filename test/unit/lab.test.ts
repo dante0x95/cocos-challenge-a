@@ -16,7 +16,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, w
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
-import { compareA, compareTimed, compareZ, expectedA, expectedZ, expectedZSearch, parseRow, roundHalfAway, seedInstruments } from '../../lab/check-lib.js';
+import { compareA, compareTimed, compareZ, compareZSearch, expectedA, expectedZ, expectedZSearch, parseRow, roundHalfAway, seedInstruments } from '../../lab/check-lib.js';
 
 const ROOT = resolve(import.meta.dirname, '../..');
 const read = (p: string) => readFileSync(resolve(ROOT, p), 'utf8');
@@ -187,6 +187,15 @@ describe('lo que exige lab/check.ts (lab/check-lib.ts)', () => {
     expect(expectedZSearch(all, '_', false)).toEqual([1000]);
     expect(expectedZSearch(all, 'pesos', false)).toEqual([]);
     expect(expectedZSearch(all, 'pesos', true)).toEqual([2]);
+    // La respuesta completa de Z: todos, con sus campos, por ticker y hasta el límite.
+    const [dyca, ars, pc] = [all[0], all[1], all[2]];
+    expect(compareZSearch('x', [dyca, pc], all, 's.a.', false, 20)).toEqual([]);
+    expect(compareZSearch('x', [dyca], all, 's.a.', false, 20)).not.toEqual([]);              // truncada a uno
+    expect(compareZSearch('x', [pc, dyca], all, 's.a.', false, 20)).not.toEqual([]);          // otro orden
+    expect(compareZSearch('x', [{ ...dyca, name: 'Otra' }, pc], all, 's.a.', false, 20)).not.toEqual([]);
+    expect(compareZSearch('x', [dyca], all, 's.a.', false, 1)).toEqual([]);                   // el límite corta por ticker
+    expect(compareZSearch('x', [pc], all, 's.a.', false, 1)).not.toEqual([]);
+    expect(compareZSearch('x', [ars], all, 'pesos', false, 20)).not.toEqual([]);              // la moneda sin pedirla
   });
 
   it('cada respuesta cronometrada tiene que ser 200 con el mismo cuerpo que la primera', () => {

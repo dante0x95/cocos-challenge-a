@@ -233,17 +233,45 @@ describe('5 y 6. lo que hace el bootstrap: verify_ledger señala y cancel_unback
     expect(await orderRow(legacy)).toEqual(UNBACKED);
   });
 
-  it('cash heredado negativo sin compras NEW: no hay reserva de cash que señalar (una SELL NEW con respaldo sigue NEW)', async () => {
+  // Issue #68: el cash negativo heredado se señala como 'cash negativo' (se tolera, como 'short') y
+  // marca has_inconsistent_history; sin compras NEW no hay reserva de cash que señalar.
+  it('cash heredado negativo sin compras NEW: se señala con cash negativo y marca la historia, no hay reserva que señalar (una SELL NEW con respaldo sigue NEW)', async () => {
     const u = await legacyUser('unb-neg', 10_000n, 10n);
     await admin.query(
       `INSERT INTO app.orders (instrumentid, userid, size, price, type, side, status, datetime, balance_seq)
        VALUES ($1, $2, 1, 1000.00, 'MARKET', 'BUY', 'FILLED', timezone('UTC', now()), 3)`, [inst, u]);
     expect(await cash(u)).toBe(-90_000n);
+    const port = (await get(`/portfolio/${u}`)).body;
+    expect(port.cash).toEqual({ neto: '-900.00', reservado: '0.00', disponible: '-900.00' });
+    expect(port.has_inconsistent_history).toBe(true);
+    expect(positionOf(port, inst)).toMatchObject({ qty: '11', inconsistent: false });
     const sell = await legacyNew(u, 'SELL', 11, '2000.00');
     const r = await verify();
-    expect(r.ledger.filter((p) => p.userid === u)).toEqual([]);
+    const detail = 'cash -90000 (centavos): historia con una compra o un retiro sin fondos (se tolera y se señala, D-01)';
+    expect(r.ledger.filter((p) => p.userid === u)).toEqual([{ userid: u, problem: 'cash negativo', detail }]);
+    expect(r.log).toContain(`  historia: usuario ${u} — cash negativo: ${detail}`);
     expect(r.unbacked).not.toContain(sell);
     expect(await orderRow(sell)).toEqual({ status: 'NEW', cancel_reason: null, balance_seq: null });
+
+    // Un depósito que lo cubre: el cash vuelve a 0 o más y la marca se va (es el cash final, D-02).
+    const dep = await placeOrder(pool, { userid: u, key: 'cubre', side: 'CASH_IN', type: 'MARKET', instrumentid: ars, amount: '900.00' });
+    expect(dep.body.status).toBe('FILLED');
+    expect((await get(`/portfolio/${u}`)).body).toMatchObject({ cash: { neto: '0.00' }, has_inconsistent_history: false });
+    expect((await verify()).ledger.filter((p) => p.userid === u)).toEqual([]);
+  });
+
+  it('CASH_OUT heredado sin fondos: cash negativo, la historia marcada y la API rechaza compras y retiros', async () => {
+    const u = await legacyUser('unb-neg-out', 10_000n);
+    await admin.query(
+      `INSERT INTO app.orders (instrumentid, userid, size, price, type, side, status, datetime, balance_seq)
+       VALUES ($1, $2, 50000, 0.01, 'MARKET', 'CASH_OUT', 'FILLED', timezone('UTC', now()), 2)`, [ars, u]);
+    expect(await cash(u)).toBe(-40_000n);
+    expect((await get(`/portfolio/${u}`)).body).toMatchObject({ cash: { neto: '-400.00', disponible: '-400.00' }, has_inconsistent_history: true });
+    expect((await verify()).ledger.filter((p) => p.userid === u)).toEqual([{ userid: u, problem: 'cash negativo',
+      detail: 'cash -40000 (centavos): historia con una compra o un retiro sin fondos (se tolera y se señala, D-01)' }]);
+    expect((await placeOrder(pool, { userid: u, key: 'out', side: 'CASH_OUT', type: 'MARKET', instrumentid: ars, amount: '1.00' })).body.status).toBe('REJECTED');
+    expect((await placeOrder(pool, { userid: u, key: 'buy', side: 'BUY', type: 'MARKET', instrumentid: inst, size: 1 })).body.status).toBe('REJECTED');
+    expect(await cash(u)).toBe(-40_000n);
   });
 
   it('1.000 BUY LIMIT NEW heredadas de 1 @ 10¹⁵ que reservan 10²⁰ centavos (más que numeric(20,0)): la verificación lo señala con el número exacto y las cancela; el otro usuario sigue igual', async () => {

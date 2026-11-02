@@ -2,7 +2,8 @@
 // de app.place_order / execute_limit / cancel_order y cada lectura de app.read_portfolio
 // coinciden con test/oracle/fold.ts, una implementación independiente.
 // Un 20 % de los usuarios arranca con una venta en corto heredada (D-01), para recorrer
-// también las reglas de cobertura (D-03), que la API sola nunca generaría.
+// también las reglas de cobertura (D-03), que la API sola nunca generaría, y un 10 % con el
+// cash negativo por una compra heredada sin fondos (issue #68).
 // En régimen ninguna LIMIT queda sin respaldo: cero UNBACKED al final (issue #6). Si aparece,
 // es un bug de reserva en place_order, no de historia heredada.
 // Tamaño por env: PARITY_USERS (100) × PARITY_OPS (20), PARITY_SEED (42).
@@ -47,6 +48,7 @@ async function compare(userid: number, s: O.OracleState, step: string) {
   const ctx = `user ${userid} @ ${step}`;
   expect(BigInt(cashRow.qty), `${ctx}: cash`).toBe(s.cashCents);
   expect(BigInt(cashRow.reserved), `${ctx}: cash reservado`).toBe(O.reservedCash(s));
+  expect(cashRow.inconsistent, `${ctx}: historia inconsistente`).toBe(O.inconsistentHistory(s));
   const dbPos = new Map(rows.filter((r) => r.kind === 1).map((r) => [r.instrumentid as number, r]));
   for (const [i, p] of s.positions) {
     const d = dbPos.get(i);
@@ -74,7 +76,8 @@ describe(`paridad base == oráculo (${USERS} usuarios × ${OPS} ops, seed ${SEED
       const s = O.newState();
       const pending: bigint[] = [];
 
-      if (rnd() < 0.2) {
+      const legacy = rnd();
+      if (legacy < 0.2) {
         // Historia heredada: CASH_IN, BUY 2n, SELL 3n → n acciones en corto.
         const q = pick(qs);
         const n = BigInt(int(1, 20));
@@ -84,6 +87,21 @@ describe(`paridad base == oráculo (${USERS} usuarios × ${OPS} ops, seed ${SEED
         O.fill(s, 'BUY', q.instrumentid, 2n * n, q.closeCents);
         O.fill(s, 'SELL', q.instrumentid, 3n * n, q.closeCents);
         await compare(userid, s, 'historia heredada');
+      } else if (legacy < 0.3) {
+        // Historia heredada: CASH_IN y una BUY de más → cash negativo (issue #68). La API rechaza
+        // compras y retiros hasta que los depósitos lo cubran, y ahí la marca se va.
+        const q = pick(qs);
+        const n = BigInt(int(2, 20));
+        const total = n * q.closeCents;
+        const cashCents = total - 1n - BigInt(int(0, 500_000)) % (total - 1n);   // entre 1 y total − 1
+        await admin.query(
+          `INSERT INTO app.orders (instrumentid, userid, size, price, type, side, status, datetime, balance_seq) VALUES
+             ($1, $3, $4, 0.01, 'MARKET', 'CASH_IN', 'FILLED', timezone('UTC', now()), 1),
+             ($2, $3, $5, $6, 'MARKET', 'BUY', 'FILLED', timezone('UTC', now()), 2)`,
+          [ars, q.instrumentid, userid, cashCents.toString(), n.toString(), fmt(q.closeCents)]);
+        s.cashCents = cashCents;
+        O.fill(s, 'BUY', q.instrumentid, n, q.closeCents);
+        await compare(userid, s, 'cash heredado negativo');
       }
 
       for (let k = 0; k < OPS; k++) {
@@ -201,7 +219,7 @@ describe(`tope por orden cerca de 10¹⁵ ARS (${Number(process.env.PARITY_CAP_C
   const PATHS = [['LIMIT', 'size'], ['LIMIT', 'amount'], ['MARKET', 'size'], ['MARKET', 'amount']] as const;
 
   const clone = (s: O.OracleState): O.OracleState => ({
-    cashCents: s.cashCents, positions: new Map(s.positions),
+    cashCents: s.cashCents, soldShort: s.soldShort, positions: new Map(s.positions),
     pendingBuys: new Map(s.pendingBuys), pendingSells: new Map(s.pendingSells) });
   const outOfCap = (s: O.OracleState) => s.cashCents > CAP || s.cashCents < -CAP;
 

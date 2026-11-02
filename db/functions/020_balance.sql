@@ -9,7 +9,9 @@
 -- Estado de un usuario, calculado desde orders: los FILLED en orden de balance_seq.
 -- Devuelve:
 --   kind 0, una fila: cash_cents, last_seq (máxima secuencia vista), filled_count,
---           inconsistent = la historia tuvo alguna venta sin tenencia.
+--           inconsistent = la historia tuvo alguna venta sin tenencia o el cash queda negativo
+--           (una compra o un retiro heredados sin fondos, D-01; issue #68). El cash se mira al
+--           final, no en cada paso: el fold recorre por instrumento, no en orden de balance_seq.
 --   kind 1, una fila por instrumento con qty <> 0: qty, cost_total (micro-ARS, numeric sin
 --           decimales: en bigint desbordaría 100× por debajo del tope de D-14),
 --           inconsistent = la posición está en corto ahora (qty < 0).
@@ -102,7 +104,7 @@ BEGIN
       RETURN NEXT;
     END IF;
 
-    kind := 0; instrumentid := NULL; qty := NULL; cost_total := NULL; inconsistent := any_bad;
+    kind := 0; instrumentid := NULL; qty := NULL; cost_total := NULL; inconsistent := any_bad OR cash < 0;
     cash_cents := cash::bigint; last_seq := seen; filled_count := n_filled;
     RETURN NEXT;
   EXCEPTION WHEN numeric_value_out_of_range THEN
@@ -119,7 +121,7 @@ END $$;
 --           decimales: las NEW heredadas sin respaldo que el bootstrap no canceló, de un usuario
 --           con 'overflow' o cargadas después de la última verificación, pueden sumar más que
 --           un bigint; issue #57);
---           inconsistent = la historia tuvo alguna venta sin tenencia.
+--           inconsistent = la historia tuvo alguna venta sin tenencia o el cash es negativo (c_state).
 --   kind 1: una fila por posición; reserved = acciones reservadas por SELL NEW; close,
 --           previousclose y price_date de la última cotización válida (NULL si no hay).
 -- Usuario inexistente → APP06. c_state emite la fila kind 0 (cash 0) también para un id que

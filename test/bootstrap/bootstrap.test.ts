@@ -63,7 +63,7 @@ describe('bootstrap', () => {
     const r = await bootstrap({ adminUrl: url, apiPassword: 'api', ...quiet });
     expect(r.applied).toEqual(['000_seed.sql', '001_app_schema.sql', '002_audit.sql', '003_orders_ledger.sql', '005_cancel_reason.sql',
       '006_idempotency_ttl.sql', '007_cancel_reason_unbacked.sql', '008_limit_candidates_index.sql', '009_instruments_trgm.sql',
-      '010_order_cap_verify.sql']);
+      '010_order_cap_verify.sql', '011_negative_cash_verify.sql']);
     expect(r.ledger).toEqual([{ userid: 1, problem: 'short', detail: expect.stringContaining('instrumento 31 en -10') }]);
     expect(r.unbacked).toEqual([]);   // la LIMIT NEW del challenge (orden 2) tiene respaldo
 
@@ -681,8 +681,10 @@ describe('bootstrap', () => {
         const r = await bootstrap({ adminUrl: url, apiPassword: 'api', log: (m) => log.push(m) });
         expect(r.applied).toEqual(['010_order_cap_verify.sql']);
         const detail = `orden ${over} pendiente con importe 1000000000000000.02 ARS > 10^15 ARS: no se ejecuta (D-14)`;
-        // Solo 'tope': la reserva de la que va a cancelar no le quita respaldo a la otra (2 acciones, 2 reservadas).
-        expect(r.ledger.filter((p) => p.userid === u)).toEqual([{ userid: u, problem: 'tope', detail }]);
+        // 'tope' y no 'reserva': la reserva de la que va a cancelar no le quita respaldo a la otra (2 acciones,
+        // 2 reservadas). El cash de −0,03 se señala aparte y se tolera (issue #68).
+        expect(r.ledger.filter((p) => p.userid === u)).toEqual([
+          { userid: u, problem: 'tope', detail }, { userid: u, problem: 'cash negativo', detail: 'cash -3 (centavos): historia con una compra o un retiro sin fondos (se tolera y se señala, D-01)' }]);
         expect(r.overCap).toEqual([over]);
         expect(r.unbacked).toEqual([]);
         expect(log).toContain(`  historia: usuario ${u} — tope: ${detail}`);
@@ -690,7 +692,7 @@ describe('bootstrap', () => {
         const state = async (id: string) => (await adminDb.query('SELECT status, cancel_reason FROM app.orders WHERE id = $1', [id])).rows[0];
         expect(await state(over)).toEqual({ status: 'CANCELLED', cancel_reason: 'LIMIT' });
         expect(await state(ok)).toEqual({ status: 'NEW', cancel_reason: null });
-        expect((await adminDb.query('SELECT 1 FROM app.verify_ledger() WHERE userid = $1', [u])).rowCount).toBe(0);
+        expect((await adminDb.query('SELECT problem FROM app.verify_ledger() WHERE userid = $1', [u])).rows).toEqual([{ problem: 'cash negativo' }]);
 
         // Segunda corrida: nada que aplicar, nada que verificar ni cancelar, la base queda igual.
         const again = await bootstrap({ adminUrl: url, apiPassword: 'api', ...quiet });
@@ -772,6 +774,7 @@ describe('bootstrap', () => {
           { userid: uOverflow, problem: 'overflow', detail: expect.any(String) },
           { userid: uOther, problem: 'reserva', detail: 'instrumento 47: 10 acciones reservadas > tenencia 0: venta LIMIT pendiente sin respaldo' },
           { userid: uOrder, problem: 'tope', detail: tope(orderOver, '1000000000000000.10') },
+          { userid: uOrder, problem: 'cash negativo', detail: 'cash -9 (centavos): historia con una compra o un retiro sin fondos (se tolera y se señala, D-01)' },
           { userid: uOrder, problem: 'reserva', detail: 'instrumento 47: 15 acciones reservadas > tenencia 10: venta LIMIT pendiente sin respaldo' },
           { userid: uEdge, problem: 'tope', detail: tope(edgeOver, '1000000000000000.01') },
           { userid: uOnly, problem: 'tope', detail: tope(onlyNew, '21474836469999999978525163.53') },
@@ -792,9 +795,10 @@ describe('bootstrap', () => {
         expect((await api.query<{ r: { status: number } }>(
           "SELECT app.place_order($1, 'dep41', 'h', 'CASH_IN', 'MARKET', $2, NULL, 1.00, NULL, NULL) AS r", [uOther, ars])).rows[0].r.status).toBe(201);
 
-        // Queda solo la historia que no se puede corregir; la segunda corrida no hace nada.
+        // Queda solo la historia que no se puede corregir (el overflow y el cash negativo, que se toleran);
+        // la segunda corrida no hace nada.
         expect((await adminDb.query('SELECT userid, problem FROM app.verify_ledger() WHERE userid = ANY($1)', [mine])).rows)
-          .toEqual([{ userid: uOverflow, problem: 'overflow' }]);
+          .toEqual([{ userid: uOverflow, problem: 'overflow' }, { userid: uOrder, problem: 'cash negativo' }]);
         expect(await bootstrap({ adminUrl: url, apiPassword: 'api', ...quiet })).toMatchObject({ applied: [], ledger: [], unbacked: [], overCap: [] });
         expect(await state(order10)).toEqual(NEW);
         expect(await state(edgeExact)).toEqual(NEW);
@@ -804,6 +808,55 @@ describe('bootstrap', () => {
       }
     }, 120_000);
   });
+
+  // Issue #68: una base heredada con una compra y un retiro FILLED sin fondos (cash negativo). La
+  // base anterior tiene todas las migraciones menos la 011; el despliegue de esta rama la aplica y
+  // por eso verifica la historia: lo informa como 'cash negativo', sin abortar ni cambiar nada.
+  it('actualización con la 011: cash heredado negativo por una compra y por un retiro sin fondos se informa, no aborta y la segunda corrida no hace nada', async () => {
+    await recreateDatabase(DB);
+    const dir = mkdtempSync(join(tmpdir(), 'cocos-db-68-'));
+    try {
+      cpSync(resolve('db'), dir, { recursive: true });
+      rmSync(join(dir, 'migrations', '011_negative_cash_verify.sql'));
+      expect((await bootstrap({ adminUrl: url, apiPassword: 'api', dbDir: dir, ...quiet })).applied).not.toContain('011_negative_cash_verify.sql');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+    const adminDb = new pg.Pool({ connectionString: url });
+    try {
+      const ars = (await adminDb.query<{ id: number }>("SELECT id FROM app.instruments WHERE ticker = 'ARS'")).rows[0].id;
+      const user = async (tag: string, n: number) => (await adminDb.query<{ id: number }>(
+        'INSERT INTO app.users (email, accountnumber) VALUES ($1, $2) RETURNING id', [`neg68-${tag}@test.local`, `996800000${n}`])).rows[0].id;
+      // El caso del issue: una BUY de 2 @ 10¹⁵ sin cash. Y un CASH_OUT de 500,00 sobre un depósito de 100,00.
+      const uBuy = await user('buy', 1);
+      const uOut = await user('out', 2);
+      await adminDb.query(
+        `INSERT INTO app.orders (instrumentid, userid, size, price, type, side, status, datetime, balance_seq) VALUES
+           (47, $1, 2, 1000000000000000.00, 'MARKET', 'BUY', 'FILLED', timezone('UTC', now()), 1),
+           ($3, $2, 10000, 0.01, 'MARKET', 'CASH_IN', 'FILLED', timezone('UTC', now()), 1),
+           ($3, $2, 50000, 0.01, 'MARKET', 'CASH_OUT', 'FILLED', timezone('UTC', now()), 2)`, [uBuy, uOut, ars]);
+      const orders = async () => (await adminDb.query('SELECT id, status, balance_seq FROM app.orders WHERE userid = ANY($1) ORDER BY id', [[uBuy, uOut]])).rows;
+      const before = await orders();
+
+      const log: string[] = [];
+      const r = await bootstrap({ adminUrl: url, apiPassword: 'api', log: (m) => log.push(m) });
+      expect(r.applied).toEqual(['011_negative_cash_verify.sql']);
+      const detail = (c: string) => `cash ${c} (centavos): historia con una compra o un retiro sin fondos (se tolera y se señala, D-01)`;
+      expect(r.ledger.filter((p) => [uBuy, uOut].includes(p.userid))).toEqual([
+        { userid: uBuy, problem: 'cash negativo', detail: detail('-200000000000000000') },
+        { userid: uOut, problem: 'cash negativo', detail: detail('-40000') },
+      ]);
+      expect(log).toContain(`  historia: usuario ${uBuy} — cash negativo: ${detail('-200000000000000000')}`);
+      expect(r).toMatchObject({ unbacked: [], overCap: [] });
+      expect(await orders()).toEqual(before);
+      expect((await adminDb.query('SELECT qty::text AS cash, inconsistent FROM app.read_portfolio($1) WHERE kind = 0', [uBuy])).rows)
+        .toEqual([{ cash: '-200000000000000000', inconsistent: true }]);
+
+      expect(await bootstrap({ adminUrl: url, apiPassword: 'api', ...quiet })).toMatchObject({ applied: [], ledger: [], unbacked: [], overCap: [] });
+    } finally {
+      await adminDb.end();
+    }
+  }, 120_000);
 });
 
 // Issue #3: cost_total pasa de bigint a numeric en c_state y read_portfolio.
@@ -864,7 +917,7 @@ describe('actualización a cost_total numeric', () => {
     }
   }, 120_000);
 
-  it('historia con un costo de 10¹³ y otra fuera de numeric(20,0) con una LIMIT NEW: el bootstrap termina, informa solo el overflow, deja la NEW y los demás operan', async () => {
+  it('historia con un costo de 10¹³ y otra fuera de numeric(20,0) con una LIMIT NEW: el bootstrap termina, informa el overflow (y el cash negativo del de 10¹³), deja la NEW y los demás operan', async () => {
     await recreateDatabase(DB);
     // Una migración más con la historia heredada: así el bootstrap la verifica, como al desplegar sobre datos reales.
     const r = await deployFrom((dir) => writeFileSync(join(dir, 'migrations', '999_test_historia.sql'), `
@@ -900,7 +953,7 @@ describe('actualización a cost_total numeric', () => {
       const ids = (await adminDb.query<{ id: number }>("SELECT id FROM app.users WHERE email LIKE 'historia-%' ORDER BY id")).rows.map((x) => x.id);
       expect(r.applied).toContain('999_test_historia.sql');
       expect(r.ledger.filter((p) => ids.includes(p.userid)).map((p) => ({ userid: p.userid, problem: p.problem })))
-        .toEqual([{ userid: ids[1], problem: 'overflow' }]);
+        .toEqual([{ userid: ids[0], problem: 'cash negativo' }, { userid: ids[1], problem: 'overflow' }]);
       // El de costo 10¹³ se lee y opera; los normales también.
       expect((await api.query('SELECT cost_total::text AS c FROM app.read_portfolio($1) WHERE kind = 1', [ids[0]])).rows)
         .toEqual([{ c: '10000000000000000000' }]);

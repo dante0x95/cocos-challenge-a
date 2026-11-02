@@ -132,12 +132,12 @@ Devuelve la orden con la misma forma que `POST /orders`, con su estado actual, s
 }
 ```
 
-Una LIMIT también queda `CANCELLED` si la cancela el sistema: el executor, porque ejecutarla violaría los límites de [D-14](../decisiones.md#d-14), o el executor o el bootstrap, porque no tiene respaldo ([D-12](../decisiones.md#d-12)). `cancel_reason` distingue los casos:
+Una LIMIT también queda `CANCELLED` si la cancela el sistema: el executor o el bootstrap, por los límites de [D-14](../decisiones.md#d-14) o porque no tiene respaldo ([D-12](../decisiones.md#d-12)). `cancel_reason` distingue los casos:
 
 | `cancel_reason` | Quién la canceló |
 |---|---|
 | `USER` | su dueño, con este endpoint |
-| `LIMIT` | el executor, porque ejecutarla habría dejado el cash por encima de 10¹⁵ ARS o la posición por encima de 2⁶² acciones |
+| `LIMIT` | el executor, porque ejecutarla habría dejado el cash fuera de ±10¹⁵ ARS (en una compra o en una venta), la posición por encima de 2⁶² acciones o su costo por encima de 10¹⁷ ARS; o el executor o el bootstrap, porque su importe (`size × price`) supera 10¹⁵ ARS, algo que solo tiene una orden heredada ([D-14](../decisiones.md#d-14)) |
 | `UNBACKED` | el executor o el bootstrap, porque no tenía respaldo: una venta sin esas acciones, una compra sin ese cash o una orden sobre una moneda. Solo le pasa a una orden heredada de una base preexistente, insertada sin pasar por `POST /orders`, que nunca deja una `NEW` sin respaldo ([D-12](../decisiones.md#d-12), [D-24](../decisiones.md#d-24)) |
 | `null` | nadie: la orden no está `CANCELLED` |
 

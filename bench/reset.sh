@@ -33,7 +33,7 @@ if [ "$DUMP" = "trading.dump" ]; then
     psql "$PG" -q -v ON_ERROR_STOP=1 -f sql/30_c_tables.sql >/dev/null
     psql "$PG" -q -v ON_ERROR_STOP=1 -f sql/31_c_functions.sql >/dev/null
   fi
-  echo "pg-$PROFILE listo en :$PORT (migrado, funciones instaladas${WITH_C:+, C})"
+  echo "pg-$PROFILE listo en :$PORT (migrado, funciones instaladas$([ "${WITH_C:-0}" = "1" ] && echo ", C"))"
 elif [ "$DUMP" = "base.dump" ]; then
   psql "$PG" -c "SELECT count(*) AS orders FROM orders" -c "SELECT pg_size_pretty(pg_database_size('trading')) AS db"
   echo "pg-$PROFILE listo en :$PORT ($DUMP: esquema de Neon tal cual, escenario Z)"
@@ -46,5 +46,6 @@ else
     psql "$PG" -q -c "UPDATE app.settings SET snapshot_k = ${SNAPSHOT_K:-500}"
   fi
   psql "$PG" -c "SELECT count(*) AS orders FROM app.orders" -c "SELECT pg_size_pretty(pg_database_size('trading')) AS db"
-  echo "pg-$PROFILE listo en :$PORT ($DUMP, funciones ${WITH_C:+C }reaplicadas, K=${SNAPSHOT_K:-500})"
+  # run.sh exporta WITH_C=0 para A: ${WITH_C:+…} lo tomaría como C.
+  echo "pg-$PROFILE listo en :$PORT ($DUMP, funciones $([ "${WITH_C:-0}" = "1" ] && echo "C, K=${SNAPSHOT_K:-500}" || echo "A") reaplicadas)"
 fi

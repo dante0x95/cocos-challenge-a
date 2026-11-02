@@ -194,7 +194,12 @@ El último tiene que listar los cinco archivos de cada entorno: `postgres_passwo
 ssh -i ~/.ssh/cocos-deploy "deploy@${LIGHTSAIL_HOST}" "docker inspect cocos-production-api-1 cocos-production-db-1 cocos-staging-api-1 cocos-staging-db-1 | grep -cE '(POSTGRES_PASSWORD|DATABASE_URL|DATABASE_ADMIN_URL|API_DB_PASSWORD|INTERNAL_TOKEN)='"
 ```
 
-4. Los `.env` quedan para la vuelta atrás a un release anterior a #36, cuyo `compose.yml` todavía los usa con `env_file`. Se borran cuando ningún `compose*.yml` del entorno los usa (después del segundo release con #36, cuando `compose.previous.yml` también es de esta versión): si `grep -l env_file /opt/cocos/<entorno>/compose*.yml` no imprime nada, `rm /opt/cocos/<entorno>/{db,migrate,api}.env`. `setup.sh` no los vuelve a leer.
+4. Los `.env` quedan para la vuelta atrás a un release anterior a #36, cuyo `compose.yml` todavía los usa con `env_file`. Se borran cuando ningún `compose*.yml` del entorno los usa (después del segundo release con #36, cuando `compose.previous.yml` también es de esta versión): si `grep -l env_file /opt/cocos/<entorno>/compose*.yml` no imprime nada, `rm /opt/cocos/<entorno>/{db,migrate,api}.env`. `setup.sh` no los vuelve a leer. Para los dos entornos: el primero lista los `compose*.yml` que todavía usan `env_file`; si no imprime nada, el segundo borra los `.env` de los dos. Si nombra un entorno, borrar solo los del otro.
+
+```bash
+ssh -i ~/.ssh/cocos-deploy "deploy@${LIGHTSAIL_HOST}" 'grep -l env_file /opt/cocos/{staging,production}/compose*.yml'
+ssh -i ~/.ssh/cocos-deploy "deploy@${LIGHTSAIL_HOST}" 'rm -v /opt/cocos/{staging,production}/{db,migrate,api}.env'
+```
 
 ### Operación
 

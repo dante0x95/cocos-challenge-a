@@ -67,6 +67,8 @@ for PROFILE in $PROFILES; do
       NAME="$PROFILE-$SCENARIO-$RPS-$VARIANT"
       if [ "${SKIP_DONE:-0}" = "1" ] && [ -s "$RESULTS/$NAME.json" ]; then echo "(SKIP_DONE) $NAME ya existe, se salta"; continue; fi
       echo; echo "################ $NAME  ($(date +%H:%M:%S)) ################"
+      # El JSON de una corrida anterior de esta celda no sobrevive a esta: si algo falla, no queda ninguno.
+      rm -f "$RESULTS/$NAME.json" "$RESULTS/$NAME-warmup.json"
 
       T0=$(date +%s)
       bench/reset.sh "$PROFILE"

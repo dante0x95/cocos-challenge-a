@@ -52,7 +52,7 @@ Una celda es un escenario a una tasa sobre una variante. Para cada una, `run.sh`
 
 1. **Restaura** la base de la variante en un contenedor nuevo (`bench/reset.sh`: `bench.dump` para A y C, `base.dump` para Z) y reaplica las funciones de A o de C con `K = 500`. Tiempo → `-restore.txt`.
 2. **Calienta C** si la variante es `C-caliente` (`bench/warm.sh`, se agrega a `-restore.txt`).
-3. Levanta la API con el modo y el rol de la variante y espera `/health`; si no responde en 60 s, corta.
+3. Levanta la API con el modo y el rol de la variante y espera `/health`; si no responde en 60 s, corta. (Antes del paso 1, borra el JSON de la medida y el del calentamiento de esa celda, si había.)
 4. **Precalienta** `WARMUP` (2 min) con el mismo escenario y tasa, sin medir → `-warmup.json`.
 5. Pone en cero `pg_stat_statements` y **mide** `DURATION` (5 min) → `.json` (el resumen de k6, la fuente de los números) y `-k6.txt` (la salida de k6). Mientras tanto, `docker stats` cada 10 s → `-stats.csv`.
 
@@ -112,7 +112,7 @@ Otras celdas cambian `VARIANT` (`Z`, `A`, `C-frio`, `C-caliente`; Z necesita ade
 
 **Controles del harness**, que no corren en el CI:
 
-- [`bench/test/run-guard.sh`](../../bench/test/run-guard.sh) corre `run.sh` de verdad con `docker`, `psql` y `curl` simulados (no necesita Docker) y un k6 simulado que termina bien, con 99, con un error, sin escribir el JSON o con un JSON de cero iteraciones: los dos primeros tienen que dar una celda completa con el JSON nuevo, y los otros tres, un error de `run.sh` sin "corrida completa" y sin ningún JSON en el directorio (ni el viejo que había ni el vacío).
+- [`bench/test/run-guard.sh`](../../bench/test/run-guard.sh) corre `run.sh` de verdad con `docker`, `psql` y `curl` simulados (no necesita Docker) y un k6 simulado que termina bien, con 99, con un error después de escribir el JSON, sin escribirlo o con uno de cero iteraciones; también un calentamiento que falla y una API que nunca responde `/health`. Los dos primeros tienen que dar una celda completa con el JSON nuevo; los demás, un error de `run.sh` sin "corrida completa" y sin el JSON de la celda (ni el de una corrida anterior que había en el directorio ni el de esta). Quitar cualquiera de esas protecciones de `run.sh` hace fallar al menos un caso.
 - [`bench/check-results.ts`](../../bench/check-results.ts) se controla a sí mismo con mutaciones de las tablas (ver [resultados](resultados.md)).
 - [`bench/test/verify-negative.sh`](../../bench/test/verify-negative.sh) es el control de `verify.ts` ([datos](datos.md#la-verificación-contra-el-oráculo)).
 

@@ -8,7 +8,7 @@
 // argumentos efectivos, también el cuerpo completo de LIGHTSAIL_KNOWN_HOSTS. Los controles verifican que
 // cada una de esas tres variantes la hace fallar.
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
@@ -139,5 +139,76 @@ describe('comandos de operación (docs/api/operacion.md)', () => {
       expect(found).toMatch(/comandos que la terminal no reconoce/);
       expect(found).toMatch(/con la clave ""/);
     });
+  });
+});
+
+// "Secretos como archivos", paso 4 (issue #79): el comando que borra los .env, tal como le llega a
+// ssh, corre en bash sobre un /opt/cocos de prueba. Borra los tres .env de un entorno solo si grep
+// leyó todos sus compose*.yml y ninguno usa env_file; si uno los usa, o grep no puede leer los
+// compose, no borra nada de ese entorno. secrets/ no se toca nunca. Los controles verifican que
+// borrar otra cosa o borrar sin esa condición falla.
+describe('borrar los .env (Secretos como archivos, paso 4)', () => {
+  const ENVS = ['staging', 'production'] as const;
+  const LEGACY = ['db.env', 'migrate.env', 'api.env'];
+  const SECRETS = ['postgres_password', 'database_url'];
+  const CLEAN = 'services:\n  api:\n    image: cocos\n';
+  const USES_ENV = 'services:\n  api:\n    image: cocos\n    env_file: api.env\n';
+  type Composes = Record<(typeof ENVS)[number], Record<string, string>>;
+  // Cada caso: los compose*.yml de cada entorno, y qué entornos tienen que quedar sin sus .env.
+  const CASES: { name: string; composes: Composes; removed: string[] }[] = [
+    { name: 'ningún compose usa env_file', composes: { staging: { 'compose.yml': CLEAN, 'compose.previous.yml': CLEAN }, production: { 'compose.yml': CLEAN, 'compose.previous.yml': CLEAN } }, removed: ['staging', 'production'] },
+    { name: 'el compose.previous.yml de staging todavía los usa', composes: { staging: { 'compose.yml': CLEAN, 'compose.previous.yml': USES_ENV }, production: { 'compose.yml': CLEAN, 'compose.previous.yml': CLEAN } }, removed: ['production'] },
+    { name: 'producción sin compose que leer (grep sale con 2)', composes: { staging: { 'compose.yml': CLEAN }, production: {} }, removed: ['staging'] },
+  ];
+
+  /** El comando remoto del bloque que borra los .env, como lo recibe ssh. */
+  const cleanupCommand = (md: string) => {
+    const call = run('bash', md).calls.find((c) => c[0] === 'ssh' && c[c.length - 1].includes('grep -l env_file'));
+    return call?.[call.length - 1];
+  };
+
+  /** Lo que está mal al correr el comando documentado en `md` sobre cada caso. */
+  function cleanupProblems(md: string): string[] {
+    const cmd = cleanupCommand(md);
+    if (!cmd) return ['ningún ssh corre grep -l env_file'];
+    if (!cmd.includes('/opt/cocos/')) return ['el comando no trabaja sobre /opt/cocos'];
+    const out: string[] = [];
+    for (const c of CASES) {
+      const root = mkdtempSync(join(tmpdir(), 'ops-env-'));
+      dirs.push(root);
+      for (const env of ENVS) {
+        mkdirSync(join(root, env, 'secrets'), { recursive: true });
+        for (const f of LEGACY) writeFileSync(join(root, env, f), 'VAR=valor\n');
+        for (const f of SECRETS) writeFileSync(join(root, env, 'secrets', f), 'secreto');
+        for (const [f, body] of Object.entries(c.composes[env])) writeFileSync(join(root, env, f), body);
+      }
+      spawnSync('bash', ['--norc', '--noprofile', '-c', cmd.replaceAll('/opt/cocos/', `${root}/`)], { encoding: 'utf8' });
+      for (const env of ENVS) {
+        const left = LEGACY.filter((f) => existsSync(join(root, env, f)));
+        const want = c.removed.includes(env) ? [] : LEGACY;
+        if (left.join() !== want.join()) out.push(`${c.name}: en ${env} quedaron [${left.join(', ')}], no [${want.join(', ')}]`);
+        const secrets = SECRETS.filter((f) => existsSync(join(root, env, 'secrets', f)));
+        if (secrets.length !== SECRETS.length) out.push(`${c.name}: en ${env} borró secretos de secrets/`);
+      }
+    }
+    return out;
+  }
+
+  it('borra los .env de un entorno solo cuando grep leyó sus compose y ninguno usa env_file', () => {
+    expect(cleanupProblems(DOC)).toEqual([]);
+  });
+
+  it('control: borrar secrets/ en vez de los .env falla', () => {
+    const mutated = DOC.replace('rm -v $d/db.env $d/migrate.env $d/api.env', 'rm -v $d/secrets/*');
+    expect(mutated).not.toBe(DOC);
+    expect(cleanupProblems(mutated).join('\n')).toMatch(/borró secretos de secrets\//);
+  });
+
+  it('control: borrar sin mirar cómo terminó grep falla', () => {
+    const mutated = DOC.replace('case $? in 1)', 'case 1 in 1)');
+    expect(mutated).not.toBe(DOC);
+    const found = cleanupProblems(mutated);
+    expect(found).toContain('el compose.previous.yml de staging todavía los usa: en staging quedaron [], no [db.env, migrate.env, api.env]');
+    expect(found).toContain('producción sin compose que leer (grep sale con 2): en production quedaron [], no [db.env, migrate.env, api.env]');
   });
 });

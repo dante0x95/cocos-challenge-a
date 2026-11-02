@@ -279,16 +279,17 @@ $$;
 --              heredada, insertada en orders sin pasar por place_order; en régimen lo reservado
 --              al crearla es exactamente lo que se ejecuta (issue #6).
 --   'LIMIT'    viola D-14: su importe (size × price) supera 10^15 ARS (solo una NEW heredada,
---              issue #41), o ejecutarla dejaría el estado fuera de los límites (SELL: cash +
---              importe > 10^15 ARS; BUY: posición + size > 2^62 acciones o costo + importe >
---              10^17 ARS): la canceló con cancel_reason = 'LIMIT'.
+--              issue #41), o ejecutarla dejaría el estado fuera de los límites (cash ± importe
+--              fuera de ±10^15 ARS; BUY: además posición + size > 2^62 acciones o costo +
+--              importe > 10^17 ARS): la canceló con cancel_reason = 'LIMIT'.
 -- En los dos casos la orden sale del executor, libera su reserva y el motivo queda en ella.
 -- Si la historia del usuario no entra en los tipos, el fold falla con APP07 (issue #57) y la
 -- orden sigue NEW: sin fold no se puede decidir el respaldo, y corregir la historia podría
 -- dejarla válida. El executor saltea al usuario (overflow_users).
--- El respaldo y D-14 se revalidan bajo el lock, con una sola lectura del estado. Una BUY con
--- respaldo no puede dejar el cash negativo ni una SELL la posición: de D-14 solo quedan por
--- validar el cash de una SELL y la posición y el costo de una BUY.
+-- El respaldo y D-14 se revalidan bajo el lock, con una sola lectura del estado. Una SELL con
+-- respaldo no puede dejar la posición negativa: de D-14 quedan por validar el cash de las dos
+-- (con abs(), como place_order: un cash heredado fuera de ±10^15 ARS no se confirma más afuera ni
+-- todavía afuera, issue #67) y la posición y el costo de una BUY.
 CREATE OR REPLACE FUNCTION app.execute_limit_outcome(p_order_id bigint) RETURNS text
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, app, pg_temp SET lock_timeout = '2s' AS $$
 DECLARE uid int; o app.orders%ROWTYPE; vc record; v_cash bigint; pos_qty bigint; pos_cost numeric; nxt bigint; n int;
@@ -343,8 +344,9 @@ BEGIN
 
   -- Límites de dominio (D-14). El cash puede haber crecido desde que se creó la orden, así que
   -- no alcanza con validar al crearla.
-  IF o.side = 'SELL' AND v_cash + o.size::numeric * o.price * 100 > 1e17
-     OR o.side = 'BUY' AND (pos_qty::numeric + o.size > 4611686018427387904
+  IF o.side = 'SELL' AND abs(v_cash + o.size::numeric * o.price * 100) > 1e17
+     OR o.side = 'BUY' AND (abs(v_cash - o.size::numeric * o.price * 100) > 1e17
+                            OR pos_qty::numeric + o.size > 4611686018427387904
                             OR pos_cost + o.size::numeric * o.price * 1000000 > 1e23) THEN
     UPDATE app.orders SET status = 'CANCELLED', cancel_reason = 'LIMIT'
      WHERE id = p_order_id AND userid = o.userid AND status = 'NEW';

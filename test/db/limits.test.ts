@@ -141,6 +141,78 @@ describe('execute_limit valida D-14 antes de confirmar', () => {
   });
 });
 
+// Issue #67: un cash heredado fuera de ±10¹⁵ ARS. El tope es sobre el valor absoluto, igual que en
+// place_order: lo que la MARKET rechaza, la LIMIT no lo confirma.
+describe('cash heredado fuera de ±10¹⁵ ARS: la LIMIT se cancela como la MARKET se rechaza', () => {
+  /**
+   * Usuario heredado con 2 acciones de `inst` y exactamente `cashCents` (negativo) de cash:
+   * CASH_IN 1.000,00 → BUY 1 al precio que deja el cash en `cashCents` + 0,01 → BUY 1 @ 0,01.
+   */
+  async function poorUser(cashCents: bigint): Promise<number> {
+    const u = await newUser('d14n');
+    const ins = (side: string, iid: number, size: bigint, priceCents: bigint, seq: number) => admin.query(
+      `INSERT INTO app.orders (instrumentid, userid, size, price, type, side, status, datetime, balance_seq)
+       VALUES ($1, $2, $3, $4, 'MARKET', $5, 'FILLED', timezone('UTC', now()), $6)`,
+      [iid, u, size.toString(), fmt(priceCents), side, seq]);
+    await ins('CASH_IN', ars, 100_000n, 1n, 1);
+    await ins('BUY', inst, 1n, 100_000n - 1n - cashCents, 2);
+    await ins('BUY', inst, 1n, 1n, 3);
+    expect(await cash(u)).toBe(cashCents);
+    return u;
+  }
+  /** SELL LIMIT 1 @ 1,00: cruza con el close de `inst` (5.000) y suma 1,00 ARS al cash. */
+  const sellOne = (u: number) =>
+    placeOrder(pool, { userid: u, key: 'sl1', side: 'SELL', type: 'LIMIT', instrumentid: inst, size: 1, limit: '1.00' });
+  /** BUY LIMIT 1 @ 5.000,00: cruza con el close de `inst` y resta 5.000,00 ARS al cash. */
+  const buyOne = (u: number) =>
+    placeOrder(pool, { userid: u, key: 'bl1', side: 'BUY', type: 'LIMIT', instrumentid: inst, size: 1, limit: '5000.00' });
+  const reason = async (id: string) =>
+    (await admin.query('SELECT status, cancel_reason, balance_seq FROM app.orders WHERE id = $1', [id])).rows[0];
+
+  it('cash −2 × 10¹⁵ ARS y SELL LIMIT 1 @ 1,00 que cruza → LIMIT con cancel_reason LIMIT, cash sin cambios; la MARKET → APP05', async () => {
+    const start = -2n * CAP_CENTS;
+    const u = await poorUser(start);
+    const lim = await sellOne(u);
+    expect(lim.body.status).toBe('NEW');
+    expect(await run('execute_limit_outcome', lim.order_id)).toBe('LIMIT');
+    expect(await reason(lim.order_id)).toEqual({ status: 'CANCELLED', cancel_reason: 'LIMIT', balance_seq: null });
+    expect(await cash(u)).toBe(start);
+    await expect(placeOrder(pool, { userid: u, key: 'm', side: 'SELL', type: 'MARKET', instrumentid: inst, size: 1 }))
+      .rejects.toMatchObject({ code: 'APP05' });
+  });
+
+  it('borde: la SELL que deja el cash exactamente en −10¹⁵ ARS → FILLED; un centavo más abajo → LIMIT', async () => {
+    const ok = await poorUser(-CAP_CENTS - 100n);
+    const okLim = await sellOne(ok);
+    expect(await run('execute_limit_outcome', okLim.order_id)).toBe('FILLED');
+    expect(await cash(ok)).toBe(-CAP_CENTS);
+
+    const over = await poorUser(-CAP_CENTS - 101n);
+    const overLim = await sellOne(over);
+    expect(await run('execute_limit_outcome', overLim.order_id)).toBe('LIMIT');
+    expect(await cash(over)).toBe(-CAP_CENTS - 101n);
+  });
+
+  it('cash por encima de 10¹⁵ ARS y BUY LIMIT con respaldo que lo deja todavía afuera → LIMIT; la MARKET → APP05', async () => {
+    const start = CAP_CENTS + 500_001n;           // la compra lo deja a un centavo del tope
+    const u = await richUser(start);
+    const lim = await buyOne(u);
+    expect(lim.body.status).toBe('NEW');
+    expect(await run('execute_limit_outcome', lim.order_id)).toBe('LIMIT');
+    expect(await reason(lim.order_id)).toEqual({ status: 'CANCELLED', cancel_reason: 'LIMIT', balance_seq: null });
+    expect(await cash(u)).toBe(start);
+    await expect(placeOrder(pool, { userid: u, key: 'm', side: 'BUY', type: 'MARKET', instrumentid: inst, size: 1 }))
+      .rejects.toMatchObject({ code: 'APP05' });
+  });
+
+  it('control: la BUY que deja el cash exactamente en 10¹⁵ ARS → FILLED', async () => {
+    const u = await richUser(CAP_CENTS + 500_000n);
+    const lim = await buyOne(u);
+    expect(await run('execute_limit_outcome', lim.order_id)).toBe('FILLED');
+    expect(await cash(u)).toBe(CAP_CENTS);
+  });
+});
+
 // El tope de posición (2⁶² acciones, D-14) no tiene prueba de frontera: `size` es integer, así que
 // sembrar una posición de ese tamaño pediría ~2³¹ órdenes. La regla está en execute_limit_outcome y
 // place_order, junto a la del cash, que sí se prueba arriba.

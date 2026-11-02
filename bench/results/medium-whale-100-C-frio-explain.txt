@@ -1,0 +1,18 @@
+== mediano (36000) ==
+                                    QUERY PLAN                                     
+-----------------------------------------------------------------------------------
+ Function Scan on read_portfolio (actual time=498.637..498.685 rows=11.00 loops=1)
+   Buffers: shared hit=1761 read=11
+ Planning Time: 0.038 ms
+ Execution Time: 498.719 ms
+(4 rows)
+
+== ballena (1004) ==
+                                       QUERY PLAN                                       
+----------------------------------------------------------------------------------------
+ Function Scan on read_portfolio (actual time=17814.254..17814.335 rows=183.00 loops=1)
+   Buffers: shared hit=4597, temp read=1497 written=1499
+ Planning Time: 0.032 ms
+ Execution Time: 17814.370 ms
+(4 rows)
+

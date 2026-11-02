@@ -1,0 +1,995 @@
+
+################ medium-read-heavy-100-A  (20:05:11) ################
+ Image docker-pg-medium Building 
+#1 [internal] load local bake definitions
+#1 reading from stdin 591B done
+#1 DONE 0.0s
+
+#2 [internal] load build definition from Dockerfile
+#2 transferring dockerfile: 803B done
+#2 DONE 0.0s
+
+#3 [internal] load metadata for docker.io/library/postgres:18
+#3 DONE 0.0s
+
+#4 [internal] load .dockerignore
+#4 transferring context: 2B done
+#4 DONE 0.0s
+
+#5 [1/7] FROM docker.io/library/postgres:18@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336
+#5 resolve docker.io/library/postgres:18@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336 done
+#5 CACHED
+
+#6 [internal] load build context
+#6 transferring context: 422.13MB 4.0s done
+#6 DONE 4.1s
+
+#7 [2/7] COPY dump/bench.dump /dumps/trading.dump
+#7 DONE 0.8s
+
+#8 [3/7] COPY docker/00-conf.sh    /docker-entrypoint-initdb.d/00-conf.sh
+#8 DONE 0.1s
+
+#9 [4/7] COPY docker/01-restore.sh /docker-entrypoint-initdb.d/01-restore.sh
+#9 DONE 0.0s
+
+#10 [5/7] COPY docker/02-grants.sh  /docker-entrypoint-initdb.d/02-grants.sh
+#10 DONE 0.0s
+
+#11 [6/7] COPY docker/03-vacuum.sh  /docker-entrypoint-initdb.d/03-vacuum.sh
+#11 DONE 0.0s
+
+#12 [7/7] RUN chmod 755 /docker-entrypoint-initdb.d/*.sh && chmod 644 /dumps/trading.dump
+#12 DONE 0.5s
+
+#13 exporting to image
+#13 exporting layers
+#13 exporting layers 7.3s done
+#13 exporting manifest sha256:14331d85ae0d48165c15c350977ba39db1da4d377655e68fc7e3b5ff4e29cae4 0.0s done
+#13 exporting config sha256:b315f334d903e9b89a77bae0745c93d1f845f1486298e398aa0879dd0528dd29 0.0s done
+#13 exporting attestation manifest sha256:12441b197f8581a5a7d7402b7ed49e791f13ebcf6db27fac1b7db72177919430 done
+#13 exporting manifest list sha256:2cf5e7297d28c2ea2b42bacf9e13b8bb6c01d6437519f18e8a624175ac94caa0 done
+#13 naming to docker.io/library/docker-pg-medium:latest done
+#13 unpacking to docker.io/library/docker-pg-medium:latest
+#13 unpacking to docker.io/library/docker-pg-medium:latest 1.1s done
+#13 DONE 8.5s
+
+#14 resolving provenance for metadata file
+#14 DONE 0.0s
+ Image docker-pg-medium Built 
+ Network docker_default Creating 
+ Network docker_default Creating 
+ Network docker_default Created 
+ Network docker_default Created 
+ Container docker-pg-medium-1 Creating 
+ Container docker-pg-medium-1 Created 
+ Container docker-pg-medium-1 Starting 
+ Container docker-pg-medium-1 Started 
+esperando pg-medium (bench.dump)...................................................................... ok
+restore: 85 s
+  orders  
+----------
+ 22208286
+(1 row)
+
+   db    
+---------
+ 4350 MB
+(1 row)
+
+pg-medium listo en :5434 (bench.dump, funciones reaplicadas)
+restore+vacuum: 102 s
+ Image docker-app Building 
+#1 [internal] load local bake definitions
+#1 reading from stdin 511B done
+#1 DONE 0.0s
+
+#2 [internal] load build definition from Dockerfile.app
+#2 transferring dockerfile: 384B done
+#2 DONE 0.0s
+
+#3 [internal] load metadata for docker.io/library/node:22-alpine
+#3 ...
+
+#4 [auth] library/node:pull token for registry-1.docker.io
+#4 DONE 0.0s
+
+#3 [internal] load metadata for docker.io/library/node:22-alpine
+#3 DONE 2.0s
+
+#5 [internal] load .dockerignore
+#5 transferring context: 2B done
+#5 DONE 0.0s
+
+#6 [internal] load build context
+#6 transferring context: 670B done
+#6 DONE 0.0s
+
+#7 [1/7] FROM docker.io/library/node:22-alpine@sha256:fe4f6d74e20370acb04ad889077d14d0f64a9c8ea6a42bc60cddf1e844699914
+#7 resolve docker.io/library/node:22-alpine@sha256:fe4f6d74e20370acb04ad889077d14d0f64a9c8ea6a42bc60cddf1e844699914 0.0s done
+#7 DONE 0.0s
+
+#8 [3/7] RUN corepack enable
+#8 CACHED
+
+#9 [4/7] COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+#9 CACHED
+
+#10 [2/7] WORKDIR /app
+#10 CACHED
+
+#11 [5/7] RUN pnpm install --frozen-lockfile --prod=false
+#11 CACHED
+
+#12 [6/7] COPY tsconfig.json ./
+#12 CACHED
+
+#13 [7/7] COPY src ./src
+#13 CACHED
+
+#14 exporting to image
+#14 exporting layers done
+#14 exporting manifest sha256:8d079ec6568e89d32e3217ed20b7861c0ee5d7449a01bb711033c6b676e08179 done
+#14 exporting config sha256:f3a9fac4093d9f229d825d96ce1c60cbac365ea8bdac3106f2b5a61c6689d594 done
+#14 exporting attestation manifest sha256:b95c7ee94c9f3ec2d9561d33e70e135f3a4371a2fc06c0dc4e4618878b0f9500 done
+#14 exporting manifest list sha256:3727a9837231f8c8678baf53b2865badd024068c610f1f8911ced6e8c84530bc done
+#14 naming to docker.io/library/docker-app:latest done
+#14 unpacking to docker.io/library/docker-app:latest done
+#14 DONE 0.0s
+
+#15 resolving provenance for metadata file
+#15 DONE 0.0s
+ Image docker-app Built 
+ Container docker-app-1 Creating 
+ Container docker-app-1 Created 
+ Container docker-app-1 Starting 
+ Container docker-app-1 Started 
+-- calentamiento 2m
+-- medida 5m
+== medium / read-heavy / 100 rps / A / 5m ==
+http_req_duration{op:get}: p50=2ms p95=8ms p99=19ms max=211ms n=26927
+http_req_duration{op:post}: p50=4ms p95=6ms p99=11ms max=94ms n=3074
+http_req_failed: 0.003 %
+dropped_iterations: 0
+iterations: 30001  vus_max: 100
+-- top pg_stat_statements:
+51502 ms total | 26927 calls | 1.91 ms mean | SELECT * FROM app.read_portfolio($1)
+4572 ms total | 3073 calls | 1.49 ms mean | SELECT app.place_order($1, $2, $3, $4, $5, $6, $7, $8, $9) AS place_order
+352 ms total | 26927 calls | 0.01 ms mean | SELECT $2 FROM app.users WHERE id = $1
+corrida completa: 531 s
+
+################ medium-read-heavy-200-A  (20:14:02) ################
+ Container docker-app-1 Stopping 
+ Container docker-pg-medium-1 Stopping 
+ Container docker-app-1 Stopped 
+ Container docker-app-1 Removing 
+ Container docker-app-1 Removed 
+ Container docker-pg-medium-1 Stopped 
+ Container docker-pg-medium-1 Removing 
+ Container docker-pg-medium-1 Removed 
+ Network docker_default Removing 
+ Network docker_default Removed 
+ Image docker-pg-medium Building 
+#1 [internal] load local bake definitions
+#1 reading from stdin 591B done
+#1 DONE 0.0s
+
+#2 [internal] load build definition from Dockerfile
+#2 transferring dockerfile: 803B done
+#2 DONE 0.0s
+
+#3 [internal] load metadata for docker.io/library/postgres:18
+#3 DONE 0.1s
+
+#4 [internal] load .dockerignore
+#4 transferring context: 2B done
+#4 DONE 0.0s
+
+#5 [1/7] FROM docker.io/library/postgres:18@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336
+#5 resolve docker.io/library/postgres:18@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336 done
+#5 DONE 0.0s
+
+#6 [internal] load build context
+#6 transferring context: 302B done
+#6 DONE 0.0s
+
+#7 [6/7] COPY docker/03-vacuum.sh  /docker-entrypoint-initdb.d/03-vacuum.sh
+#7 CACHED
+
+#8 [3/7] COPY docker/00-conf.sh    /docker-entrypoint-initdb.d/00-conf.sh
+#8 CACHED
+
+#9 [4/7] COPY docker/01-restore.sh /docker-entrypoint-initdb.d/01-restore.sh
+#9 CACHED
+
+#10 [5/7] COPY docker/02-grants.sh  /docker-entrypoint-initdb.d/02-grants.sh
+#10 CACHED
+
+#11 [2/7] COPY dump/bench.dump /dumps/trading.dump
+#11 CACHED
+
+#12 [7/7] RUN chmod 755 /docker-entrypoint-initdb.d/*.sh && chmod 644 /dumps/trading.dump
+#12 CACHED
+
+#13 exporting to image
+#13 exporting layers done
+#13 exporting manifest sha256:14331d85ae0d48165c15c350977ba39db1da4d377655e68fc7e3b5ff4e29cae4 done
+#13 exporting config sha256:b315f334d903e9b89a77bae0745c93d1f845f1486298e398aa0879dd0528dd29 done
+#13 exporting attestation manifest sha256:4ef5555bf8d7ca0fe0fe087e70e21af32123a1247b572d91c33f5338f71634f2 0.0s done
+#13 exporting manifest list sha256:221cc5374e5574746488e6ad95db604dfa788dbdc527de9500303f4d527b3de8
+#13 exporting manifest list sha256:221cc5374e5574746488e6ad95db604dfa788dbdc527de9500303f4d527b3de8 0.1s done
+#13 naming to docker.io/library/docker-pg-medium:latest done
+#13 unpacking to docker.io/library/docker-pg-medium:latest 0.0s done
+#13 DONE 0.2s
+
+#14 resolving provenance for metadata file
+#14 DONE 0.0s
+ Image docker-pg-medium Built 
+ Network docker_default Creating 
+ Network docker_default Creating 
+ Network docker_default Created 
+ Network docker_default Created 
+ Container docker-pg-medium-1 Creating 
+ Container docker-pg-medium-1 Created 
+ Container docker-pg-medium-1 Starting 
+ Container docker-pg-medium-1 Started 
+esperando pg-medium (bench.dump)................................................................. ok
+restore: 78 s
+  orders  
+----------
+ 22208286
+(1 row)
+
+   db    
+---------
+ 4350 MB
+(1 row)
+
+pg-medium listo en :5434 (bench.dump, funciones reaplicadas)
+restore+vacuum: 81 s
+ Image docker-app Building 
+#1 [internal] load local bake definitions
+#1 reading from stdin 511B done
+#1 DONE 0.0s
+
+#2 [internal] load build definition from Dockerfile.app
+#2 transferring dockerfile: 384B done
+#2 DONE 0.0s
+
+#3 [auth] library/node:pull token for registry-1.docker.io
+#3 DONE 0.0s
+
+#4 [internal] load metadata for docker.io/library/node:22-alpine
+#4 DONE 2.1s
+
+#5 [internal] load .dockerignore
+#5 transferring context: 2B 0.0s done
+#5 DONE 0.0s
+
+#6 [internal] load build context
+#6 transferring context: 670B done
+#6 DONE 0.0s
+
+#7 [1/7] FROM docker.io/library/node:22-alpine@sha256:fe4f6d74e20370acb04ad889077d14d0f64a9c8ea6a42bc60cddf1e844699914
+#7 resolve docker.io/library/node:22-alpine@sha256:fe4f6d74e20370acb04ad889077d14d0f64a9c8ea6a42bc60cddf1e844699914 0.0s done
+#7 DONE 0.0s
+
+#8 [2/7] WORKDIR /app
+#8 CACHED
+
+#9 [6/7] COPY tsconfig.json ./
+#9 CACHED
+
+#10 [5/7] RUN pnpm install --frozen-lockfile --prod=false
+#10 CACHED
+
+#11 [3/7] RUN corepack enable
+#11 CACHED
+
+#12 [4/7] COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+#12 CACHED
+
+#13 [7/7] COPY src ./src
+#13 CACHED
+
+#14 exporting to image
+#14 exporting layers done
+#14 exporting manifest sha256:8d079ec6568e89d32e3217ed20b7861c0ee5d7449a01bb711033c6b676e08179 done
+#14 exporting config sha256:f3a9fac4093d9f229d825d96ce1c60cbac365ea8bdac3106f2b5a61c6689d594 done
+#14 exporting attestation manifest sha256:cc1b80f09822f0ec77d15f7ef92de255390518fb4413ce16e8002e9f10013582 done
+#14 exporting manifest list sha256:c9b7d9498d5acce9e14892981f2c453a9f69b49dc1ecb615c13f94e5a59175e7 done
+#14 naming to docker.io/library/docker-app:latest done
+#14 unpacking to docker.io/library/docker-app:latest done
+#14 DONE 0.0s
+
+#15 resolving provenance for metadata file
+#15 DONE 0.0s
+ Image docker-app Built 
+ Container docker-app-1 Creating 
+ Container docker-app-1 Created 
+ Container docker-app-1 Starting 
+ Container docker-app-1 Started 
+-- calentamiento 2m
+-- medida 5m
+== medium / read-heavy / 200 rps / A / 5m ==
+http_req_duration{op:get}: p50=2ms p95=7ms p99=17ms max=185ms n=53934
+http_req_duration{op:post}: p50=3ms p95=5ms p99=10ms max=164ms n=6067
+http_req_failed: 0.010 %
+dropped_iterations: 0
+iterations: 60001  vus_max: 100
+-- top pg_stat_statements:
+85097 ms total | 53934 calls | 1.58 ms mean | SELECT * FROM app.read_portfolio($1)
+7171 ms total | 6061 calls | 1.18 ms mean | SELECT app.place_order($1, $2, $3, $4, $5, $6, $7, $8, $9) AS place_order
+500 ms total | 53934 calls | 0.01 ms mean | SELECT $2 FROM app.users WHERE id = $1
+corrida completa: 509 s
+
+################ medium-read-heavy-400-A  (20:22:31) ################
+ Container docker-pg-medium-1 Stopping 
+ Container docker-app-1 Stopping 
+ Container docker-app-1 Stopped 
+ Container docker-app-1 Removing 
+ Container docker-app-1 Removed 
+ Container docker-pg-medium-1 Stopped 
+ Container docker-pg-medium-1 Removing 
+ Container docker-pg-medium-1 Removed 
+ Network docker_default Removing 
+ Network docker_default Removed 
+ Image docker-pg-medium Building 
+#1 [internal] load local bake definitions
+#1 reading from stdin 591B done
+#1 DONE 0.0s
+
+#2 [internal] load build definition from Dockerfile
+#2 transferring dockerfile: 803B 0.0s done
+#2 DONE 0.0s
+
+#3 [internal] load metadata for docker.io/library/postgres:18
+#3 DONE 0.2s
+
+#4 [internal] load .dockerignore
+#4 transferring context: 2B done
+#4 DONE 0.0s
+
+#5 [1/7] FROM docker.io/library/postgres:18@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336
+#5 resolve docker.io/library/postgres:18@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336 0.0s done
+#5 DONE 0.0s
+
+#6 [internal] load build context
+#6 transferring context: 302B done
+#6 DONE 0.0s
+
+#7 [2/7] COPY dump/bench.dump /dumps/trading.dump
+#7 CACHED
+
+#8 [3/7] COPY docker/00-conf.sh    /docker-entrypoint-initdb.d/00-conf.sh
+#8 CACHED
+
+#9 [5/7] COPY docker/02-grants.sh  /docker-entrypoint-initdb.d/02-grants.sh
+#9 CACHED
+
+#10 [4/7] COPY docker/01-restore.sh /docker-entrypoint-initdb.d/01-restore.sh
+#10 CACHED
+
+#11 [6/7] COPY docker/03-vacuum.sh  /docker-entrypoint-initdb.d/03-vacuum.sh
+#11 CACHED
+
+#12 [7/7] RUN chmod 755 /docker-entrypoint-initdb.d/*.sh && chmod 644 /dumps/trading.dump
+#12 CACHED
+
+#13 exporting to image
+#13 exporting layers 0.0s done
+#13 exporting manifest sha256:14331d85ae0d48165c15c350977ba39db1da4d377655e68fc7e3b5ff4e29cae4 done
+#13 exporting config sha256:b315f334d903e9b89a77bae0745c93d1f845f1486298e398aa0879dd0528dd29 done
+#13 exporting attestation manifest sha256:64a062e5740a5c1de53ada3595917fd9a58170f6ab19b6a260050c1a87189296 0.0s done
+#13 exporting manifest list sha256:27da724b32a8294809e910a7b09844ba39f28b2fce004f31b679d4c3615c5a54 0.1s done
+#13 naming to docker.io/library/docker-pg-medium:latest
+#13 naming to docker.io/library/docker-pg-medium:latest 0.0s done
+#13 unpacking to docker.io/library/docker-pg-medium:latest 0.0s done
+#13 DONE 0.2s
+
+#14 resolving provenance for metadata file
+#14 DONE 0.0s
+ Image docker-pg-medium Built 
+ Network docker_default Creating 
+ Network docker_default Creating 
+ Network docker_default Created 
+ Network docker_default Created 
+ Container docker-pg-medium-1 Creating 
+ Container docker-pg-medium-1 Created 
+ Container docker-pg-medium-1 Starting 
+ Container docker-pg-medium-1 Started 
+esperando pg-medium (bench.dump).................................................................. ok
+restore: 78 s
+  orders  
+----------
+ 22208286
+(1 row)
+
+   db    
+---------
+ 4350 MB
+(1 row)
+
+pg-medium listo en :5434 (bench.dump, funciones reaplicadas)
+restore+vacuum: 82 s
+ Image docker-app Building 
+#1 [internal] load local bake definitions
+#1 reading from stdin 511B done
+#1 DONE 0.0s
+
+#2 [internal] load build definition from Dockerfile.app
+#2 transferring dockerfile: 384B done
+#2 DONE 0.0s
+
+#3 [auth] library/node:pull token for registry-1.docker.io
+#3 DONE 0.0s
+
+#4 [internal] load metadata for docker.io/library/node:22-alpine
+#4 DONE 0.8s
+
+#5 [internal] load .dockerignore
+#5 transferring context: 2B done
+#5 DONE 0.0s
+
+#6 [internal] load build context
+#6 transferring context: 670B done
+#6 DONE 0.0s
+
+#7 [1/7] FROM docker.io/library/node:22-alpine@sha256:fe4f6d74e20370acb04ad889077d14d0f64a9c8ea6a42bc60cddf1e844699914
+#7 resolve docker.io/library/node:22-alpine@sha256:fe4f6d74e20370acb04ad889077d14d0f64a9c8ea6a42bc60cddf1e844699914 0.0s done
+#7 DONE 0.0s
+
+#8 [4/7] COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+#8 CACHED
+
+#9 [2/7] WORKDIR /app
+#9 CACHED
+
+#10 [6/7] COPY tsconfig.json ./
+#10 CACHED
+
+#11 [5/7] RUN pnpm install --frozen-lockfile --prod=false
+#11 CACHED
+
+#12 [3/7] RUN corepack enable
+#12 CACHED
+
+#13 [7/7] COPY src ./src
+#13 CACHED
+
+#14 exporting to image
+#14 exporting layers done
+#14 exporting manifest sha256:8d079ec6568e89d32e3217ed20b7861c0ee5d7449a01bb711033c6b676e08179 done
+#14 exporting config sha256:f3a9fac4093d9f229d825d96ce1c60cbac365ea8bdac3106f2b5a61c6689d594 done
+#14 exporting attestation manifest sha256:1c50887c33f2d4006558245f853f9cea6eaabf596f7319557a1cf8ae7538a02d done
+#14 exporting manifest list sha256:8fa848abd0d0c86b7f91efd6fd8209500f2342ab50ccfa9aa663d9b90c926a0d done
+#14 naming to docker.io/library/docker-app:latest done
+#14 unpacking to docker.io/library/docker-app:latest done
+#14 DONE 0.1s
+
+#15 resolving provenance for metadata file
+#15 DONE 0.0s
+ Image docker-app Built 
+ Container docker-app-1 Creating 
+ Container docker-app-1 Created 
+ Container docker-app-1 Starting 
+ Container docker-app-1 Started 
+-- calentamiento 2m
+-- medida 5m
+== medium / read-heavy / 400 rps / A / 5m ==
+http_req_duration{op:get}: p50=1ms p95=7ms p99=23ms max=244ms n=107947
+http_req_duration{op:post}: p50=2ms p95=5ms p99=26ms max=241ms n=12054
+http_req_failed: 0.009 %
+dropped_iterations: 0
+iterations: 120001  vus_max: 100
+-- top pg_stat_statements:
+165034 ms total | 107947 calls | 1.53 ms mean | SELECT * FROM app.read_portfolio($1)
+13073 ms total | 12043 calls | 1.09 ms mean | SELECT app.place_order($1, $2, $3, $4, $5, $6, $7, $8, $9) AS place_order
+855 ms total | 107947 calls | 0.01 ms mean | SELECT $2 FROM app.users WHERE id = $1
+corrida completa: 510 s
+
+################ medium-whale-2-A  (20:31:01) ################
+ Container docker-app-1 Stopping 
+ Container docker-pg-medium-1 Stopping 
+ Container docker-app-1 Stopped 
+ Container docker-app-1 Removing 
+ Container docker-app-1 Removed 
+ Container docker-pg-medium-1 Stopped 
+ Container docker-pg-medium-1 Removing 
+ Container docker-pg-medium-1 Removed 
+ Network docker_default Removing 
+ Network docker_default Removed 
+ Image docker-pg-medium Building 
+#1 [internal] load local bake definitions
+#1 reading from stdin 591B done
+#1 DONE 0.0s
+
+#2 [internal] load build definition from Dockerfile
+#2 transferring dockerfile: 803B done
+#2 DONE 0.0s
+
+#3 [internal] load metadata for docker.io/library/postgres:18
+#3 DONE 0.0s
+
+#4 [internal] load .dockerignore
+#4 transferring context: 2B done
+#4 DONE 0.0s
+
+#5 [1/7] FROM docker.io/library/postgres:18@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336
+#5 resolve docker.io/library/postgres:18@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336 0.0s done
+#5 DONE 0.0s
+
+#6 [internal] load build context
+#6 transferring context: 302B done
+#6 DONE 0.0s
+
+#7 [2/7] COPY dump/bench.dump /dumps/trading.dump
+#7 CACHED
+
+#8 [4/7] COPY docker/01-restore.sh /docker-entrypoint-initdb.d/01-restore.sh
+#8 CACHED
+
+#9 [5/7] COPY docker/02-grants.sh  /docker-entrypoint-initdb.d/02-grants.sh
+#9 CACHED
+
+#10 [3/7] COPY docker/00-conf.sh    /docker-entrypoint-initdb.d/00-conf.sh
+#10 CACHED
+
+#11 [6/7] COPY docker/03-vacuum.sh  /docker-entrypoint-initdb.d/03-vacuum.sh
+#11 CACHED
+
+#12 [7/7] RUN chmod 755 /docker-entrypoint-initdb.d/*.sh && chmod 644 /dumps/trading.dump
+#12 CACHED
+
+#13 exporting to image
+#13 exporting layers done
+#13 exporting manifest sha256:14331d85ae0d48165c15c350977ba39db1da4d377655e68fc7e3b5ff4e29cae4 done
+#13 exporting config sha256:b315f334d903e9b89a77bae0745c93d1f845f1486298e398aa0879dd0528dd29 done
+#13 exporting attestation manifest sha256:937a51af09ba9a63eb554403a42a05ae2406a9dd008c7d36d4c7d984e317d9d0 0.0s done
+#13 exporting manifest list sha256:23254ca54a0ffd7452c809e51bc3d0640868bd51adbb86dba3ea4c372e17f611 0.1s done
+#13 naming to docker.io/library/docker-pg-medium:latest
+#13 naming to docker.io/library/docker-pg-medium:latest 0.0s done
+#13 unpacking to docker.io/library/docker-pg-medium:latest 0.0s done
+#13 DONE 0.2s
+
+#14 resolving provenance for metadata file
+#14 DONE 0.0s
+ Image docker-pg-medium Built 
+ Network docker_default Creating 
+ Network docker_default Creating 
+ Network docker_default Created 
+ Network docker_default Created 
+ Container docker-pg-medium-1 Creating 
+ Container docker-pg-medium-1 Created 
+ Container docker-pg-medium-1 Starting 
+ Container docker-pg-medium-1 Started 
+esperando pg-medium (bench.dump)................................................................ ok
+restore: 75 s
+  orders  
+----------
+ 22208286
+(1 row)
+
+   db    
+---------
+ 4350 MB
+(1 row)
+
+pg-medium listo en :5434 (bench.dump, funciones reaplicadas)
+restore+vacuum: 79 s
+ Image docker-app Building 
+#1 [internal] load local bake definitions
+#1 reading from stdin 511B done
+#1 DONE 0.0s
+
+#2 [internal] load build definition from Dockerfile.app
+#2 transferring dockerfile: 384B done
+#2 DONE 0.0s
+
+#3 [auth] library/node:pull token for registry-1.docker.io
+#3 DONE 0.0s
+
+#4 [internal] load metadata for docker.io/library/node:22-alpine
+#4 DONE 0.8s
+
+#5 [internal] load .dockerignore
+#5 transferring context: 2B done
+#5 DONE 0.0s
+
+#6 [internal] load build context
+#6 transferring context: 670B done
+#6 DONE 0.0s
+
+#7 [1/7] FROM docker.io/library/node:22-alpine@sha256:fe4f6d74e20370acb04ad889077d14d0f64a9c8ea6a42bc60cddf1e844699914
+#7 resolve docker.io/library/node:22-alpine@sha256:fe4f6d74e20370acb04ad889077d14d0f64a9c8ea6a42bc60cddf1e844699914 0.0s done
+#7 DONE 0.0s
+
+#8 [3/7] RUN corepack enable
+#8 CACHED
+
+#9 [6/7] COPY tsconfig.json ./
+#9 CACHED
+
+#10 [2/7] WORKDIR /app
+#10 CACHED
+
+#11 [4/7] COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+#11 CACHED
+
+#12 [5/7] RUN pnpm install --frozen-lockfile --prod=false
+#12 CACHED
+
+#13 [7/7] COPY src ./src
+#13 CACHED
+
+#14 exporting to image
+#14 exporting layers done
+#14 exporting manifest sha256:8d079ec6568e89d32e3217ed20b7861c0ee5d7449a01bb711033c6b676e08179 done
+#14 exporting config sha256:f3a9fac4093d9f229d825d96ce1c60cbac365ea8bdac3106f2b5a61c6689d594 done
+#14 exporting attestation manifest sha256:e9a099d664d2b763ad1406cba66754c6c69f790107d97b229e6429c02f67449e done
+#14 exporting manifest list sha256:847d59c2e2d56fc63626adb5a1d7326954928a7dd5ec84409c3e71279d1e711f done
+#14 naming to docker.io/library/docker-app:latest done
+#14 unpacking to docker.io/library/docker-app:latest done
+#14 DONE 0.0s
+
+#15 resolving provenance for metadata file
+#15 DONE 0.0s
+ Image docker-app Built 
+ Container docker-app-1 Creating 
+ Container docker-app-1 Created 
+ Container docker-app-1 Starting 
+ Container docker-app-1 Started 
+-- calentamiento 2m
+-- medida 5m
+== medium / whale / 2 rps / A / 5m ==
+http_req_duration{op:get}: p50=557ms p95=780ms p99=795ms max=935ms n=548
+http_req_duration{op:post}: p50=52ms p95=75ms p99=91ms max=95ms n=52
+http_req_failed: 0.000 %
+dropped_iterations: 0
+iterations: 600  vus_max: 100
+-- top pg_stat_statements:
+297955 ms total | 548 calls | 543.71 ms mean | SELECT * FROM app.read_portfolio($1)
+2473 ms total | 52 calls | 47.55 ms mean | SELECT app.place_order($1, $2, $3, $4, $5, $6, $7, $8, $9) AS place_order
+15 ms total | 548 calls | 0.03 ms mean | SELECT $2 FROM app.users WHERE id = $1
+corrida completa: 507 s
+
+################ medium-whale-5-A  (20:39:28) ################
+ Container docker-pg-medium-1 Stopping 
+ Container docker-app-1 Stopping 
+ Container docker-app-1 Stopped 
+ Container docker-app-1 Removing 
+ Container docker-pg-medium-1 Stopped 
+ Container docker-pg-medium-1 Removing 
+ Container docker-app-1 Removed 
+ Container docker-pg-medium-1 Removed 
+ Network docker_default Removing 
+ Network docker_default Removed 
+ Image docker-pg-medium Building 
+#1 [internal] load local bake definitions
+#1 reading from stdin 591B done
+#1 DONE 0.0s
+
+#2 [internal] load build definition from Dockerfile
+#2 transferring dockerfile: 803B done
+#2 DONE 0.0s
+
+#3 [internal] load metadata for docker.io/library/postgres:18
+#3 DONE 0.1s
+
+#4 [internal] load .dockerignore
+#4 transferring context: 2B done
+#4 DONE 0.0s
+
+#5 [1/7] FROM docker.io/library/postgres:18@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336
+#5 resolve docker.io/library/postgres:18@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336 0.0s done
+#5 DONE 0.0s
+
+#6 [internal] load build context
+#6 transferring context: 302B done
+#6 DONE 0.0s
+
+#7 [6/7] COPY docker/03-vacuum.sh  /docker-entrypoint-initdb.d/03-vacuum.sh
+#7 CACHED
+
+#8 [2/7] COPY dump/bench.dump /dumps/trading.dump
+#8 CACHED
+
+#9 [3/7] COPY docker/00-conf.sh    /docker-entrypoint-initdb.d/00-conf.sh
+#9 CACHED
+
+#10 [4/7] COPY docker/01-restore.sh /docker-entrypoint-initdb.d/01-restore.sh
+#10 CACHED
+
+#11 [5/7] COPY docker/02-grants.sh  /docker-entrypoint-initdb.d/02-grants.sh
+#11 CACHED
+
+#12 [7/7] RUN chmod 755 /docker-entrypoint-initdb.d/*.sh && chmod 644 /dumps/trading.dump
+#12 CACHED
+
+#13 exporting to image
+#13 exporting layers done
+#13 exporting manifest sha256:14331d85ae0d48165c15c350977ba39db1da4d377655e68fc7e3b5ff4e29cae4 done
+#13 exporting config sha256:b315f334d903e9b89a77bae0745c93d1f845f1486298e398aa0879dd0528dd29 done
+#13 exporting attestation manifest sha256:f76a34ee7fedfa0f5fec5d9d7d1c7c2473914ed5c9d3867baa23456b825ccbb4 0.0s done
+#13 exporting manifest list sha256:7ed91f19b79e96e9202b252b26bf5c95defbbe9053468cea4c1f11ea46448fbc 0.1s done
+#13 naming to docker.io/library/docker-pg-medium:latest
+#13 naming to docker.io/library/docker-pg-medium:latest done
+#13 unpacking to docker.io/library/docker-pg-medium:latest 0.0s done
+#13 DONE 0.1s
+
+#14 resolving provenance for metadata file
+#14 DONE 0.0s
+ Image docker-pg-medium Built 
+ Network docker_default Creating 
+ Network docker_default Creating 
+ Network docker_default Created 
+ Network docker_default Created 
+ Container docker-pg-medium-1 Creating 
+ Container docker-pg-medium-1 Created 
+ Container docker-pg-medium-1 Starting 
+ Container docker-pg-medium-1 Started 
+esperando pg-medium (bench.dump)................................................................. ok
+restore: 77 s
+  orders  
+----------
+ 22208286
+(1 row)
+
+   db    
+---------
+ 4350 MB
+(1 row)
+
+pg-medium listo en :5434 (bench.dump, funciones reaplicadas)
+restore+vacuum: 80 s
+ Image docker-app Building 
+#1 [internal] load local bake definitions
+#1 reading from stdin 511B done
+#1 DONE 0.0s
+
+#2 [internal] load build definition from Dockerfile.app
+#2 transferring dockerfile: 384B done
+#2 DONE 0.0s
+
+#3 [auth] library/node:pull token for registry-1.docker.io
+#3 DONE 0.0s
+
+#4 [internal] load metadata for docker.io/library/node:22-alpine
+#4 DONE 2.0s
+
+#5 [internal] load .dockerignore
+#5 transferring context: 2B done
+#5 DONE 0.0s
+
+#6 [internal] load build context
+#6 transferring context: 670B done
+#6 DONE 0.0s
+
+#7 [1/7] FROM docker.io/library/node:22-alpine@sha256:fe4f6d74e20370acb04ad889077d14d0f64a9c8ea6a42bc60cddf1e844699914
+#7 resolve docker.io/library/node:22-alpine@sha256:fe4f6d74e20370acb04ad889077d14d0f64a9c8ea6a42bc60cddf1e844699914 0.0s done
+#7 DONE 0.0s
+
+#8 [2/7] WORKDIR /app
+#8 CACHED
+
+#9 [3/7] RUN corepack enable
+#9 CACHED
+
+#10 [4/7] COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+#10 CACHED
+
+#11 [5/7] RUN pnpm install --frozen-lockfile --prod=false
+#11 CACHED
+
+#12 [6/7] COPY tsconfig.json ./
+#12 CACHED
+
+#13 [7/7] COPY src ./src
+#13 CACHED
+
+#14 exporting to image
+#14 exporting layers done
+#14 exporting manifest sha256:8d079ec6568e89d32e3217ed20b7861c0ee5d7449a01bb711033c6b676e08179 done
+#14 exporting config sha256:f3a9fac4093d9f229d825d96ce1c60cbac365ea8bdac3106f2b5a61c6689d594 done
+#14 exporting attestation manifest sha256:6ade619b3356fd3b586fd0569bf6d0bf62897212ab872158da376e563d869a2f done
+#14 exporting manifest list sha256:b62c7b19116fbf18a3669c1df90d4409e25166ea0e679bfeea497a4f9b7d8b08 done
+#14 naming to docker.io/library/docker-app:latest done
+#14 unpacking to docker.io/library/docker-app:latest done
+#14 DONE 0.0s
+
+#15 resolving provenance for metadata file
+#15 DONE 0.0s
+ Image docker-app Built 
+ Container docker-app-1 Creating 
+ Container docker-app-1 Created 
+ Container docker-app-1 Starting 
+ Container docker-app-1 Started 
+-- calentamiento 2m
+-- medida 5m
+== medium / whale / 5 rps / A / 5m ==
+http_req_duration{op:get}: p50=60000ms p95=60000ms p99=60001ms max=60006ms n=1046
+http_req_duration{op:post}: p50=59999ms p95=60001ms p99=60002ms max=60005ms n=115
+http_req_failed: 96.813 %
+dropped_iterations: 194
+iterations: 1161  vus_max: 294
+-- top pg_stat_statements:
+6572887 ms total | 637 calls | 10318.50 ms mean | SELECT * FROM app.read_portfolio($1)
+104571 ms total | 99 calls | 1056.27 ms mean | SELECT app.place_order($1, $2, $3, $4, $5, $6, $7, $8, $9) AS place_order
+8 ms total | 1020 calls | 0.01 ms mean | SELECT $2 FROM app.users WHERE id = $1
+corrida completa: 603 s
+
+################ medium-whale-20-A  (20:49:31) ################
+ Container docker-app-1 Stopping 
+ Container docker-pg-medium-1 Stopping 
+ Container docker-pg-medium-1 Stopped 
+ Container docker-pg-medium-1 Removing 
+ Container docker-pg-medium-1 Removed 
+ Container docker-app-1 Stopped 
+ Container docker-app-1 Removing 
+ Container docker-app-1 Removed 
+ Network docker_default Removing 
+ Network docker_default Removed 
+ Image docker-pg-medium Building 
+#1 [internal] load local bake definitions
+#1 reading from stdin 591B done
+#1 DONE 0.0s
+
+#2 [internal] load build definition from Dockerfile
+#2 transferring dockerfile: 803B done
+#2 DONE 0.0s
+
+#3 [internal] load metadata for docker.io/library/postgres:18
+#3 DONE 0.1s
+
+#4 [internal] load .dockerignore
+#4 transferring context: 2B done
+#4 DONE 0.0s
+
+#5 [1/7] FROM docker.io/library/postgres:18@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336
+#5 resolve docker.io/library/postgres:18@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336 done
+#5 DONE 0.0s
+
+#6 [internal] load build context
+#6 transferring context: 302B done
+#6 DONE 0.0s
+
+#7 [5/7] COPY docker/02-grants.sh  /docker-entrypoint-initdb.d/02-grants.sh
+#7 CACHED
+
+#8 [6/7] COPY docker/03-vacuum.sh  /docker-entrypoint-initdb.d/03-vacuum.sh
+#8 CACHED
+
+#9 [2/7] COPY dump/bench.dump /dumps/trading.dump
+#9 CACHED
+
+#10 [3/7] COPY docker/00-conf.sh    /docker-entrypoint-initdb.d/00-conf.sh
+#10 CACHED
+
+#11 [4/7] COPY docker/01-restore.sh /docker-entrypoint-initdb.d/01-restore.sh
+#11 CACHED
+
+#12 [7/7] RUN chmod 755 /docker-entrypoint-initdb.d/*.sh && chmod 644 /dumps/trading.dump
+#12 CACHED
+
+#13 exporting to image
+#13 exporting layers done
+#13 exporting manifest sha256:14331d85ae0d48165c15c350977ba39db1da4d377655e68fc7e3b5ff4e29cae4 done
+#13 exporting config sha256:b315f334d903e9b89a77bae0745c93d1f845f1486298e398aa0879dd0528dd29 done
+#13 exporting attestation manifest sha256:e71d4f562ccbedf560774ba429cfb02d91350563ce8b170883f1127176aaf90b done
+#13 exporting manifest list sha256:55cc67c70a6c7ca0dea95b709547a9e62bba9f46bd5ad27d99defe9ccc28f346 done
+#13 naming to docker.io/library/docker-pg-medium:latest done
+#13 unpacking to docker.io/library/docker-pg-medium:latest 0.0s done
+#13 DONE 0.1s
+
+#14 resolving provenance for metadata file
+#14 DONE 0.0s
+ Image docker-pg-medium Built 
+ Network docker_default Creating 
+ Network docker_default Creating 
+ Network docker_default Created 
+ Network docker_default Created 
+ Container docker-pg-medium-1 Creating 
+ Container docker-pg-medium-1 Created 
+ Container docker-pg-medium-1 Starting 
+ Container docker-pg-medium-1 Started 
+esperando pg-medium (bench.dump).................................................................. ok
+restore: 80 s
+  orders  
+----------
+ 22208286
+(1 row)
+
+   db    
+---------
+ 4350 MB
+(1 row)
+
+pg-medium listo en :5434 (bench.dump, funciones reaplicadas)
+restore+vacuum: 85 s
+ Image docker-app Building 
+#1 [internal] load local bake definitions
+#1 reading from stdin 511B done
+#1 DONE 0.0s
+
+#2 [internal] load build definition from Dockerfile.app
+#2 transferring dockerfile: 384B done
+#2 DONE 0.0s
+
+#3 [auth] library/node:pull token for registry-1.docker.io
+#3 DONE 0.0s
+
+#4 [internal] load metadata for docker.io/library/node:22-alpine
+#4 DONE 1.1s
+
+#5 [internal] load .dockerignore
+#5 transferring context: 2B done
+#5 DONE 0.0s
+
+#6 [internal] load build context
+#6 transferring context: 670B done
+#6 DONE 0.0s
+
+#7 [1/7] FROM docker.io/library/node:22-alpine@sha256:fe4f6d74e20370acb04ad889077d14d0f64a9c8ea6a42bc60cddf1e844699914
+#7 resolve docker.io/library/node:22-alpine@sha256:fe4f6d74e20370acb04ad889077d14d0f64a9c8ea6a42bc60cddf1e844699914 0.0s done
+#7 DONE 0.0s
+
+#8 [5/7] RUN pnpm install --frozen-lockfile --prod=false
+#8 CACHED
+
+#9 [6/7] COPY tsconfig.json ./
+#9 CACHED
+
+#10 [2/7] WORKDIR /app
+#10 CACHED
+
+#11 [3/7] RUN corepack enable
+#11 CACHED
+
+#12 [4/7] COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+#12 CACHED
+
+#13 [7/7] COPY src ./src
+#13 CACHED
+
+#14 exporting to image
+#14 exporting layers done
+#14 exporting manifest sha256:8d079ec6568e89d32e3217ed20b7861c0ee5d7449a01bb711033c6b676e08179 done
+#14 exporting config sha256:f3a9fac4093d9f229d825d96ce1c60cbac365ea8bdac3106f2b5a61c6689d594 done
+#14 exporting attestation manifest sha256:aa2b20012a175033fa03d20053fda5ebe9ab50a4e66431d27b5c911b4224bc12 done
+#14 exporting manifest list sha256:1cefa832c0c53a3de0e6f2fcbe6206be2facf8e99ba1a775c8b040e52b2080b4 done
+#14 naming to docker.io/library/docker-app:latest done
+#14 unpacking to docker.io/library/docker-app:latest done
+#14 DONE 0.0s
+
+#15 resolving provenance for metadata file
+#15 DONE 0.0s
+ Image docker-app Built 
+ Container docker-app-1 Creating 
+ Container docker-app-1 Created 
+ Container docker-app-1 Starting 
+ Container docker-app-1 Started 
+-- calentamiento 2m
+-- medida 5m
+== medium / whale / 20 rps / A / 5m ==
+http_req_duration{op:get}: p50=60000ms p95=60003ms p99=60004ms max=60009ms n=2093
+http_req_duration{op:post}: p50=60000ms p95=60003ms p99=60004ms max=60004ms n=252
+http_req_failed: 98.507 %
+dropped_iterations: 3467
+iterations: 2345  vus_max: 500
+-- top pg_stat_statements:
+6490446 ms total | 698 calls | 9298.63 ms mean | SELECT * FROM app.read_portfolio($1)
+160120 ms total | 157 calls | 1019.87 ms mean | SELECT app.place_order($1, $2, $3, $4, $5, $6, $7, $8, $9) AS place_order
+10 ms total | 1286 calls | 0.01 ms mean | SELECT $2 FROM app.users WHERE id = $1
+corrida completa: 596 s
+ Container docker-app-1 Stopping 
+ Container docker-pg-medium-1 Stopping 
+ Container docker-pg-medium-1 Stopped 
+ Container docker-pg-medium-1 Removing 
+ Container docker-pg-medium-1 Removed 
+ Container docker-app-1 Stopped 
+ Container docker-app-1 Removing 
+ Container docker-app-1 Removed 
+ Network docker_default Removing 
+ Network docker_default Removed 
+
+listo: pnpm summarize -- --variant A

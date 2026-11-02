@@ -1,0 +1,27 @@
+== mediano (36000) ==
+                                                                 QUERY PLAN                                                                 
+--------------------------------------------------------------------------------------------------------------------------------------------
+ Finalize GroupAggregate (actual time=53901.823..53908.990 rows=10.00 loops=1)
+   Group Key: instrumentid
+   Buffers: shared hit=62956 read=164452
+   ->  Gather Merge (actual time=53808.243..53902.558 rows=10.00 loops=1)
+         Workers Planned: 2
+         Workers Launched: 0
+         Buffers: shared hit=62956 read=164452
+         ->  Partial GroupAggregate (actual time=53807.814..53899.562 rows=10.00 loops=1)
+               Group Key: instrumentid
+               Buffers: shared hit=62956 read=164452
+               ->  Sort (actual time=53607.126..53608.485 rows=201.00 loops=1)
+                     Sort Key: instrumentid
+                     Sort Method: quicksort  Memory: 31kB
+                     Buffers: shared hit=62956 read=164452
+                     ->  Parallel Seq Scan on orders (actual time=192.632..53588.891 rows=201.00 loops=1)
+                           Filter: (((side)::text = ANY ('{BUY,SELL}'::text[])) AND (userid = 36000) AND ((status)::text = 'FILLED'::text))
+                           Rows Removed by Filter: 22208095
+                           Buffers: shared hit=62956 read=164452
+ Planning:
+   Buffers: shared hit=133 read=6
+ Planning Time: 71.715 ms
+ Execution Time: 54320.195 ms
+(22 rows)
+

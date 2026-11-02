@@ -1,0 +1,4 @@
+== mediano (36000) ==
+ERROR:  relation "orders" does not exist
+LINE 1: ...SE side WHEN 'BUY' THEN size ELSE -size END) FROM orders WHE...
+                                                             ^

@@ -1,0 +1,4 @@
+# pnpm 12: la configuración vive acá, no en package.json.
+# esbuild (lo usan vitest y tsx) necesita su script de instalación para bajar el binario.
+allowBuilds:
+  esbuild: true

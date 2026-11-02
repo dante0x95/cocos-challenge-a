@@ -7,3 +7,8 @@ coverage/
 # Solo pnpm: otros lockfiles y copias de respaldo no se versionan
 package-lock.json
 *.bak
+
+# Benchmark (docs/benchmark/): los dumps y el dataset generado se regeneran, no se versionan
+bench/dump/*.dump
+bench/gen/out/
+bench/results-local/

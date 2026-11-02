@@ -1,0 +1,35 @@
+{
+  "name": "cocos-balances-bench",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "API mínima de balances para el benchmark A vs C del challenge. No es la API final.",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "start": "tsx src/server.ts",
+    "typecheck": "tsc --noEmit",
+    "test:unit": "vitest run test/unit",
+    "test:db": "vitest run test/db",
+    "test": "vitest run test/unit/ test/db/ test/concurrency/ test/property/ test/c/",
+    "test:concurrency": "vitest run test/concurrency",
+    "test:property": "vitest run test/property",
+    "test:migration": "vitest run test/migration",
+    "gen": "tsx bench/gen/generate.ts",
+    "verify": "tsx bench/gen/verify.ts",
+    "test:c": "vitest run test/c/",
+    "summarize": "tsx bench/summarize.ts"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "pg": "^8.13.1",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.10.2",
+    "@types/pg": "^8.11.10",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}

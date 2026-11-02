@@ -1,0 +1,925 @@
+ Container docker-k6-run-9cfa553a218f Creating 
+ Container docker-k6-run-9cfa553a218f Created 
+
+         /\      Grafana   /‾‾/  
+    /\  /  \     |\  __   /  /   
+   /  \/    \    | |/ /  /   ‾‾\ 
+  /          \   |   (  |  (‾)  |
+ / __________ \  |_|\_\  \_____/ 
+
+     execution: local
+        script: /k6/whale.js
+        output: -
+
+     scenarios: (100.00%) 1 scenario, 500 max VUs, 5m30s max duration (incl. graceful stop):
+              * whale: 5.00 iterations/s for 5m0s (maxVUs: 100-500, gracefulStop: 30s)
+
+
+running (0m00.4s), 000/100 VUs, 2 complete and 0 interrupted iterations
+whale   [   0% ] 000/100 VUs  0m00.4s/5m0s  5.00 iters/s
+
+running (0m01.3s), 000/100 VUs, 7 complete and 0 interrupted iterations
+whale   [   0% ] 000/100 VUs  0m01.3s/5m0s  5.00 iters/s
+
+running (0m02.3s), 000/100 VUs, 12 complete and 0 interrupted iterations
+whale   [   1% ] 000/100 VUs  0m02.3s/5m0s  5.00 iters/s
+
+running (0m03.3s), 000/100 VUs, 17 complete and 0 interrupted iterations
+whale   [   1% ] 000/100 VUs  0m03.3s/5m0s  5.00 iters/s
+
+running (0m04.3s), 000/100 VUs, 22 complete and 0 interrupted iterations
+whale   [   1% ] 000/100 VUs  0m04.3s/5m0s  5.00 iters/s
+
+running (0m05.3s), 000/100 VUs, 27 complete and 0 interrupted iterations
+whale   [   2% ] 000/100 VUs  0m05.3s/5m0s  5.00 iters/s
+
+running (0m06.3s), 000/100 VUs, 32 complete and 0 interrupted iterations
+whale   [   2% ] 000/100 VUs  0m06.3s/5m0s  5.00 iters/s
+
+running (0m07.3s), 000/100 VUs, 37 complete and 0 interrupted iterations
+whale   [   2% ] 000/100 VUs  0m07.3s/5m0s  5.00 iters/s
+
+running (0m08.4s), 000/100 VUs, 42 complete and 0 interrupted iterations
+whale   [   3% ] 000/100 VUs  0m08.4s/5m0s  5.00 iters/s
+
+running (0m09.3s), 000/100 VUs, 47 complete and 0 interrupted iterations
+whale   [   3% ] 000/100 VUs  0m09.3s/5m0s  5.00 iters/s
+
+running (0m10.3s), 000/100 VUs, 52 complete and 0 interrupted iterations
+whale   [   3% ] 000/100 VUs  0m10.3s/5m0s  5.00 iters/s
+
+running (0m11.3s), 000/100 VUs, 57 complete and 0 interrupted iterations
+whale   [   4% ] 000/100 VUs  0m11.3s/5m0s  5.00 iters/s
+
+running (0m12.3s), 000/100 VUs, 62 complete and 0 interrupted iterations
+whale   [   4% ] 000/100 VUs  0m12.3s/5m0s  5.00 iters/s
+
+running (0m13.3s), 000/100 VUs, 67 complete and 0 interrupted iterations
+whale   [   4% ] 000/100 VUs  0m13.3s/5m0s  5.00 iters/s
+
+running (0m14.4s), 000/100 VUs, 72 complete and 0 interrupted iterations
+whale   [   5% ] 000/100 VUs  0m14.4s/5m0s  5.00 iters/s
+
+running (0m15.3s), 000/100 VUs, 77 complete and 0 interrupted iterations
+whale   [   5% ] 000/100 VUs  0m15.3s/5m0s  5.00 iters/s
+
+running (0m16.3s), 000/100 VUs, 82 complete and 0 interrupted iterations
+whale   [   5% ] 000/100 VUs  0m16.3s/5m0s  5.00 iters/s
+
+running (0m17.3s), 000/100 VUs, 87 complete and 0 interrupted iterations
+whale   [   6% ] 000/100 VUs  0m17.3s/5m0s  5.00 iters/s
+
+running (0m18.3s), 000/100 VUs, 92 complete and 0 interrupted iterations
+whale   [   6% ] 000/100 VUs  0m18.3s/5m0s  5.00 iters/s
+
+running (0m19.4s), 000/100 VUs, 97 complete and 0 interrupted iterations
+whale   [   6% ] 000/100 VUs  0m19.4s/5m0s  5.00 iters/s
+
+running (0m20.3s), 000/100 VUs, 102 complete and 0 interrupted iterations
+whale   [   7% ] 000/100 VUs  0m20.3s/5m0s  5.00 iters/s
+
+running (0m21.3s), 000/100 VUs, 107 complete and 0 interrupted iterations
+whale   [   7% ] 000/100 VUs  0m21.3s/5m0s  5.00 iters/s
+
+running (0m22.3s), 000/100 VUs, 112 complete and 0 interrupted iterations
+whale   [   7% ] 000/100 VUs  0m22.3s/5m0s  5.00 iters/s
+
+running (0m23.4s), 000/100 VUs, 117 complete and 0 interrupted iterations
+whale   [   8% ] 000/100 VUs  0m23.4s/5m0s  5.00 iters/s
+
+running (0m24.3s), 000/100 VUs, 122 complete and 0 interrupted iterations
+whale   [   8% ] 000/100 VUs  0m24.3s/5m0s  5.00 iters/s
+
+running (0m25.3s), 000/100 VUs, 127 complete and 0 interrupted iterations
+whale   [   8% ] 000/100 VUs  0m25.3s/5m0s  5.00 iters/s
+
+running (0m26.3s), 000/100 VUs, 132 complete and 0 interrupted iterations
+whale   [   9% ] 000/100 VUs  0m26.3s/5m0s  5.00 iters/s
+
+running (0m27.3s), 000/100 VUs, 137 complete and 0 interrupted iterations
+whale   [   9% ] 000/100 VUs  0m27.3s/5m0s  5.00 iters/s
+
+running (0m28.3s), 000/100 VUs, 142 complete and 0 interrupted iterations
+whale   [   9% ] 000/100 VUs  0m28.3s/5m0s  5.00 iters/s
+
+running (0m29.3s), 000/100 VUs, 147 complete and 0 interrupted iterations
+whale   [  10% ] 000/100 VUs  0m29.3s/5m0s  5.00 iters/s
+
+running (0m30.4s), 000/100 VUs, 152 complete and 0 interrupted iterations
+whale   [  10% ] 000/100 VUs  0m30.4s/5m0s  5.00 iters/s
+
+running (0m31.3s), 000/100 VUs, 157 complete and 0 interrupted iterations
+whale   [  10% ] 000/100 VUs  0m31.3s/5m0s  5.00 iters/s
+
+running (0m32.4s), 000/100 VUs, 162 complete and 0 interrupted iterations
+whale   [  11% ] 000/100 VUs  0m32.4s/5m0s  5.00 iters/s
+
+running (0m33.3s), 000/100 VUs, 167 complete and 0 interrupted iterations
+whale   [  11% ] 000/100 VUs  0m33.3s/5m0s  5.00 iters/s
+
+running (0m34.3s), 000/100 VUs, 172 complete and 0 interrupted iterations
+whale   [  11% ] 000/100 VUs  0m34.3s/5m0s  5.00 iters/s
+
+running (0m35.3s), 000/100 VUs, 177 complete and 0 interrupted iterations
+whale   [  12% ] 000/100 VUs  0m35.3s/5m0s  5.00 iters/s
+
+running (0m36.3s), 000/100 VUs, 182 complete and 0 interrupted iterations
+whale   [  12% ] 000/100 VUs  0m36.3s/5m0s  5.00 iters/s
+
+running (0m37.3s), 000/100 VUs, 187 complete and 0 interrupted iterations
+whale   [  12% ] 000/100 VUs  0m37.3s/5m0s  5.00 iters/s
+
+running (0m38.4s), 000/100 VUs, 192 complete and 0 interrupted iterations
+whale   [  13% ] 000/100 VUs  0m38.4s/5m0s  5.00 iters/s
+
+running (0m39.3s), 000/100 VUs, 197 complete and 0 interrupted iterations
+whale   [  13% ] 000/100 VUs  0m39.3s/5m0s  5.00 iters/s
+
+running (0m40.3s), 000/100 VUs, 202 complete and 0 interrupted iterations
+whale   [  13% ] 000/100 VUs  0m40.3s/5m0s  5.00 iters/s
+
+running (0m41.3s), 000/100 VUs, 207 complete and 0 interrupted iterations
+whale   [  14% ] 000/100 VUs  0m41.3s/5m0s  5.00 iters/s
+
+running (0m42.4s), 000/100 VUs, 212 complete and 0 interrupted iterations
+whale   [  14% ] 000/100 VUs  0m42.3s/5m0s  5.00 iters/s
+
+running (0m43.3s), 000/100 VUs, 217 complete and 0 interrupted iterations
+whale   [  14% ] 000/100 VUs  0m43.3s/5m0s  5.00 iters/s
+
+running (0m44.3s), 000/100 VUs, 222 complete and 0 interrupted iterations
+whale   [  15% ] 000/100 VUs  0m44.3s/5m0s  5.00 iters/s
+
+running (0m45.3s), 000/100 VUs, 227 complete and 0 interrupted iterations
+whale   [  15% ] 000/100 VUs  0m45.3s/5m0s  5.00 iters/s
+
+running (0m46.4s), 000/100 VUs, 232 complete and 0 interrupted iterations
+whale   [  15% ] 000/100 VUs  0m46.4s/5m0s  5.00 iters/s
+
+running (0m47.3s), 000/100 VUs, 237 complete and 0 interrupted iterations
+whale   [  16% ] 000/100 VUs  0m47.3s/5m0s  5.00 iters/s
+
+running (0m48.3s), 000/100 VUs, 242 complete and 0 interrupted iterations
+whale   [  16% ] 000/100 VUs  0m48.3s/5m0s  5.00 iters/s
+
+running (0m49.4s), 000/100 VUs, 247 complete and 0 interrupted iterations
+whale   [  16% ] 000/100 VUs  0m49.4s/5m0s  5.00 iters/s
+
+running (0m50.4s), 000/100 VUs, 252 complete and 0 interrupted iterations
+whale   [  17% ] 000/100 VUs  0m50.4s/5m0s  5.00 iters/s
+
+running (0m51.4s), 000/100 VUs, 257 complete and 0 interrupted iterations
+whale   [  17% ] 000/100 VUs  0m51.4s/5m0s  5.00 iters/s
+
+running (0m52.3s), 000/100 VUs, 262 complete and 0 interrupted iterations
+whale   [  17% ] 000/100 VUs  0m52.3s/5m0s  5.00 iters/s
+
+running (0m53.3s), 000/100 VUs, 267 complete and 0 interrupted iterations
+whale   [  18% ] 000/100 VUs  0m53.3s/5m0s  5.00 iters/s
+
+running (0m54.4s), 000/100 VUs, 272 complete and 0 interrupted iterations
+whale   [  18% ] 000/100 VUs  0m54.4s/5m0s  5.00 iters/s
+
+running (0m55.4s), 000/100 VUs, 277 complete and 0 interrupted iterations
+whale   [  18% ] 000/100 VUs  0m55.4s/5m0s  5.00 iters/s
+
+running (0m56.3s), 000/100 VUs, 282 complete and 0 interrupted iterations
+whale   [  19% ] 000/100 VUs  0m56.3s/5m0s  5.00 iters/s
+
+running (0m57.4s), 000/100 VUs, 287 complete and 0 interrupted iterations
+whale   [  19% ] 000/100 VUs  0m57.4s/5m0s  5.00 iters/s
+
+running (0m58.3s), 000/100 VUs, 292 complete and 0 interrupted iterations
+whale   [  19% ] 000/100 VUs  0m58.3s/5m0s  5.00 iters/s
+
+running (0m59.4s), 000/100 VUs, 297 complete and 0 interrupted iterations
+whale   [  20% ] 000/100 VUs  0m59.4s/5m0s  5.00 iters/s
+
+running (1m00.3s), 000/100 VUs, 302 complete and 0 interrupted iterations
+whale   [  20% ] 000/100 VUs  1m00.3s/5m0s  5.00 iters/s
+
+running (1m01.3s), 000/100 VUs, 307 complete and 0 interrupted iterations
+whale   [  20% ] 000/100 VUs  1m01.3s/5m0s  5.00 iters/s
+
+running (1m02.4s), 000/100 VUs, 312 complete and 0 interrupted iterations
+whale   [  21% ] 000/100 VUs  1m02.4s/5m0s  5.00 iters/s
+
+running (1m03.3s), 000/100 VUs, 317 complete and 0 interrupted iterations
+whale   [  21% ] 000/100 VUs  1m03.3s/5m0s  5.00 iters/s
+
+running (1m04.4s), 000/100 VUs, 322 complete and 0 interrupted iterations
+whale   [  21% ] 000/100 VUs  1m04.3s/5m0s  5.00 iters/s
+
+running (1m05.4s), 000/100 VUs, 327 complete and 0 interrupted iterations
+whale   [  22% ] 000/100 VUs  1m05.4s/5m0s  5.00 iters/s
+
+running (1m06.3s), 000/100 VUs, 332 complete and 0 interrupted iterations
+whale   [  22% ] 000/100 VUs  1m06.3s/5m0s  5.00 iters/s
+
+running (1m07.4s), 000/100 VUs, 337 complete and 0 interrupted iterations
+whale   [  22% ] 000/100 VUs  1m07.4s/5m0s  5.00 iters/s
+
+running (1m08.3s), 000/100 VUs, 342 complete and 0 interrupted iterations
+whale   [  23% ] 000/100 VUs  1m08.3s/5m0s  5.00 iters/s
+
+running (1m09.4s), 000/100 VUs, 347 complete and 0 interrupted iterations
+whale   [  23% ] 000/100 VUs  1m09.3s/5m0s  5.00 iters/s
+
+running (1m10.3s), 000/100 VUs, 352 complete and 0 interrupted iterations
+whale   [  23% ] 000/100 VUs  1m10.3s/5m0s  5.00 iters/s
+
+running (1m11.3s), 000/100 VUs, 357 complete and 0 interrupted iterations
+whale   [  24% ] 000/100 VUs  1m11.3s/5m0s  5.00 iters/s
+
+running (1m12.3s), 000/100 VUs, 362 complete and 0 interrupted iterations
+whale   [  24% ] 000/100 VUs  1m12.3s/5m0s  5.00 iters/s
+
+running (1m13.3s), 000/100 VUs, 367 complete and 0 interrupted iterations
+whale   [  24% ] 000/100 VUs  1m13.3s/5m0s  5.00 iters/s
+
+running (1m14.3s), 000/100 VUs, 372 complete and 0 interrupted iterations
+whale   [  25% ] 000/100 VUs  1m14.3s/5m0s  5.00 iters/s
+
+running (1m15.4s), 000/100 VUs, 377 complete and 0 interrupted iterations
+whale   [  25% ] 000/100 VUs  1m15.3s/5m0s  5.00 iters/s
+
+running (1m16.3s), 000/100 VUs, 382 complete and 0 interrupted iterations
+whale   [  25% ] 000/100 VUs  1m16.3s/5m0s  5.00 iters/s
+
+running (1m17.3s), 000/100 VUs, 387 complete and 0 interrupted iterations
+whale   [  26% ] 000/100 VUs  1m17.3s/5m0s  5.00 iters/s
+
+running (1m18.4s), 000/100 VUs, 392 complete and 0 interrupted iterations
+whale   [  26% ] 000/100 VUs  1m18.4s/5m0s  5.00 iters/s
+
+running (1m19.3s), 000/100 VUs, 397 complete and 0 interrupted iterations
+whale   [  26% ] 000/100 VUs  1m19.3s/5m0s  5.00 iters/s
+
+running (1m20.4s), 000/100 VUs, 402 complete and 0 interrupted iterations
+whale   [  27% ] 000/100 VUs  1m20.4s/5m0s  5.00 iters/s
+
+running (1m21.4s), 000/100 VUs, 407 complete and 0 interrupted iterations
+whale   [  27% ] 000/100 VUs  1m21.4s/5m0s  5.00 iters/s
+
+running (1m22.3s), 000/100 VUs, 412 complete and 0 interrupted iterations
+whale   [  27% ] 000/100 VUs  1m22.3s/5m0s  5.00 iters/s
+
+running (1m23.3s), 000/100 VUs, 417 complete and 0 interrupted iterations
+whale   [  28% ] 000/100 VUs  1m23.3s/5m0s  5.00 iters/s
+
+running (1m24.4s), 000/100 VUs, 422 complete and 0 interrupted iterations
+whale   [  28% ] 000/100 VUs  1m24.4s/5m0s  5.00 iters/s
+
+running (1m25.3s), 000/100 VUs, 427 complete and 0 interrupted iterations
+whale   [  28% ] 000/100 VUs  1m25.3s/5m0s  5.00 iters/s
+
+running (1m26.3s), 000/100 VUs, 432 complete and 0 interrupted iterations
+whale   [  29% ] 000/100 VUs  1m26.3s/5m0s  5.00 iters/s
+
+running (1m27.3s), 000/100 VUs, 437 complete and 0 interrupted iterations
+whale   [  29% ] 000/100 VUs  1m27.3s/5m0s  5.00 iters/s
+
+running (1m28.3s), 000/100 VUs, 442 complete and 0 interrupted iterations
+whale   [  29% ] 000/100 VUs  1m28.3s/5m0s  5.00 iters/s
+
+running (1m29.3s), 000/100 VUs, 447 complete and 0 interrupted iterations
+whale   [  30% ] 000/100 VUs  1m29.3s/5m0s  5.00 iters/s
+
+running (1m30.4s), 000/100 VUs, 452 complete and 0 interrupted iterations
+whale   [  30% ] 000/100 VUs  1m30.4s/5m0s  5.00 iters/s
+
+running (1m31.3s), 000/100 VUs, 457 complete and 0 interrupted iterations
+whale   [  30% ] 000/100 VUs  1m31.3s/5m0s  5.00 iters/s
+
+running (1m32.3s), 000/100 VUs, 462 complete and 0 interrupted iterations
+whale   [  31% ] 000/100 VUs  1m32.3s/5m0s  5.00 iters/s
+
+running (1m33.4s), 000/100 VUs, 467 complete and 0 interrupted iterations
+whale   [  31% ] 000/100 VUs  1m33.4s/5m0s  5.00 iters/s
+
+running (1m34.4s), 000/100 VUs, 472 complete and 0 interrupted iterations
+whale   [  31% ] 000/100 VUs  1m34.4s/5m0s  5.00 iters/s
+
+running (1m35.3s), 000/100 VUs, 477 complete and 0 interrupted iterations
+whale   [  32% ] 000/100 VUs  1m35.3s/5m0s  5.00 iters/s
+
+running (1m36.4s), 000/100 VUs, 482 complete and 0 interrupted iterations
+whale   [  32% ] 000/100 VUs  1m36.4s/5m0s  5.00 iters/s
+
+running (1m37.3s), 000/100 VUs, 487 complete and 0 interrupted iterations
+whale   [  32% ] 000/100 VUs  1m37.3s/5m0s  5.00 iters/s
+
+running (1m38.4s), 000/100 VUs, 492 complete and 0 interrupted iterations
+whale   [  33% ] 000/100 VUs  1m38.4s/5m0s  5.00 iters/s
+
+running (1m39.3s), 000/100 VUs, 497 complete and 0 interrupted iterations
+whale   [  33% ] 000/100 VUs  1m39.3s/5m0s  5.00 iters/s
+
+running (1m40.4s), 000/100 VUs, 502 complete and 0 interrupted iterations
+whale   [  33% ] 000/100 VUs  1m40.4s/5m0s  5.00 iters/s
+
+running (1m41.3s), 000/100 VUs, 507 complete and 0 interrupted iterations
+whale   [  34% ] 000/100 VUs  1m41.3s/5m0s  5.00 iters/s
+
+running (1m42.3s), 000/100 VUs, 512 complete and 0 interrupted iterations
+whale   [  34% ] 000/100 VUs  1m42.3s/5m0s  5.00 iters/s
+
+running (1m43.3s), 000/100 VUs, 517 complete and 0 interrupted iterations
+whale   [  34% ] 000/100 VUs  1m43.3s/5m0s  5.00 iters/s
+
+running (1m44.4s), 000/100 VUs, 522 complete and 0 interrupted iterations
+whale   [  35% ] 000/100 VUs  1m44.4s/5m0s  5.00 iters/s
+
+running (1m45.3s), 000/100 VUs, 527 complete and 0 interrupted iterations
+whale   [  35% ] 000/100 VUs  1m45.3s/5m0s  5.00 iters/s
+
+running (1m46.3s), 000/100 VUs, 532 complete and 0 interrupted iterations
+whale   [  35% ] 000/100 VUs  1m46.3s/5m0s  5.00 iters/s
+
+running (1m47.4s), 000/100 VUs, 537 complete and 0 interrupted iterations
+whale   [  36% ] 000/100 VUs  1m47.3s/5m0s  5.00 iters/s
+
+running (1m48.3s), 000/100 VUs, 542 complete and 0 interrupted iterations
+whale   [  36% ] 000/100 VUs  1m48.3s/5m0s  5.00 iters/s
+
+running (1m49.3s), 000/100 VUs, 547 complete and 0 interrupted iterations
+whale   [  36% ] 000/100 VUs  1m49.3s/5m0s  5.00 iters/s
+
+running (1m50.4s), 000/100 VUs, 552 complete and 0 interrupted iterations
+whale   [  37% ] 000/100 VUs  1m50.4s/5m0s  5.00 iters/s
+
+running (1m51.3s), 000/100 VUs, 557 complete and 0 interrupted iterations
+whale   [  37% ] 000/100 VUs  1m51.3s/5m0s  5.00 iters/s
+
+running (1m52.3s), 000/100 VUs, 562 complete and 0 interrupted iterations
+whale   [  37% ] 000/100 VUs  1m52.3s/5m0s  5.00 iters/s
+
+running (1m53.3s), 000/100 VUs, 567 complete and 0 interrupted iterations
+whale   [  38% ] 000/100 VUs  1m53.3s/5m0s  5.00 iters/s
+
+running (1m54.4s), 000/100 VUs, 572 complete and 0 interrupted iterations
+whale   [  38% ] 000/100 VUs  1m54.4s/5m0s  5.00 iters/s
+
+running (1m55.4s), 000/100 VUs, 577 complete and 0 interrupted iterations
+whale   [  38% ] 000/100 VUs  1m55.3s/5m0s  5.00 iters/s
+
+running (1m56.4s), 000/100 VUs, 582 complete and 0 interrupted iterations
+whale   [  39% ] 000/100 VUs  1m56.4s/5m0s  5.00 iters/s
+
+running (1m57.3s), 000/100 VUs, 587 complete and 0 interrupted iterations
+whale   [  39% ] 000/100 VUs  1m57.3s/5m0s  5.00 iters/s
+
+running (1m58.4s), 000/100 VUs, 592 complete and 0 interrupted iterations
+whale   [  39% ] 000/100 VUs  1m58.4s/5m0s  5.00 iters/s
+
+running (1m59.4s), 000/100 VUs, 597 complete and 0 interrupted iterations
+whale   [  40% ] 000/100 VUs  1m59.3s/5m0s  5.00 iters/s
+
+running (2m00.3s), 000/100 VUs, 602 complete and 0 interrupted iterations
+whale   [  40% ] 000/100 VUs  2m00.3s/5m0s  5.00 iters/s
+
+running (2m01.3s), 000/100 VUs, 607 complete and 0 interrupted iterations
+whale   [  40% ] 000/100 VUs  2m01.3s/5m0s  5.00 iters/s
+
+running (2m02.4s), 000/100 VUs, 612 complete and 0 interrupted iterations
+whale   [  41% ] 000/100 VUs  2m02.4s/5m0s  5.00 iters/s
+
+running (2m03.4s), 000/100 VUs, 617 complete and 0 interrupted iterations
+whale   [  41% ] 000/100 VUs  2m03.4s/5m0s  5.00 iters/s
+
+running (2m04.4s), 000/100 VUs, 622 complete and 0 interrupted iterations
+whale   [  41% ] 000/100 VUs  2m04.4s/5m0s  5.00 iters/s
+
+running (2m05.4s), 000/100 VUs, 627 complete and 0 interrupted iterations
+whale   [  42% ] 000/100 VUs  2m05.4s/5m0s  5.00 iters/s
+
+running (2m06.4s), 000/100 VUs, 632 complete and 0 interrupted iterations
+whale   [  42% ] 000/100 VUs  2m06.4s/5m0s  5.00 iters/s
+
+running (2m07.3s), 000/100 VUs, 637 complete and 0 interrupted iterations
+whale   [  42% ] 000/100 VUs  2m07.3s/5m0s  5.00 iters/s
+
+running (2m08.4s), 000/100 VUs, 642 complete and 0 interrupted iterations
+whale   [  43% ] 000/100 VUs  2m08.4s/5m0s  5.00 iters/s
+
+running (2m09.4s), 000/100 VUs, 647 complete and 0 interrupted iterations
+whale   [  43% ] 000/100 VUs  2m09.4s/5m0s  5.00 iters/s
+
+running (2m10.3s), 000/100 VUs, 652 complete and 0 interrupted iterations
+whale   [  43% ] 000/100 VUs  2m10.3s/5m0s  5.00 iters/s
+
+running (2m11.3s), 000/100 VUs, 657 complete and 0 interrupted iterations
+whale   [  44% ] 000/100 VUs  2m11.3s/5m0s  5.00 iters/s
+
+running (2m12.4s), 000/100 VUs, 662 complete and 0 interrupted iterations
+whale   [  44% ] 000/100 VUs  2m12.4s/5m0s  5.00 iters/s
+
+running (2m13.4s), 000/100 VUs, 667 complete and 0 interrupted iterations
+whale   [  44% ] 000/100 VUs  2m13.4s/5m0s  5.00 iters/s
+
+running (2m14.3s), 000/100 VUs, 672 complete and 0 interrupted iterations
+whale   [  45% ] 000/100 VUs  2m14.3s/5m0s  5.00 iters/s
+
+running (2m15.4s), 000/100 VUs, 677 complete and 0 interrupted iterations
+whale   [  45% ] 000/100 VUs  2m15.4s/5m0s  5.00 iters/s
+
+running (2m16.3s), 000/100 VUs, 682 complete and 0 interrupted iterations
+whale   [  45% ] 000/100 VUs  2m16.3s/5m0s  5.00 iters/s
+
+running (2m17.4s), 000/100 VUs, 687 complete and 0 interrupted iterations
+whale   [  46% ] 000/100 VUs  2m17.4s/5m0s  5.00 iters/s
+
+running (2m18.4s), 000/100 VUs, 692 complete and 0 interrupted iterations
+whale   [  46% ] 000/100 VUs  2m18.4s/5m0s  5.00 iters/s
+
+running (2m19.3s), 000/100 VUs, 697 complete and 0 interrupted iterations
+whale   [  46% ] 000/100 VUs  2m19.3s/5m0s  5.00 iters/s
+
+running (2m20.4s), 000/100 VUs, 702 complete and 0 interrupted iterations
+whale   [  47% ] 000/100 VUs  2m20.4s/5m0s  5.00 iters/s
+
+running (2m21.4s), 000/100 VUs, 707 complete and 0 interrupted iterations
+whale   [  47% ] 000/100 VUs  2m21.4s/5m0s  5.00 iters/s
+
+running (2m22.3s), 000/100 VUs, 712 complete and 0 interrupted iterations
+whale   [  47% ] 000/100 VUs  2m22.3s/5m0s  5.00 iters/s
+
+running (2m23.4s), 000/100 VUs, 717 complete and 0 interrupted iterations
+whale   [  48% ] 000/100 VUs  2m23.4s/5m0s  5.00 iters/s
+
+running (2m24.4s), 000/100 VUs, 722 complete and 0 interrupted iterations
+whale   [  48% ] 000/100 VUs  2m24.4s/5m0s  5.00 iters/s
+
+running (2m25.3s), 000/100 VUs, 727 complete and 0 interrupted iterations
+whale   [  48% ] 000/100 VUs  2m25.3s/5m0s  5.00 iters/s
+
+running (2m26.3s), 000/100 VUs, 732 complete and 0 interrupted iterations
+whale   [  49% ] 000/100 VUs  2m26.3s/5m0s  5.00 iters/s
+
+running (2m27.4s), 000/100 VUs, 737 complete and 0 interrupted iterations
+whale   [  49% ] 000/100 VUs  2m27.3s/5m0s  5.00 iters/s
+
+running (2m28.3s), 000/100 VUs, 742 complete and 0 interrupted iterations
+whale   [  49% ] 000/100 VUs  2m28.3s/5m0s  5.00 iters/s
+
+running (2m29.4s), 000/100 VUs, 747 complete and 0 interrupted iterations
+whale   [  50% ] 000/100 VUs  2m29.4s/5m0s  5.00 iters/s
+
+running (2m30.4s), 000/100 VUs, 752 complete and 0 interrupted iterations
+whale   [  50% ] 000/100 VUs  2m30.4s/5m0s  5.00 iters/s
+
+running (2m31.3s), 000/100 VUs, 757 complete and 0 interrupted iterations
+whale   [  50% ] 000/100 VUs  2m31.3s/5m0s  5.00 iters/s
+
+running (2m32.3s), 000/100 VUs, 762 complete and 0 interrupted iterations
+whale   [  51% ] 000/100 VUs  2m32.3s/5m0s  5.00 iters/s
+
+running (2m33.4s), 000/100 VUs, 767 complete and 0 interrupted iterations
+whale   [  51% ] 000/100 VUs  2m33.4s/5m0s  5.00 iters/s
+
+running (2m34.4s), 000/100 VUs, 772 complete and 0 interrupted iterations
+whale   [  51% ] 000/100 VUs  2m34.3s/5m0s  5.00 iters/s
+
+running (2m35.4s), 000/100 VUs, 777 complete and 0 interrupted iterations
+whale   [  52% ] 000/100 VUs  2m35.4s/5m0s  5.00 iters/s
+
+running (2m36.3s), 000/100 VUs, 782 complete and 0 interrupted iterations
+whale   [  52% ] 000/100 VUs  2m36.3s/5m0s  5.00 iters/s
+
+running (2m37.3s), 000/100 VUs, 787 complete and 0 interrupted iterations
+whale   [  52% ] 000/100 VUs  2m37.3s/5m0s  5.00 iters/s
+
+running (2m38.3s), 000/100 VUs, 792 complete and 0 interrupted iterations
+whale   [  53% ] 000/100 VUs  2m38.3s/5m0s  5.00 iters/s
+
+running (2m39.4s), 000/100 VUs, 797 complete and 0 interrupted iterations
+whale   [  53% ] 000/100 VUs  2m39.4s/5m0s  5.00 iters/s
+
+running (2m40.4s), 000/100 VUs, 802 complete and 0 interrupted iterations
+whale   [  53% ] 000/100 VUs  2m40.4s/5m0s  5.00 iters/s
+
+running (2m41.4s), 000/100 VUs, 807 complete and 0 interrupted iterations
+whale   [  54% ] 000/100 VUs  2m41.4s/5m0s  5.00 iters/s
+
+running (2m42.4s), 000/100 VUs, 812 complete and 0 interrupted iterations
+whale   [  54% ] 000/100 VUs  2m42.4s/5m0s  5.00 iters/s
+
+running (2m43.4s), 000/100 VUs, 817 complete and 0 interrupted iterations
+whale   [  54% ] 000/100 VUs  2m43.4s/5m0s  5.00 iters/s
+
+running (2m44.4s), 000/100 VUs, 822 complete and 0 interrupted iterations
+whale   [  55% ] 000/100 VUs  2m44.3s/5m0s  5.00 iters/s
+
+running (2m45.4s), 000/100 VUs, 827 complete and 0 interrupted iterations
+whale   [  55% ] 000/100 VUs  2m45.4s/5m0s  5.00 iters/s
+
+running (2m46.4s), 000/100 VUs, 832 complete and 0 interrupted iterations
+whale   [  55% ] 000/100 VUs  2m46.3s/5m0s  5.00 iters/s
+
+running (2m47.3s), 000/100 VUs, 837 complete and 0 interrupted iterations
+whale   [  56% ] 000/100 VUs  2m47.3s/5m0s  5.00 iters/s
+
+running (2m48.3s), 000/100 VUs, 842 complete and 0 interrupted iterations
+whale   [  56% ] 000/100 VUs  2m48.3s/5m0s  5.00 iters/s
+
+running (2m49.3s), 000/100 VUs, 847 complete and 0 interrupted iterations
+whale   [  56% ] 000/100 VUs  2m49.3s/5m0s  5.00 iters/s
+
+running (2m50.3s), 000/100 VUs, 852 complete and 0 interrupted iterations
+whale   [  57% ] 000/100 VUs  2m50.3s/5m0s  5.00 iters/s
+
+running (2m51.4s), 000/100 VUs, 857 complete and 0 interrupted iterations
+whale   [  57% ] 000/100 VUs  2m51.4s/5m0s  5.00 iters/s
+
+running (2m52.3s), 000/100 VUs, 862 complete and 0 interrupted iterations
+whale   [  57% ] 000/100 VUs  2m52.3s/5m0s  5.00 iters/s
+
+running (2m53.4s), 000/100 VUs, 867 complete and 0 interrupted iterations
+whale   [  58% ] 000/100 VUs  2m53.4s/5m0s  5.00 iters/s
+
+running (2m54.3s), 000/100 VUs, 872 complete and 0 interrupted iterations
+whale   [  58% ] 000/100 VUs  2m54.3s/5m0s  5.00 iters/s
+
+running (2m55.3s), 000/100 VUs, 877 complete and 0 interrupted iterations
+whale   [  58% ] 000/100 VUs  2m55.3s/5m0s  5.00 iters/s
+
+running (2m56.4s), 000/100 VUs, 882 complete and 0 interrupted iterations
+whale   [  59% ] 000/100 VUs  2m56.4s/5m0s  5.00 iters/s
+
+running (2m57.3s), 000/100 VUs, 887 complete and 0 interrupted iterations
+whale   [  59% ] 000/100 VUs  2m57.3s/5m0s  5.00 iters/s
+
+running (2m58.4s), 000/100 VUs, 892 complete and 0 interrupted iterations
+whale   [  59% ] 000/100 VUs  2m58.3s/5m0s  5.00 iters/s
+
+running (2m59.3s), 000/100 VUs, 897 complete and 0 interrupted iterations
+whale   [  60% ] 000/100 VUs  2m59.3s/5m0s  5.00 iters/s
+
+running (3m00.4s), 000/100 VUs, 902 complete and 0 interrupted iterations
+whale   [  60% ] 000/100 VUs  3m00.3s/5m0s  5.00 iters/s
+
+running (3m01.3s), 000/100 VUs, 907 complete and 0 interrupted iterations
+whale   [  60% ] 000/100 VUs  3m01.3s/5m0s  5.00 iters/s
+
+running (3m02.3s), 000/100 VUs, 912 complete and 0 interrupted iterations
+whale   [  61% ] 000/100 VUs  3m02.3s/5m0s  5.00 iters/s
+
+running (3m03.3s), 000/100 VUs, 917 complete and 0 interrupted iterations
+whale   [  61% ] 000/100 VUs  3m03.3s/5m0s  5.00 iters/s
+
+running (3m04.3s), 000/100 VUs, 922 complete and 0 interrupted iterations
+whale   [  61% ] 000/100 VUs  3m04.3s/5m0s  5.00 iters/s
+
+running (3m05.3s), 000/100 VUs, 927 complete and 0 interrupted iterations
+whale   [  62% ] 000/100 VUs  3m05.3s/5m0s  5.00 iters/s
+
+running (3m06.4s), 000/100 VUs, 932 complete and 0 interrupted iterations
+whale   [  62% ] 000/100 VUs  3m06.4s/5m0s  5.00 iters/s
+
+running (3m07.4s), 000/100 VUs, 937 complete and 0 interrupted iterations
+whale   [  62% ] 000/100 VUs  3m07.4s/5m0s  5.00 iters/s
+
+running (3m08.3s), 000/100 VUs, 942 complete and 0 interrupted iterations
+whale   [  63% ] 000/100 VUs  3m08.3s/5m0s  5.00 iters/s
+
+running (3m09.3s), 000/100 VUs, 947 complete and 0 interrupted iterations
+whale   [  63% ] 000/100 VUs  3m09.3s/5m0s  5.00 iters/s
+
+running (3m10.4s), 000/100 VUs, 952 complete and 0 interrupted iterations
+whale   [  63% ] 000/100 VUs  3m10.4s/5m0s  5.00 iters/s
+
+running (3m11.4s), 000/100 VUs, 957 complete and 0 interrupted iterations
+whale   [  64% ] 000/100 VUs  3m11.4s/5m0s  5.00 iters/s
+
+running (3m12.4s), 000/100 VUs, 962 complete and 0 interrupted iterations
+whale   [  64% ] 000/100 VUs  3m12.4s/5m0s  5.00 iters/s
+
+running (3m13.3s), 000/100 VUs, 967 complete and 0 interrupted iterations
+whale   [  64% ] 000/100 VUs  3m13.3s/5m0s  5.00 iters/s
+
+running (3m14.4s), 000/100 VUs, 972 complete and 0 interrupted iterations
+whale   [  65% ] 000/100 VUs  3m14.4s/5m0s  5.00 iters/s
+
+running (3m15.3s), 000/100 VUs, 977 complete and 0 interrupted iterations
+whale   [  65% ] 000/100 VUs  3m15.3s/5m0s  5.00 iters/s
+
+running (3m16.3s), 000/100 VUs, 982 complete and 0 interrupted iterations
+whale   [  65% ] 000/100 VUs  3m16.3s/5m0s  5.00 iters/s
+
+running (3m17.3s), 000/100 VUs, 987 complete and 0 interrupted iterations
+whale   [  66% ] 000/100 VUs  3m17.3s/5m0s  5.00 iters/s
+
+running (3m18.4s), 000/100 VUs, 992 complete and 0 interrupted iterations
+whale   [  66% ] 000/100 VUs  3m18.4s/5m0s  5.00 iters/s
+
+running (3m19.4s), 000/100 VUs, 997 complete and 0 interrupted iterations
+whale   [  66% ] 000/100 VUs  3m19.3s/5m0s  5.00 iters/s
+
+running (3m20.3s), 000/100 VUs, 1002 complete and 0 interrupted iterations
+whale   [  67% ] 000/100 VUs  3m20.3s/5m0s  5.00 iters/s
+
+running (3m21.3s), 000/100 VUs, 1007 complete and 0 interrupted iterations
+whale   [  67% ] 000/100 VUs  3m21.3s/5m0s  5.00 iters/s
+
+running (3m22.4s), 000/100 VUs, 1012 complete and 0 interrupted iterations
+whale   [  67% ] 000/100 VUs  3m22.4s/5m0s  5.00 iters/s
+
+running (3m23.4s), 000/100 VUs, 1017 complete and 0 interrupted iterations
+whale   [  68% ] 000/100 VUs  3m23.4s/5m0s  5.00 iters/s
+
+running (3m24.4s), 000/100 VUs, 1022 complete and 0 interrupted iterations
+whale   [  68% ] 000/100 VUs  3m24.4s/5m0s  5.00 iters/s
+
+running (3m25.3s), 000/100 VUs, 1027 complete and 0 interrupted iterations
+whale   [  68% ] 000/100 VUs  3m25.3s/5m0s  5.00 iters/s
+
+running (3m26.3s), 000/100 VUs, 1032 complete and 0 interrupted iterations
+whale   [  69% ] 000/100 VUs  3m26.3s/5m0s  5.00 iters/s
+
+running (3m27.3s), 000/100 VUs, 1037 complete and 0 interrupted iterations
+whale   [  69% ] 000/100 VUs  3m27.3s/5m0s  5.00 iters/s
+
+running (3m28.4s), 000/100 VUs, 1042 complete and 0 interrupted iterations
+whale   [  69% ] 000/100 VUs  3m28.4s/5m0s  5.00 iters/s
+
+running (3m29.4s), 000/100 VUs, 1047 complete and 0 interrupted iterations
+whale   [  70% ] 000/100 VUs  3m29.4s/5m0s  5.00 iters/s
+
+running (3m30.3s), 000/100 VUs, 1052 complete and 0 interrupted iterations
+whale   [  70% ] 000/100 VUs  3m30.3s/5m0s  5.00 iters/s
+
+running (3m31.3s), 000/100 VUs, 1057 complete and 0 interrupted iterations
+whale   [  70% ] 000/100 VUs  3m31.3s/5m0s  5.00 iters/s
+
+running (3m32.3s), 000/100 VUs, 1062 complete and 0 interrupted iterations
+whale   [  71% ] 000/100 VUs  3m32.3s/5m0s  5.00 iters/s
+
+running (3m33.4s), 000/100 VUs, 1067 complete and 0 interrupted iterations
+whale   [  71% ] 000/100 VUs  3m33.4s/5m0s  5.00 iters/s
+
+running (3m34.3s), 000/100 VUs, 1072 complete and 0 interrupted iterations
+whale   [  71% ] 000/100 VUs  3m34.3s/5m0s  5.00 iters/s
+
+running (3m35.4s), 000/100 VUs, 1077 complete and 0 interrupted iterations
+whale   [  72% ] 000/100 VUs  3m35.4s/5m0s  5.00 iters/s
+
+running (3m36.4s), 000/100 VUs, 1082 complete and 0 interrupted iterations
+whale   [  72% ] 000/100 VUs  3m36.4s/5m0s  5.00 iters/s
+
+running (3m37.4s), 000/100 VUs, 1087 complete and 0 interrupted iterations
+whale   [  72% ] 000/100 VUs  3m37.4s/5m0s  5.00 iters/s
+
+running (3m38.4s), 000/100 VUs, 1092 complete and 0 interrupted iterations
+whale   [  73% ] 000/100 VUs  3m38.3s/5m0s  5.00 iters/s
+
+running (3m39.4s), 000/100 VUs, 1097 complete and 0 interrupted iterations
+whale   [  73% ] 000/100 VUs  3m39.4s/5m0s  5.00 iters/s
+
+running (3m40.3s), 000/100 VUs, 1102 complete and 0 interrupted iterations
+whale   [  73% ] 000/100 VUs  3m40.3s/5m0s  5.00 iters/s
+
+running (3m41.4s), 000/100 VUs, 1107 complete and 0 interrupted iterations
+whale   [  74% ] 000/100 VUs  3m41.4s/5m0s  5.00 iters/s
+
+running (3m42.4s), 000/100 VUs, 1112 complete and 0 interrupted iterations
+whale   [  74% ] 000/100 VUs  3m42.4s/5m0s  5.00 iters/s
+
+running (3m43.3s), 000/100 VUs, 1117 complete and 0 interrupted iterations
+whale   [  74% ] 000/100 VUs  3m43.3s/5m0s  5.00 iters/s
+
+running (3m44.3s), 000/100 VUs, 1122 complete and 0 interrupted iterations
+whale   [  75% ] 000/100 VUs  3m44.3s/5m0s  5.00 iters/s
+
+running (3m45.4s), 000/100 VUs, 1127 complete and 0 interrupted iterations
+whale   [  75% ] 000/100 VUs  3m45.4s/5m0s  5.00 iters/s
+
+running (3m46.4s), 000/100 VUs, 1132 complete and 0 interrupted iterations
+whale   [  75% ] 000/100 VUs  3m46.4s/5m0s  5.00 iters/s
+
+running (3m47.4s), 000/100 VUs, 1137 complete and 0 interrupted iterations
+whale   [  76% ] 000/100 VUs  3m47.4s/5m0s  5.00 iters/s
+
+running (3m48.4s), 000/100 VUs, 1142 complete and 0 interrupted iterations
+whale   [  76% ] 000/100 VUs  3m48.4s/5m0s  5.00 iters/s
+
+running (3m49.4s), 000/100 VUs, 1147 complete and 0 interrupted iterations
+whale   [  76% ] 000/100 VUs  3m49.4s/5m0s  5.00 iters/s
+
+running (3m50.4s), 000/100 VUs, 1152 complete and 0 interrupted iterations
+whale   [  77% ] 000/100 VUs  3m50.4s/5m0s  5.00 iters/s
+
+running (3m51.4s), 000/100 VUs, 1157 complete and 0 interrupted iterations
+whale   [  77% ] 000/100 VUs  3m51.4s/5m0s  5.00 iters/s
+
+running (3m52.4s), 000/100 VUs, 1162 complete and 0 interrupted iterations
+whale   [  77% ] 000/100 VUs  3m52.4s/5m0s  5.00 iters/s
+
+running (3m53.4s), 000/100 VUs, 1167 complete and 0 interrupted iterations
+whale   [  78% ] 000/100 VUs  3m53.4s/5m0s  5.00 iters/s
+
+running (3m54.4s), 000/100 VUs, 1172 complete and 0 interrupted iterations
+whale   [  78% ] 000/100 VUs  3m54.4s/5m0s  5.00 iters/s
+
+running (3m55.4s), 000/100 VUs, 1177 complete and 0 interrupted iterations
+whale   [  78% ] 000/100 VUs  3m55.4s/5m0s  5.00 iters/s
+
+running (3m56.3s), 000/100 VUs, 1182 complete and 0 interrupted iterations
+whale   [  79% ] 000/100 VUs  3m56.3s/5m0s  5.00 iters/s
+
+running (3m57.4s), 000/100 VUs, 1187 complete and 0 interrupted iterations
+whale   [  79% ] 000/100 VUs  3m57.3s/5m0s  5.00 iters/s
+
+running (3m58.4s), 000/100 VUs, 1192 complete and 0 interrupted iterations
+whale   [  79% ] 000/100 VUs  3m58.4s/5m0s  5.00 iters/s
+
+running (3m59.4s), 000/100 VUs, 1197 complete and 0 interrupted iterations
+whale   [  80% ] 000/100 VUs  3m59.3s/5m0s  5.00 iters/s
+
+running (4m00.3s), 000/100 VUs, 1202 complete and 0 interrupted iterations
+whale   [  80% ] 000/100 VUs  4m00.3s/5m0s  5.00 iters/s
+
+running (4m01.3s), 000/100 VUs, 1207 complete and 0 interrupted iterations
+whale   [  80% ] 000/100 VUs  4m01.3s/5m0s  5.00 iters/s
+
+running (4m02.4s), 000/100 VUs, 1212 complete and 0 interrupted iterations
+whale   [  81% ] 000/100 VUs  4m02.4s/5m0s  5.00 iters/s
+
+running (4m03.4s), 000/100 VUs, 1217 complete and 0 interrupted iterations
+whale   [  81% ] 000/100 VUs  4m03.4s/5m0s  5.00 iters/s
+
+running (4m04.4s), 000/100 VUs, 1222 complete and 0 interrupted iterations
+whale   [  81% ] 000/100 VUs  4m04.4s/5m0s  5.00 iters/s
+
+running (4m05.4s), 000/100 VUs, 1227 complete and 0 interrupted iterations
+whale   [  82% ] 000/100 VUs  4m05.4s/5m0s  5.00 iters/s
+
+running (4m06.4s), 000/100 VUs, 1232 complete and 0 interrupted iterations
+whale   [  82% ] 000/100 VUs  4m06.3s/5m0s  5.00 iters/s
+
+running (4m07.3s), 000/100 VUs, 1237 complete and 0 interrupted iterations
+whale   [  82% ] 000/100 VUs  4m07.3s/5m0s  5.00 iters/s
+
+running (4m08.4s), 000/100 VUs, 1242 complete and 0 interrupted iterations
+whale   [  83% ] 000/100 VUs  4m08.4s/5m0s  5.00 iters/s
+
+running (4m09.3s), 000/100 VUs, 1247 complete and 0 interrupted iterations
+whale   [  83% ] 000/100 VUs  4m09.3s/5m0s  5.00 iters/s
+
+running (4m10.3s), 000/100 VUs, 1252 complete and 0 interrupted iterations
+whale   [  83% ] 000/100 VUs  4m10.3s/5m0s  5.00 iters/s
+
+running (4m11.3s), 000/100 VUs, 1257 complete and 0 interrupted iterations
+whale   [  84% ] 000/100 VUs  4m11.3s/5m0s  5.00 iters/s
+
+running (4m12.4s), 000/100 VUs, 1262 complete and 0 interrupted iterations
+whale   [  84% ] 000/100 VUs  4m12.4s/5m0s  5.00 iters/s
+
+running (4m13.3s), 000/100 VUs, 1267 complete and 0 interrupted iterations
+whale   [  84% ] 000/100 VUs  4m13.3s/5m0s  5.00 iters/s
+
+running (4m14.4s), 000/100 VUs, 1272 complete and 0 interrupted iterations
+whale   [  85% ] 000/100 VUs  4m14.4s/5m0s  5.00 iters/s
+
+running (4m15.3s), 000/100 VUs, 1277 complete and 0 interrupted iterations
+whale   [  85% ] 000/100 VUs  4m15.3s/5m0s  5.00 iters/s
+
+running (4m16.4s), 000/100 VUs, 1282 complete and 0 interrupted iterations
+whale   [  85% ] 000/100 VUs  4m16.4s/5m0s  5.00 iters/s
+
+running (4m17.3s), 000/100 VUs, 1287 complete and 0 interrupted iterations
+whale   [  86% ] 000/100 VUs  4m17.3s/5m0s  5.00 iters/s
+
+running (4m18.3s), 000/100 VUs, 1292 complete and 0 interrupted iterations
+whale   [  86% ] 000/100 VUs  4m18.3s/5m0s  5.00 iters/s
+
+running (4m19.4s), 000/100 VUs, 1297 complete and 0 interrupted iterations
+whale   [  86% ] 000/100 VUs  4m19.3s/5m0s  5.00 iters/s
+
+running (4m20.3s), 000/100 VUs, 1302 complete and 0 interrupted iterations
+whale   [  87% ] 000/100 VUs  4m20.3s/5m0s  5.00 iters/s
+
+running (4m21.3s), 000/100 VUs, 1307 complete and 0 interrupted iterations
+whale   [  87% ] 000/100 VUs  4m21.3s/5m0s  5.00 iters/s
+
+running (4m22.4s), 000/100 VUs, 1312 complete and 0 interrupted iterations
+whale   [  87% ] 000/100 VUs  4m22.4s/5m0s  5.00 iters/s
+
+running (4m23.3s), 000/100 VUs, 1317 complete and 0 interrupted iterations
+whale   [  88% ] 000/100 VUs  4m23.3s/5m0s  5.00 iters/s
+
+running (4m24.4s), 000/100 VUs, 1322 complete and 0 interrupted iterations
+whale   [  88% ] 000/100 VUs  4m24.4s/5m0s  5.00 iters/s
+
+running (4m25.3s), 000/100 VUs, 1327 complete and 0 interrupted iterations
+whale   [  88% ] 000/100 VUs  4m25.4s/5m0s  5.00 iters/s
+
+running (4m26.4s), 000/100 VUs, 1332 complete and 0 interrupted iterations
+whale   [  89% ] 000/100 VUs  4m26.4s/5m0s  5.00 iters/s
+
+running (4m27.3s), 000/100 VUs, 1337 complete and 0 interrupted iterations
+whale   [  89% ] 000/100 VUs  4m27.3s/5m0s  5.00 iters/s
+
+running (4m28.4s), 000/100 VUs, 1342 complete and 0 interrupted iterations
+whale   [  89% ] 000/100 VUs  4m28.4s/5m0s  5.00 iters/s
+
+running (4m29.3s), 000/100 VUs, 1347 complete and 0 interrupted iterations
+whale   [  90% ] 000/100 VUs  4m29.3s/5m0s  5.00 iters/s
+
+running (4m30.4s), 000/100 VUs, 1352 complete and 0 interrupted iterations
+whale   [  90% ] 000/100 VUs  4m30.4s/5m0s  5.00 iters/s
+
+running (4m31.3s), 000/100 VUs, 1357 complete and 0 interrupted iterations
+whale   [  90% ] 000/100 VUs  4m31.3s/5m0s  5.00 iters/s
+
+running (4m32.3s), 000/100 VUs, 1362 complete and 0 interrupted iterations
+whale   [  91% ] 000/100 VUs  4m32.3s/5m0s  5.00 iters/s
+
+running (4m33.3s), 000/100 VUs, 1367 complete and 0 interrupted iterations
+whale   [  91% ] 000/100 VUs  4m33.3s/5m0s  5.00 iters/s
+
+running (4m34.3s), 000/100 VUs, 1372 complete and 0 interrupted iterations
+whale   [  91% ] 000/100 VUs  4m34.3s/5m0s  5.00 iters/s
+
+running (4m35.4s), 000/100 VUs, 1377 complete and 0 interrupted iterations
+whale   [  92% ] 000/100 VUs  4m35.4s/5m0s  5.00 iters/s
+
+running (4m36.3s), 000/100 VUs, 1382 complete and 0 interrupted iterations
+whale   [  92% ] 000/100 VUs  4m36.3s/5m0s  5.00 iters/s
+
+running (4m37.3s), 000/100 VUs, 1387 complete and 0 interrupted iterations
+whale   [  92% ] 000/100 VUs  4m37.3s/5m0s  5.00 iters/s
+
+running (4m38.4s), 000/100 VUs, 1392 complete and 0 interrupted iterations
+whale   [  93% ] 000/100 VUs  4m38.4s/5m0s  5.00 iters/s
+
+running (4m39.4s), 000/100 VUs, 1397 complete and 0 interrupted iterations
+whale   [  93% ] 000/100 VUs  4m39.4s/5m0s  5.00 iters/s
+
+running (4m40.4s), 000/100 VUs, 1402 complete and 0 interrupted iterations
+whale   [  93% ] 000/100 VUs  4m40.4s/5m0s  5.00 iters/s
+
+running (4m41.3s), 000/100 VUs, 1407 complete and 0 interrupted iterations
+whale   [  94% ] 000/100 VUs  4m41.3s/5m0s  5.00 iters/s
+
+running (4m42.3s), 000/100 VUs, 1412 complete and 0 interrupted iterations
+whale   [  94% ] 000/100 VUs  4m42.3s/5m0s  5.00 iters/s
+
+running (4m43.4s), 000/100 VUs, 1417 complete and 0 interrupted iterations
+whale   [  94% ] 000/100 VUs  4m43.3s/5m0s  5.00 iters/s
+
+running (4m44.3s), 000/100 VUs, 1422 complete and 0 interrupted iterations
+whale   [  95% ] 000/100 VUs  4m44.3s/5m0s  5.00 iters/s
+
+running (4m45.3s), 000/100 VUs, 1427 complete and 0 interrupted iterations
+whale   [  95% ] 000/100 VUs  4m45.3s/5m0s  5.00 iters/s
+
+running (4m46.3s), 000/100 VUs, 1432 complete and 0 interrupted iterations
+whale   [  95% ] 000/100 VUs  4m46.3s/5m0s  5.00 iters/s
+
+running (4m47.3s), 000/100 VUs, 1437 complete and 0 interrupted iterations
+whale   [  96% ] 000/100 VUs  4m47.3s/5m0s  5.00 iters/s
+
+running (4m48.3s), 000/100 VUs, 1442 complete and 0 interrupted iterations
+whale   [  96% ] 000/100 VUs  4m48.3s/5m0s  5.00 iters/s
+
+running (4m49.3s), 000/100 VUs, 1447 complete and 0 interrupted iterations
+whale   [  96% ] 000/100 VUs  4m49.3s/5m0s  5.00 iters/s
+
+running (4m50.3s), 000/100 VUs, 1452 complete and 0 interrupted iterations
+whale   [  97% ] 000/100 VUs  4m50.3s/5m0s  5.00 iters/s
+
+running (4m51.3s), 000/100 VUs, 1457 complete and 0 interrupted iterations
+whale   [  97% ] 000/100 VUs  4m51.3s/5m0s  5.00 iters/s
+
+running (4m52.3s), 000/100 VUs, 1462 complete and 0 interrupted iterations
+whale   [  97% ] 000/100 VUs  4m52.3s/5m0s  5.00 iters/s
+
+running (4m53.4s), 000/100 VUs, 1467 complete and 0 interrupted iterations
+whale   [  98% ] 000/100 VUs  4m53.3s/5m0s  5.00 iters/s
+
+running (4m54.4s), 000/100 VUs, 1472 complete and 0 interrupted iterations
+whale   [  98% ] 000/100 VUs  4m54.3s/5m0s  5.00 iters/s
+
+running (4m55.3s), 000/100 VUs, 1477 complete and 0 interrupted iterations
+whale   [  98% ] 000/100 VUs  4m55.3s/5m0s  5.00 iters/s
+
+running (4m56.3s), 000/100 VUs, 1482 complete and 0 interrupted iterations
+whale   [  99% ] 000/100 VUs  4m56.3s/5m0s  5.00 iters/s
+
+running (4m57.3s), 000/100 VUs, 1487 complete and 0 interrupted iterations
+whale   [  99% ] 000/100 VUs  4m57.3s/5m0s  5.00 iters/s
+
+running (4m58.4s), 000/100 VUs, 1492 complete and 0 interrupted iterations
+whale   [  99% ] 000/100 VUs  4m58.4s/5m0s  5.00 iters/s
+
+running (4m59.4s), 000/100 VUs, 1497 complete and 0 interrupted iterations
+whale   [ 100% ] 000/100 VUs  4m59.4s/5m0s  5.00 iters/s
+== medium / whale / 5 rps / C-caliente / 5m ==
+http_req_duration{op:get}: p50=13ms p95=18ms p99=22ms max=47ms n=1366
+http_req_duration{op:post}: p50=10ms p95=14ms p99=17ms max=20ms n=135
+http_req_failed: 0.000 %
+dropped_iterations: 0
+iterations: 1501  vus_max: 100
+
+running (5m00.0s), 000/100 VUs, 1501 complete and 0 interrupted iterations
+whale ✓ [ 100% ] 000/100 VUs  5m0s  5.00 iters/s

@@ -1,0 +1,82 @@
+# Perfiles de Postgres (B.2) + app + k6.
+#   DUMP=bench.dump docker compose up -d --build pg-medium           # DB del benchmark
+#   PROFILE=medium  docker compose --profile bench up -d --build app  # API de A contra ese perfil
+#   DUMP=base.dump APP_MODE=naive DB_USER=postgres DB_PASS=postgres PROFILE=medium docker compose --profile bench up -d --build pg-medium app   # Z
+#   docker compose --profile bench run --rm k6 run -e BASE=http://app:3000 ... /k6/read-heavy.js
+# Proyecto propio: un `down -v` de los scripts no toca otro compose que se llame como la carpeta.
+# BENCH_PG_PORT / BENCH_APP_PORT cambian los puertos del host; BENCH_RESULTS, dónde escribe k6.
+name: cocos-bench
+
+x-pg: &pg
+  build:
+    context: ..
+    dockerfile: docker/Dockerfile
+    args:
+      DUMP: ${DUMP:-trading.dump}
+  environment:
+    POSTGRES_USER: postgres
+    POSTGRES_PASSWORD: postgres
+    POSTGRES_DB: trading
+  healthcheck:
+    test: ["CMD-SHELL", "pg_isready -U postgres -d trading"]
+    interval: 2s
+    retries: 30
+
+services:
+  pg-small:
+    <<: *pg
+    ports: ["${BENCH_PG_PORT:-5433}:5432"]
+    mem_limit: 512m
+    cpus: 1
+    volumes:
+      - ./conf/small.conf:/etc/postgresql/custom.conf:ro
+
+  pg-medium:
+    <<: *pg
+    ports: ["${BENCH_PG_PORT:-5434}:5432"]
+    mem_limit: 2g
+    cpus: 2
+    volumes:
+      - ./conf/medium.conf:/etc/postgresql/custom.conf:ro
+
+  pg-large:
+    <<: *pg
+    ports: ["${BENCH_PG_PORT:-5435}:5432"]
+    mem_limit: 8g
+    cpus: 4
+    volumes:
+      - ./conf/large.conf:/etc/postgresql/custom.conf:ro
+
+  pg-neon:
+    <<: *pg
+    ports: ["${BENCH_PG_PORT:-5436}:5432"]
+    mem_limit: 1g
+    cpus: 0.25
+    volumes:
+      - ./conf/neon.conf:/etc/postgresql/custom.conf:ro
+
+  app:
+    profiles: ["bench"]
+    build:
+      # La API que se midió (bench/app, copia del repo del benchmark), no la de este repo.
+      context: ../app
+      dockerfile: ../docker/Dockerfile.app
+    environment:
+      # A: rol api. Z (APP_MODE=naive, DUMP=base.dump): DB_USER=postgres DB_PASS=postgres.
+      DATABASE_URL: postgresql://${DB_USER:-api}:${DB_PASS:-api}@pg-${PROFILE:-medium}:5432/trading
+      APP_MODE: ${APP_MODE:-a}
+      PG_POOL_MAX: ${PG_POOL_MAX:-20}
+      REQUEST_DEADLINE_MS: ${REQUEST_DEADLINE_MS:-4000}
+    ports: ["${BENCH_APP_PORT:-3000}:3000"]
+    mem_limit: 1g
+    cpus: 2
+
+  k6:
+    profiles: ["bench"]
+    image: grafana/k6:0.54.0
+    volumes:
+      - ../k6:/k6:ro
+      - ../gen/out/cohorts.json:/data/cohorts.json:ro
+      - ${BENCH_RESULTS:-../results}:/results
+    environment:
+      BASE: http://app:3000

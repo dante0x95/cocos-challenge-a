@@ -1,0 +1,5 @@
+3192437 ms total | 60 calls | 53207.28 ms mean | SELECT o.instrumentid, i.ticker, i.name, SUM(CASE WHEN o.status = 'FILLED' THEN CASE o.side WHEN 'BUY' THEN o.
+3071758 ms total | 97 calls | 31667.61 ms mean | SELECT COALESCE(SUM(CASE WHEN status = $2 THEN CASE side WHEN $3 THEN size*price WHEN $4 THEN size*price ELSE 
+238187 ms total | 6 calls | 39697.83 ms mean | SELECT COALESCE(SUM(CASE WHEN status = $2 THEN CASE side WHEN $3 THEN size*price WHEN $4 THEN size*price ELSE 
+39552 ms total | 30 calls | 1318.40 ms mean | SELECT close, previousclose, date FROM marketdata WHERE instrumentid = $1 ORDER BY date DESC LIMIT $2
+1476 ms total | 167 calls | 8.84 ms mean | SELECT $2 FROM users WHERE id = $1

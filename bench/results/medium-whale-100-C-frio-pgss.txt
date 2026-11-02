@@ -1,0 +1,5 @@
+5906855 ms total | 540 calls | 10938.62 ms mean | SELECT * FROM app.read_portfolio($1)
+9 ms total | 44 calls | 0.20 ms mean | SELECT pg_cancel_backend($1)
+5 ms total | 570 calls | 0.01 ms mean | SELECT $2 FROM app.users WHERE id = $1
+1 ms total | 15 calls | 0.09 ms mean | SELECT id FROM app.instruments WHERE ticker = $1
+0 ms total | 66 calls | 0.01 ms mean | SET LOCAL lock_timeout = $1

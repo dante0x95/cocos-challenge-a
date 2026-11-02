@@ -1,0 +1,8 @@
+restore+vacuum: 86 s
+
+ snapshots | size  
+-----------+-------
+     70001 | 81 MB
+(1 row)
+
+calentamiento: 290 s

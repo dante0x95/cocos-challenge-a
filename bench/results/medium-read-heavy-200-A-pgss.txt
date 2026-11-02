@@ -1,0 +1,5 @@
+85097 ms total | 53934 calls | 1.58 ms mean | SELECT * FROM app.read_portfolio($1)
+7171 ms total | 6061 calls | 1.18 ms mean | SELECT app.place_order($1, $2, $3, $4, $5, $6, $7, $8, $9) AS place_order
+500 ms total | 53934 calls | 0.01 ms mean | SELECT $2 FROM app.users WHERE id = $1
+137 ms total | 2646 calls | 0.05 ms mean | SELECT id FROM app.instruments WHERE ticker = $1
+33 ms total | 6067 calls | 0.01 ms mean | SET LOCAL lock_timeout = $1

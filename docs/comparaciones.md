@@ -80,7 +80,7 @@ p99 en milisegundos, `GET` / `POST`. "Colapso" = más del 95 % de las requests v
 | whale 20 | — | colapso | colapso | **14 / 10** |
 | whale 100 | — | — | colapso | **11 / 7** |
 
-Las celdas sin marca tuvieron menos de 0,01 % de fallos y ninguna request descartada. "—" = no se corrió, porque no aportaba: Z ya colapsaba a 1–5 RPS y A en `whale` a 5.
+Las celdas sin marca tuvieron menos de 0,01 % de fallos y ninguna request descartada. Todas cumplen el criterio de éxito salvo A en `whale 2`: es estable, pero su p99 de `GET` (795 ms) pasa los 500 ms. "—" = no se corrió, porque no aportaba: Z ya colapsaba a 1–5 RPS y A en `whale` a 5.
 
 Una sola request, sin carga:
 
@@ -91,7 +91,7 @@ Una sola request, sin carga:
 
 Estas lecturas sueltas se tomaron a mano y su salida no se guardó. Lo más cercano versionado: la media de `read_portfolio` en A durante `whale 2` fue de 544 ms.
 
-**Por qué A colapsa en `whale`.** La lectura de A recorre todas las órdenes ejecutadas del usuario. El mismo plan, con la base caliente, tarda 9,8 ms para un usuario mediano y 821,6 ms para una ballena, cuyas órdenes no entran en `work_mem` y se ordenan en disco. Con ~0,54 s de base por lectura y 2 CPU, la capacidad es de unas 3,7 lecturas de ballena por segundo: `whale 2` pide 1,8 y cumple; `whale 5` pide 4,5 y la cola crece sin límite. **Colapsa, no se degrada.**
+**Por qué A colapsa en `whale`.** La lectura de A recorre todas las órdenes ejecutadas del usuario. El mismo plan, con la base caliente, tarda 9,8 ms para un usuario mediano y 821,6 ms para una ballena, cuyas órdenes no entran en `work_mem` y se ordenan en disco. Con ~0,54 s de base por lectura y 2 CPU, la capacidad es de unas 3,7 lecturas de ballena por segundo: `whale 2` pide 1,8 y lo sostiene sin fallos, aunque con un p99 de `GET` de 795 ms que ya no cumple el criterio; `whale 5` pide 4,5 y la cola crece sin límite. **Colapsa, no se degrada.**
 
 ## Tamaños y calentamiento de C
 
@@ -109,6 +109,6 @@ Estas lecturas sueltas se tomaron a mano y su salida no se guardó. Lo más cerc
 - **De Z a A**, casi todo lo explica el índice parcial por usuario: sin él, cada request recorre los 22 millones de filas. Lo demás de A (lock, idempotencia, `balance_seq`) no se nota en latencia: se justifica por corrección.
 - **Se entrega A.** Cumple el criterio con margen en `read-heavy` hasta 400 RPS (p99 ≤ 26 ms), es exactamente lo que pide el enunciado (calcular desde `orders`) y no tiene nada que calentar ni reconciliar. El perfil que la hace caer no está en el dataset del challenge.
 - **Su límite es estructural**: con historias de más de 100.000 órdenes ejecutadas consultadas a más de 2 requests por segundo, colapsa, y más hardware no lo arregla.
-- **C es la respuesta para ese perfil**, y está medida: mejora `whale` 40× a 2 RPS (795 → 20 ms) y pasa de 2 RPS sostenibles a 100 (p99 11 / 7 ms). A cambio, hay que operarla: dos tablas más, una versión del cálculo con barrera de despliegue, reconciliación y un calentamiento obligatorio antes de aceptar tráfico, porque fría es peor que A.
+- **C es la respuesta para ese perfil**, y está medida: mejora `whale` 40× a 2 RPS (795 → 20 ms) y pasa de 2 RPS sostenibles a 100 (p99 11 / 7 ms). A cambio, hay que operarla: dos tablas más, una versión del cálculo con barrera de despliegue, reconciliación y un calentamiento obligatorio antes de aceptar tráfico: fría, cuando la carga no deja terminar a las escrituras que publican los snapshots (`whale` desde 5 RPS), colapsa igual que A y no se recupera sola; y aun cuando publica, como en `read-heavy 400`, las reconstrucciones le cuestan iteraciones descartadas.
 
 El detalle de la decisión, lo que no se midió y qué cambiaría al pasar a C: [`decision-snapshot.md`](decision-snapshot.md).

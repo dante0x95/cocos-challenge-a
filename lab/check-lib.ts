@@ -3,8 +3,8 @@
 //   - expectedA: el oráculo de los tests (test/oracle/fold.ts) plegado sobre las órdenes del dataset:
 //     lo que tiene que responder v2, y v3 byte a byte.
 //   - expectedZ: la definición de costo de Z (lab/z/server.ts), calculada acá con enteros: Σ importes
-//     de compra / Σ acciones compradas × cantidad. Z la calcula en float; se acepta la diferencia de
-//     redondeo de ese cálculo, no otra.
+//     de compra / Σ acciones compradas × cantidad, redondeado como round() de Postgres (los empates
+//     hacia afuera). Z calcula en numeric, así que se compara exacto, string contra string.
 import * as O from '../test/oracle/fold.js';
 
 /** Una fila de orders.csv del dataset, ya parseada. price en centavos. */
@@ -88,22 +88,35 @@ export function compareA(id: number, p: any, e: ExpectedA): string[] {
 
 const SAME_IN_Z = ['instrumentid', 'ticker', 'name', 'qty', 'acciones_reservadas', 'acciones_disponibles', 'price', 'price_date', 'valor', 'retorno_diario_pct', 'inconsistent'] as const;
 
-/** `got` (un string decimal) a menos de `tol` de `want` (un número exacto como fracción num/den). */
-function near(got: string | null, num: bigint, den: bigint, scale: number): boolean {
-  if (got === null) return false;
-  // got × den × 10^scale contra num × 10^scale, con un margen de 2 unidades de la última cifra:
-  // el float de Z redondea en su última cifra significativa, no antes.
-  const g = BigInt(got.replace('.', '').replace(/^(-?)0+(?=\d)/, '$1'));
-  const pow = 10n ** BigInt(scale);
-  const exact = num * pow;
-  const diff = g * den - exact;
-  const margin = 2n * den + (exact < 0n ? -exact : exact) / 10n ** 14n;
-  return (diff < 0n ? -diff : diff) <= margin;
+/** num / den redondeado a entero, con los empates hacia afuera (round() de numeric en Postgres). den > 0. */
+export function roundHalfAway(num: bigint, den: bigint): bigint {
+  const neg = num < 0n;
+  const abs = neg ? -num : num;
+  const q = (2n * abs + den) / (2n * den);
+  return neg ? -q : q;
+}
+
+/** Los campos de costo de una posición de Z, según su definición. */
+export function zCostFields(b: { boughtCents: bigint; boughtQty: bigint }, qty: bigint, valor: string | null) {
+  // costo = bought / boughtQty × qty, en micro-ARS: centavos × qty × 10^4 / boughtQty
+  const costMicro = roundHalfAway(b.boughtCents * qty * 10_000n, b.boughtQty);
+  const out = {
+    costo_total: fmt(costMicro, 6),
+    costo_unitario: qty > 0n ? fmt(roundHalfAway(b.boughtCents * 100n, b.boughtQty), 4) : null,
+    resultado: null as string | null,
+    rendimiento_pct: null as string | null,
+  };
+  if (valor !== null && costMicro > 0n) {
+    const diffMicro = cents(valor) * 10_000n - costMicro;
+    out.resultado = fmt(roundHalfAway(diffMicro, 10_000n), 2);
+    out.rendimiento_pct = fmt(roundHalfAway(diffMicro * 10_000n, costMicro), 2);
+  }
+  return out;
 }
 
 /**
  * v1 contra v2 y contra la definición de costo de Z. Todo lo que no depende del costo, igual a v2;
- * costo_total, costo_unitario, resultado y rendimiento_pct, iguales al promedio de compras.
+ * costo_total, costo_unitario, resultado y rendimiento_pct, exactamente los del promedio de compras.
  */
 export function compareZ(id: number, z: any, a: any, ez: Map<number, { boughtCents: bigint; boughtQty: bigint }>): string[] {
   const out: string[] = [];
@@ -122,18 +135,9 @@ export function compareZ(id: number, z: any, a: any, ez: Map<number, { boughtCen
     for (const k of SAME_IN_Z) if (zp[k] !== ap[k]) out.push(`${id}/${ap.instrumentid}: v1 ${k} ${zp[k]}, v2 ${ap[k]}`);
     const b = ez.get(zp.instrumentid);
     if (!b || b.boughtQty === 0n) { out.push(`${id}/${zp.instrumentid}: v1 tiene una posición sin compras`); return; }
-    const qty = BigInt(zp.qty);
-    // costo = bought/boughtQty × qty, en ARS: (centavos × qty) / (boughtQty × 100)
-    const costNum = b.boughtCents * qty;
-    const costDen = b.boughtQty * 100n;
-    if (!near(zp.costo_total, costNum, costDen, 6)) out.push(`${id}/${zp.instrumentid}: v1 costo_total ${zp.costo_total}, promedio de compras ${fmt((costNum * 1_000_000n) / costDen, 6)}`);
-    if (qty > 0n && !near(zp.costo_unitario, b.boughtCents, b.boughtQty * 100n, 4)) out.push(`${id}/${zp.instrumentid}: v1 costo_unitario ${zp.costo_unitario}`);
-    if (zp.valor !== null && costNum > 0n) {
-      const valorCents = cents(zp.valor);
-      // resultado = valor − costo, en ARS
-      if (!near(zp.resultado, valorCents * costDen - costNum * 100n, costDen * 100n, 2)) out.push(`${id}/${zp.instrumentid}: v1 resultado ${zp.resultado}`);
-      // rendimiento = (valor − costo) / costo × 100
-      if (!near(zp.rendimiento_pct, (valorCents * costDen - costNum * 100n) * 100n, costNum * 100n, 2)) out.push(`${id}/${zp.instrumentid}: v1 rendimiento_pct ${zp.rendimiento_pct}`);
+    const want = zCostFields(b, BigInt(zp.qty), zp.valor);
+    for (const [k, v] of Object.entries(want)) {
+      if (zp[k] !== v) out.push(`${id}/${zp.instrumentid}: v1 ${k} ${zp[k]}, el promedio de compras da ${v}`);
     }
   });
   return out;
@@ -151,4 +155,26 @@ export function compareTimed(label: string, responses: { status: number; text: s
     else if (r.text !== responses[0].text) out.push(`${label}: la request ${i + 1} no responde lo mismo que la primera`);
   });
   return out;
+}
+
+export interface Instrument { id: number; ticker: string; name: string; type: string }
+
+/** Los instrumentos de database.sql (db/migrations/000_seed.sql), con sus ids: 1, 2, … en orden. */
+export function seedInstruments(sql: string): Instrument[] {
+  return [...sql.matchAll(/^\s*\('([^']*)','([^']*)','([^']*)'\)[,;]/gm)]
+    .map((m, i) => ({ id: i + 1, ticker: m[1], name: m[2], type: m[3] }));
+}
+
+/** instruments.csv del dataset (id,ticker,name,type). */
+export const parseInstruments = (csv: string): Instrument[] => csv.trim().split('\n').slice(1).map((l) => {
+  const [id, ticker, name, type] = l.split(',');
+  return { id: Number(id), ticker, name, type };
+});
+
+/** Lo que tiene que encontrar Z: q como texto, sin distinguir mayúsculas, en ticker o nombre. Ids ordenados. */
+export function expectedZSearch(all: Instrument[], q: string, includeCash: boolean): number[] {
+  const needle = q.trim().toLowerCase();
+  return all.filter((i) => (includeCash || i.type !== 'MONEDA')
+      && (i.ticker.toLowerCase().includes(needle) || i.name.toLowerCase().includes(needle)))
+    .map((i) => i.id).sort((a, b) => a - b);
 }

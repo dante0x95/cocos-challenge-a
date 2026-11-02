@@ -7,18 +7,21 @@
 //     del dataset: cash, reservas, cantidades y costo de cada posición.
 //   - v3 responde exactamente el mismo JSON que v2.
 //   - v1 coincide con v2 en todo lo que no depende del método de costo (cash, cantidades, reservas,
-//     precio, valor y valor total), y su costo, resultado y rendimiento con el promedio de todas las
-//     compras, la definición de Z (lab/z/server.ts), calculado acá con enteros.
+//     precio, valor y valor total), y su costo, resultado y rendimiento, exactamente, con el
+//     promedio de todas las compras, la definición de Z (lab/z/server.ts; decisión en #72).
 //   - Tiempos: la primera request (fría) y la mediana de 5 más, por variante. Cada una tiene que
 //     responder 200 y el mismo cuerpo que la primera: un tiempo de una respuesta fallida no cuenta.
 // Además, en las tres: un usuario inexistente da 404; GET /orders/:id coincide; GET /instruments
-// coincide entre v2 y v3 y v1 responde lo mismo que su definición (substring sin acentos ni
-// trigramas, los comodines como texto); las entradas inválidas dan 400; y toda escritura (crear y
+// coincide entre v2 y v3, v1 encuentra exactamente lo que da su definición (q como texto, en ticker
+// o nombre, sin acentos ni trigramas) y v2 también lo encuentra; las entradas inválidas dan 400; y toda escritura (crear y
 // cancelar órdenes, /internal, otros métodos) da 403 sin cambiar nada. Sale con 1 si algo no coincide.
 import { createReadStream, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
-import { ORDERS_HEADER, compareA, compareTimed, compareZ, expectedA, expectedZ, parseRow, zCostDiffers, type Row } from './check-lib.js';
+import {
+  ORDERS_HEADER, compareA, compareTimed, compareZ, expectedA, expectedZ, expectedZSearch, parseInstruments, parseRow, seedInstruments,
+  zCostDiffers, type Row,
+} from './check-lib.js';
 
 const [base, dir = 'lab/.data'] = process.argv.slice(2);
 if (!base) throw new Error('uso: check.ts <url base> [dir del dataset]');
@@ -111,30 +114,35 @@ for (const path of [`/orders/${sold.id}?userid=${whale}`, `/orders/${sold.id}?us
 }
 
 const ticker = portfolios.get(whale)?.v2.positions[0].ticker as string;
-const tickers = (r: { body: any }) => (r.body?.results ?? []).map((x: any) => x.ticker as string);
-const searches: { q: string; params?: string; z: 'equal' | 'subset' | 'first' | 'contains-ars' }[] = [
-  { q: ticker, z: 'first' },                                  // ticker exacto: primero en las tres
-  { q: ticker.slice(0, 3), params: '&limit=50', z: 'subset' }, // parcial: lo de Z también lo encuentra A
-  { q: ticker.slice(1).toLowerCase(), params: '&limit=50', z: 'subset' },
-  { q: '%', z: 'equal' },                                     // comodines como texto: nada los contiene
-  { q: '_', z: 'equal' },
-  { q: 'ARS', params: '&include_cash=true&limit=50', z: 'contains-ars' },
+const instruments = [
+  ...seedInstruments(readFileSync(resolve(import.meta.dirname, '../db/migrations/000_seed.sql'), 'utf8')),
+  ...parseInstruments(readFileSync(join(dir, 'instruments.csv'), 'utf8')),
+];
+const idsOf = (r: { body: any }) => (r.body?.results ?? []).map((x: any) => x.id as number);
+const searches: { q: string; limit: number; cash?: boolean; first?: string }[] = [
+  { q: ticker, limit: 20, first: ticker },                  // ticker exacto: primero en v2
+  { q: ticker.slice(0, 3), limit: 50 },                     // parcial
+  { q: ticker.slice(1).toLowerCase(), limit: 50 },          // parcial, en minúsculas
+  { q: 's.a', limit: 50 },                                  // por nombre: más de 50, Z corta en 50
+  { q: '%', limit: 20 },                                    // comodines como texto: nada los contiene
+  { q: '_', limit: 20 },
+  { q: 'ARS', limit: 50, cash: true, first: 'ARS' },        // la moneda, solo con include_cash
+  { q: 'ARS', limit: 50 },
 ];
 for (const s of searches) {
-  const path = `/instruments?q=${encodeURIComponent(s.q)}${s.params ?? ''}`;
+  const path = `/instruments?q=${encodeURIComponent(s.q)}&limit=${s.limit}${s.cash ? '&include_cash=true' : ''}`;
   const [z, a, c] = await all(path);
   if (z.status !== 200 || a.status !== 200 || c.status !== 200) { fail(`GET ${path}: ${z.status} / ${a.status} / ${c.status}`); continue; }
   if (c.text !== a.text) fail(`GET ${path}: v3 no responde lo mismo que v2`);
-  const [tz, ta] = [tickers(z), tickers(a)];
-  const needle = s.q.toLowerCase();
-  if (tz.some((t: string) => !t.toLowerCase().includes(needle) && !(z.body.results.find((x: any) => x.ticker === t).name as string).toLowerCase().includes(needle))) {
-    fail(`GET ${path}: v1 devuelve algo que no contiene "${s.q}": ${tz.join(', ')}`);
+  const want = expectedZSearch(instruments, s.q, !!s.cash);
+  const [gz, ga] = [idsOf(z), idsOf(a)];
+  if (want.length <= s.limit) {
+    if (JSON.stringify([...gz].sort((x, y) => x - y)) !== JSON.stringify(want)) fail(`GET ${path}: v1 ${gz.length} resultados, su definición da ${want.length} (${want.slice(0, 10).join(', ')}…)`);
+    if (want.some((id) => !ga.includes(id)) && ga.length < s.limit) fail(`GET ${path}: v2 no encuentra todo lo que contiene "${s.q}"`);
+  } else if (gz.length !== s.limit || gz.some((id: number) => !want.includes(id))) {
+    fail(`GET ${path}: v1 tiene que devolver ${s.limit} de los ${want.length} que contienen "${s.q}", devolvió ${gz.length}`);
   }
-  const ok = s.z === 'equal' ? z.text === a.text
-    : s.z === 'first' ? tz[0] === s.q && ta[0] === s.q
-    : s.z === 'subset' ? tz.length > 0 && tz.every((t: string) => ta.includes(t))
-    : tz.includes('ARS') && ta[0] === 'ARS';
-  if (!ok) fail(`GET ${path}: v1 ${tz.join(', ') || '—'} / v2 ${ta.join(', ') || '—'} (${s.z})`);
+  if (s.first && a.body.results[0]?.ticker !== s.first) fail(`GET ${path}: el primero de v2 no es ${s.first}`);
 }
 for (const path of ['/instruments?q=', '/instruments', `/instruments?q=${'x'.repeat(51)}`, '/instruments?q=ab%00c', `/instruments?q=${ticker}&limit=0`, `/instruments?q=${ticker}&limit=51`]) {
   const rs = await all(path);

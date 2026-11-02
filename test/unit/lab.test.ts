@@ -16,7 +16,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, w
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
-import { compareA, compareTimed, compareZ, expectedA, expectedZ, parseRow } from '../../lab/check-lib.js';
+import { compareA, compareTimed, compareZ, expectedA, expectedZ, expectedZSearch, parseRow, roundHalfAway, seedInstruments } from '../../lab/check-lib.js';
 
 const ROOT = resolve(import.meta.dirname, '../..');
 const read = (p: string) => readFileSync(resolve(ROOT, p), 'utf8');
@@ -158,7 +158,7 @@ describe('lo que exige lab/check.ts (lab/check-lib.ts)', () => {
     expect(compareA(1, { ...a, positions: [] }, expectedA(rows))).not.toEqual([]);
   });
 
-  it('v1 con el costo del promedio de compras pasa; con el costo en cero, con el de A o con otro valor, falla', () => {
+  it('v1 con el costo del promedio de compras pasa; con el costo en cero, con el de A, con otra escala o con otro valor, falla', () => {
     expect(compareZ(1, z, a, expectedZ(rows))).toEqual([]);
     expect(compareZ(1, withPosition(z, { costo_total: '0.000000' }), a, expectedZ(rows))).not.toEqual([]);
     expect(compareZ(1, withPosition(z, { costo_total: '1050.000000' }), a, expectedZ(rows))).not.toEqual([]);
@@ -167,6 +167,26 @@ describe('lo que exige lab/check.ts (lab/check-lib.ts)', () => {
     expect(compareZ(1, withPosition(z, { rendimiento_pct: '15.24' }), a, expectedZ(rows))).not.toEqual([]);
     expect(compareZ(1, withPosition(z, { valor: '1210.01' }), a, expectedZ(rows))).not.toEqual([]);
     expect(compareZ(1, { ...z, valor_total: '100240.01' }, a, expectedZ(rows))).not.toEqual([]);
+    // Exacto: ni otra escala ni un millonésimo de diferencia.
+    expect(compareZ(1, withPosition(z, { costo_total: '1063333.333' }), a, expectedZ(rows))).not.toEqual([]);
+    expect(compareZ(1, withPosition(z, { costo_total: '1063.333334' }), a, expectedZ(rows))).not.toEqual([]);
+    expect(compareZ(1, withPosition(z, { costo_total: '1063.33' }), a, expectedZ(rows))).not.toEqual([]);
+  });
+
+  it('el redondeo de Z es el de round() de Postgres: los empates hacia afuera', () => {
+    expect([roundHalfAway(5n, 2n), roundHalfAway(-5n, 2n), roundHalfAway(7n, 3n), roundHalfAway(-7n, 3n), roundHalfAway(8n, 3n)]).toEqual([3n, -3n, 2n, -2n, 3n]);
+  });
+
+  it('la búsqueda de Z: q como texto en ticker o nombre, sin distinguir mayúsculas, la moneda solo si se pide', () => {
+    const sql = "INSERT INTO instruments (ticker,\"name\",\"type\") VALUES\n   ('DYCA','Dycasa S.A.','ACCIONES'),\n   ('ARS','PESOS','MONEDA');\n";
+    const all = [...seedInstruments(sql), { id: 1000, ticker: 'P_C', name: 'Cien % S.A.', type: 'ACCIONES' }];
+    expect(seedInstruments(sql).map((i) => [i.id, i.ticker])).toEqual([[1, 'DYCA'], [2, 'ARS']]);
+    expect(expectedZSearch(all, 'dyc', false)).toEqual([1]);
+    expect(expectedZSearch(all, 's.a.', false)).toEqual([1, 1000]);
+    expect(expectedZSearch(all, '%', false)).toEqual([1000]);
+    expect(expectedZSearch(all, '_', false)).toEqual([1000]);
+    expect(expectedZSearch(all, 'pesos', false)).toEqual([]);
+    expect(expectedZSearch(all, 'pesos', true)).toEqual([2]);
   });
 
   it('cada respuesta cronometrada tiene que ser 200 con el mismo cuerpo que la primera', () => {

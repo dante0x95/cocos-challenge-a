@@ -363,8 +363,8 @@ describe('scripts de la colección', () => {
   const afterOtherContext = (move: (s: State) => void, list = requests, root: Collection = collection) => {
     const { s, key } = pendingDeposit(list, root);
     move(s);
-    const ordenes = list.filter((x) => x.parents.some((p) => p.name === 'Órdenes'));
-    const sentThere = ordenes.filter((r) => !prerequest(r, s, root)).map((r) => r.item.name);
+    const orderRequests = list.filter((x) => x.parents.some((p) => p.name === 'Órdenes'));
+    const sentThere = orderRequests.filter((r) => !prerequest(r, s, root)).map((r) => r.item.name);
     fullRun(s, list, root);
     s.env = envObject(environments.local);
     const deposit = byName('Depositar pesos (CASH_IN)', list);

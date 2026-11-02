@@ -2,11 +2,19 @@
 
 Una sección por versión publicada (un GitHub Release `vX.Y.Z`, que despliega en staging y después en producción: [D-29](docs/decisiones.md#d-29)). Cada línea dice qué cambia para quien usa la API o la opera, con el PR que lo trae. **Antes de publicar** lista los pasos de operación que la versión exige: se hacen antes de `gh release create` ([`docs/api/operacion.md`](docs/api/operacion.md#desplegar-en-lightsail)). Este archivo es la fuente de las notas; `--generate-notes` solo agrega la lista de PRs.
 
-## v0.2.1 — sin publicar
+## v0.3.0 — sin publicar
+
+Sube el número menor porque cambia el contrato de la API: una historia heredada que no entra en los tipos responde `409 HISTORY_OVERFLOW` en vez de `500`, y un cash negativo heredado marca `has_inconsistent_history`. El deploy aguanta los cortes y las vueltas atrás (un re-run no pisa el último release sano ni reinstala funciones viejas sobre una base nueva), y la documentación suma la comparación del benchmark Z / A / C en una página y la colección de Postman en `postman/`.
 
 ### Antes de publicar
 
-Nada.
+Nada en el servidor: ningún PR de esta versión pide un paso manual.
+
+- La migración `011` ([#74](https://github.com/dante0x95/cocos-challenge-a/pull/74)) la aplica el bootstrap del propio deploy: no cambia el esquema ni los datos, verifica una vez la historia de la base y, si hay un cash negativo heredado, lo informa en el log (`historia: usuario N — cash negativo`) sin abortar.
+- `switch.pending` ([#65](https://github.com/dante0x95/cocos-challenge-a/pull/65)) lo deja y lo borra el deploy. El único caso que no cubre, un cambio de versión cortado con el `remote.sh` de v0.2.0 (que no deja la marca), no se dio: el deploy de v0.2.0 terminó en verde en los dos entornos. Para confirmarlo, `deploy/drills.sh release v0.2.0` y `URL=https://staging.18-227-203-30.sslip.io deploy/drills.sh release v0.2.0` ([operación](docs/api/operacion.md#operación)).
+- [#61](https://github.com/dante0x95/cocos-challenge-a/pull/61) no pide nada: solo frena el bootstrap de un release que no conoce todas las migraciones de la base.
+
+Después de publicar: v0.3.0 es el segundo release con los secretos como archivos ([#50](https://github.com/dante0x95/cocos-challenge-a/pull/50)), así que, con su deploy en verde, también `compose.previous.yml` es de esa versión. Borrar los `.env` de cada entorno si ningún `compose*.yml` usa `env_file` ([Secretos como archivos](docs/api/operacion.md#secretos-como-archivos), paso 4).
 
 ### Operación y deploy
 

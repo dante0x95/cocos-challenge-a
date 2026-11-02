@@ -3,7 +3,9 @@
 // tag vX.Y.Z, leído de la historia (`git log <tag>..HEAD`, el "(#N)" del squash); una versión ya
 // publicada (su tag existe) tiene fecha y no dice "sin publicar". Además, lo que pide el issue #51
 // para v0.2.0: sus PRs (#43 a #48, #50 y #52) y, en "Antes de publicar", volver a correr setup.sh
-// según "Secretos como archivos" (#50). Los controles verifican que quitar un PR o ese paso falla.
+// según "Secretos como archivos" (#50). Lo que pide el issue #79: después de v0.2.0 sigue v0.3.0, no
+// v0.2.1, y su "Antes de publicar" pide borrar los .env (paso 4 de esa sección). Los controles
+// verifican que quitar un PR o uno de esos pasos, o llamar v0.2.1 a la próxima, falla.
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -68,6 +70,19 @@ function problems(text: string, tags: string[], prsSinceLastTag: number[]): stri
       out.push('v0.2.0: "Antes de publicar" no pide volver a correr setup.sh según "Secretos como archivos"');
     }
   }
+  // Issue #79: después de v0.2.0 sigue v0.3.0 (la API cambia su contrato), que pide borrar los .env
+  // según "Secretos como archivos", paso 4; v0.2.1 no se publica.
+  if (all.some((s) => s.version === 'v0.2.1')) out.push('v0.2.1 no existe: después de v0.2.0 sigue v0.3.0');
+  if (next && tags[0] === 'v0.2.0' && next.version !== 'v0.3.0') out.push(`después de v0.2.0 sigue v0.3.0, no ${next.version}`);
+  const v030 = all.find((s) => s.version === 'v0.3.0');
+  if (v030) {
+    const before = subsection(v030.body, 'Antes de publicar');
+    // La instrucción, no solo la mención: "Borrar los `.env` de cada entorno si ningún `compose*.yml` usa `env_file`".
+    const cleanup = /Borrar los `\.env` de cada entorno si ningún `compose\*\.yml` usa `env_file`/;
+    if (!before || !cleanup.test(before) || !before.includes('(docs/api/operacion.md#secretos-como-archivos), paso 4')) {
+      out.push('v0.3.0: "Antes de publicar" no pide borrar los .env según "Secretos como archivos"');
+    }
+  }
   return out;
 }
 
@@ -101,6 +116,21 @@ describe('CHANGELOG.md', () => {
     const withoutSetup = CHANGELOG.replace(/^1\. \*\*Volver a correr `setup\.sh`.*$/m, '1. Nada.');
     expect(withoutSetup).not.toBe(CHANGELOG);
     expect(problems(withoutSetup, ['v0.1.0'], [])).toContain('v0.2.0: "Antes de publicar" no pide volver a correr setup.sh según "Secretos como archivos"');
+  });
+
+  it('control: la próxima versión después de v0.2.0 como v0.2.1, o v0.3.0 sin el borrado de los .env o pidiendo conservarlos, falla', () => {
+    const v021 = '## v0.2.1 — sin publicar\n\n### Antes de publicar\n\nNada.\n';
+    expect(problems(v021, ['v0.2.0'], [])).toEqual(expect.arrayContaining([
+      'v0.2.1 no existe: después de v0.2.0 sigue v0.3.0',
+      'después de v0.2.0 sigue v0.3.0, no v0.2.1',
+    ]));
+    const withoutCleanup = CHANGELOG.split('\n').filter((l) => !l.startsWith('Después de publicar: v0.3.0')).join('\n');
+    expect(withoutCleanup).not.toBe(CHANGELOG);
+    expect(problems(withoutCleanup, tags, [])).toContain('v0.3.0: "Antes de publicar" no pide borrar los .env según "Secretos como archivos"');
+    // Con la mención y el link, pero la instrucción al revés.
+    const keep = CHANGELOG.replace('Borrar los `.env` de cada entorno si ningún', 'Conservar los `.env` de cada entorno aunque ningún');
+    expect(keep).not.toBe(CHANGELOG);
+    expect(problems(keep, tags, [])).toContain('v0.3.0: "Antes de publicar" no pide borrar los .env según "Secretos como archivos"');
   });
 
   it('control: un PR nuevo sin nombrar, o una versión publicada sin fecha, falla', () => {

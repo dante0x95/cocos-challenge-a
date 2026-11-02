@@ -31,6 +31,8 @@ Después de publicar: v0.3.0 es el segundo release con los secretos como archivo
 ### Proceso
 
 - **`ready-gate` vuelve a devolver a borrador un PR marcado ready sin `codex/review`** ([#59](https://github.com/dante0x95/cocos-challenge-a/pull/59)): el `GITHUB_TOKEN` del workflow no podía convertirlo ("Resource not accessible by integration") porque `convertPullRequestToDraft` exige `contents: write` además de `pull-requests: write`. El merge ya lo frenaba el ruleset; ahora también vuelve a valer la regla de CONTRIBUTING.
+- **Las notas de v0.3.0 y el borrado de los `.env` después de publicar** ([#80](https://github.com/dante0x95/cocos-challenge-a/pull/80)): esta sección, con "Antes de publicar" revisado PR por PR, y los comandos del paso 4 de [Secretos como archivos](docs/api/operacion.md#secretos-como-archivos).
+- **El PR que cierra una versión se nombra a sí mismo, y el release espera el `ci` de `main`** ([#82](https://github.com/dante0x95/cocos-challenge-a/pull/82)): el primer release de v0.3.0 frenó en el gate porque el `ci` del merge de #80 falló: la sección no nombraba a #80, que recién tiene su `(#80)` en `main` después del squash. No se desplegó nada: se borraron el release y el tag. La regla queda en [Desplegar en Lightsail](docs/api/operacion.md#desplegar-en-lightsail), paso 1 ([#81](https://github.com/dante0x95/cocos-challenge-a/issues/81)).
 
 ### Documentación
 

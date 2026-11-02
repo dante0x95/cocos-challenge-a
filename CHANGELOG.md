@@ -2,7 +2,17 @@
 
 Una sección por versión publicada (un GitHub Release `vX.Y.Z`, que despliega en staging y después en producción: [D-29](docs/decisiones.md#d-29)). Cada línea dice qué cambia para quien usa la API o la opera, con el PR que lo trae. **Antes de publicar** lista los pasos de operación que la versión exige: se hacen antes de `gh release create` ([`docs/api/operacion.md`](docs/api/operacion.md#desplegar-en-lightsail)). Este archivo es la fuente de las notas; `--generate-notes` solo agrega la lista de PRs.
 
-## v0.3.0 — sin publicar
+## v0.3.1 — sin publicar
+
+### Antes de publicar
+
+Nada.
+
+### Documentación
+
+- **El README alcanza para correr el proyecto en local** ([#84](https://github.com/dante0x95/cocos-challenge-a/pull/84)): qué hay que instalar, el clon, qué tiene que devolver `GET /portfolio/1`, qué hacer si los puertos 3000 o 5432 están ocupados (`API_PORT`, `DB_PORT` y `TEST_PG_URL`) y la estructura al día (migraciones `010` y `011`, `docs/comparaciones.md`). v0.3.0 queda con su fecha.
+
+## v0.3.0 — 2026-11-02
 
 Sube el número menor porque cambia el contrato de la API: una historia heredada que no entra en los tipos responde `409 HISTORY_OVERFLOW` en vez de `500`, y un cash negativo heredado marca `has_inconsistent_history`. El deploy aguanta los cortes y las vueltas atrás (un re-run no pisa el último release sano ni reinstala funciones viejas sobre una base nueva), y la documentación suma la comparación del benchmark Z / A / C en una página y la colección de Postman en `postman/`.
 

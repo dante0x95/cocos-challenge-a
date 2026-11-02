@@ -159,7 +159,7 @@ describe('que no vuelva', () => {
     const [po, ex] = await Promise.all(Object.keys(DECIDERS).map(source));
     const planted = [
       po.replace('v_qty := div(p_amount * 100, price * 100);', 'v_qty := div(p_amount * 100, price * 100) + 0 * (p_amount / price);'),
-      ex.replace('o.size::numeric * o.price * 100 > 1e17', 'o.size::numeric * o.price / 0.01 > 1e17'),
+      ex.replace('o.size::numeric * o.price * 100) > 1e17', 'o.size::numeric * o.price / 0.01) > 1e17'),
     ];
     expect(planted[0]).not.toBe(po);
     expect(planted[1]).not.toBe(ex);

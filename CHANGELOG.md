@@ -16,6 +16,7 @@ Nada.
 
 ### API
 
+- **Una LIMIT ya no confirma un movimiento que la MARKET rechaza por el tope de cash** ([#73](https://github.com/dante0x95/cocos-challenge-a/pull/73)): con un cash heredado fuera de ±10¹⁵ ARS, el executor validaba solo el borde de arriba en una venta y nada en una compra, y ejecutaba lo que `POST /orders` como MARKET responde `422 LIMIT`. Ahora cancela esa LIMIT con `cancel_reason: "LIMIT"`, igual que cualquier otra que violaría [D-14](docs/decisiones.md#d-14). Solo afecta a historias heredadas.
 - **Un usuario con la historia fuera de los tipos recibe `409`, no `500` para siempre** ([#62](https://github.com/dante0x95/cocos-challenge-a/pull/62)): si su historia heredada no entra en los tipos del cálculo (`overflow` en el log del bootstrap), `GET /portfolio` y `POST /orders` responden `409 HISTORY_OVERFLOW` y dicen que no se reintenta; consultar y cancelar sus órdenes sigue andando. El executor lo informa en `overflow_users` y deja sus LIMIT pendientes, en vez de anotarlas en `errors` en cada corrida. La reserva del portfolio ya no responde `500` cuando las pendientes heredadas suman más que un `bigint`.
 
 ### Proceso

@@ -1,0 +1,1832 @@
+{
+  "info": {
+    "_postman_id": "6f1d3a52-49c0-4c6e-9a49-2d6c0c0c0049",
+    "name": "Cocos challenge — API",
+    "description": "Los endpoints de la API con verificaciones (docs/api/). Se corre entera con el Collection Runner o con newman, contra uno de los environments de postman/:\n\n- local: docker compose up (http://localhost:3000, token de desarrollo).\n- staging: el token interno va vacío; se completa como valor actual (no se exporta) o el folder Interno se saltea.\n- production: solo lecturas (allowWrites = \"false\"): Órdenes e Interno se saltean.\n\nLas claves de idempotencia llevan runId, que se crea en el primer request de Órdenes y queda atado al environment y al userid: con otro, Órdenes se saltea mientras runId tenga valor. Un request reenviado (por ejemplo, después de un timeout) usa la misma clave y recupera el resultado. Al final de Órdenes, runId se vacía solo si cada escritura con clave tuvo una respuesta definitiva (no 5xx) en esa corrida, así que la siguiente usa claves nuevas; si alguna quedó sin resultado, se conserva. Para empezar otra intención después de una corrida cortada, vaciar runId.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "runId",
+      "value": ""
+    },
+    {
+      "key": "runContext",
+      "value": ""
+    },
+    {
+      "key": "limitOrder",
+      "value": ""
+    },
+    {
+      "key": "settled",
+      "value": ""
+    },
+    {
+      "key": "limitId",
+      "value": ""
+    }
+  ],
+  "item": [
+    {
+      "name": "Salud",
+      "description": "GET /health — docs/api/operacion.md",
+      "item": [
+        {
+          "name": "Salud",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "    pm.test('200 con la base arriba', () => {",
+                  "      pm.response.to.have.status(200);",
+                  "      const h = pm.response.json();",
+                  "      pm.expect(h.ok).to.eql(true);",
+                  "      pm.expect(h.db).to.eql('up');",
+                  "      pm.expect(h).to.have.property('release');",
+                  "    });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/health",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "health"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Portfolio",
+      "description": "GET /portfolio/:userid — docs/api/portfolio.md",
+      "item": [
+        {
+          "name": "Portfolio del usuario",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "    pm.test('200 con el estado de la cuenta', () => {",
+                  "      pm.response.to.have.status(200);",
+                  "      const p = pm.response.json();",
+                  "      pm.expect(String(p.userid)).to.eql(pm.environment.get('userid'));",
+                  "      pm.expect(p.valor_total).to.be.a('string');",
+                  "      pm.expect(p.cash).to.have.all.keys('neto', 'reservado', 'disponible');",
+                  "      pm.expect(p.positions).to.be.an('array');",
+                  "    });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/portfolio/{{userid}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "portfolio",
+                "{{userid}}"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Usuario inexistente → 404",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('404 NOT_FOUND', () => {",
+                  "  pm.response.to.have.status(404);",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.error).to.eql('NOT_FOUND');",
+                  "  pm.expect(body.message).to.be.a('string');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/portfolio/999999",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "portfolio",
+                "999999"
+              ]
+            }
+          }
+        },
+        {
+          "name": "userid que no es un número → 400",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('400 BAD_REQUEST', () => {",
+                  "  pm.response.to.have.status(400);",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.error).to.eql('BAD_REQUEST');",
+                  "  pm.expect(body.message).to.be.a('string');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/portfolio/abc",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "portfolio",
+                "abc"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Instrumentos",
+      "description": "GET /instruments?q= — docs/api/instruments.md",
+      "item": [
+        {
+          "name": "Por ticker",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "    pm.test('200 con PAMP primero', () => {",
+                  "      pm.response.to.have.status(200);",
+                  "      const r = pm.response.json();",
+                  "      pm.expect(r.query).to.eql('PAMP');",
+                  "      pm.expect(r.results[0]).to.eql({ id: 47, ticker: 'PAMP', name: 'Pampa Holding S.A.', type: 'ACCIONES' });",
+                  "    });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/instruments?q=PAMP",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "instruments"
+              ],
+              "query": [
+                {
+                  "key": "q",
+                  "value": "PAMP"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Por nombre, sin mayúsculas",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "    pm.test('200 con los de nombre Patagonia', () => {",
+                  "      pm.response.to.have.status(200);",
+                  "      const names = pm.response.json().results.map((r) => r.name.toLowerCase());",
+                  "      pm.expect(names.length).to.be.above(0);",
+                  "      pm.expect(names.some((n) => n.includes('patagonia'))).to.eql(true);",
+                  "    });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/instruments?q=patagonia",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "instruments"
+              ],
+              "query": [
+                {
+                  "key": "q",
+                  "value": "patagonia"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Con la moneda (include_cash)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "    pm.test('200 con ARS como MONEDA', () => {",
+                  "      pm.response.to.have.status(200);",
+                  "      const ars = pm.response.json().results.find((r) => r.ticker === 'ARS');",
+                  "      pm.expect(ars, 'ARS en los resultados').to.be.an('object');",
+                  "      pm.expect(ars.type).to.eql('MONEDA');",
+                  "    });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/instruments?q=ars&include_cash=true",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "instruments"
+              ],
+              "query": [
+                {
+                  "key": "q",
+                  "value": "ars"
+                },
+                {
+                  "key": "include_cash",
+                  "value": "true"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Con limit",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "    pm.test('200 con a lo sumo 3 resultados', () => {",
+                  "      pm.response.to.have.status(200);",
+                  "      const results = pm.response.json().results;",
+                  "      pm.expect(results.length).to.be.within(1, 3);",
+                  "      results.forEach((r) => pm.expect(r).to.have.all.keys('id', 'ticker', 'name', 'type'));",
+                  "    });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/instruments?q=a&limit=3",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "instruments"
+              ],
+              "query": [
+                {
+                  "key": "q",
+                  "value": "a"
+                },
+                {
+                  "key": "limit",
+                  "value": "3"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Sin q → 400",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('400 BAD_REQUEST', () => {",
+                  "  pm.response.to.have.status(400);",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.error).to.eql('BAD_REQUEST');",
+                  "  pm.expect(body.message).to.be.a('string');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/instruments?q=",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "instruments"
+              ],
+              "query": [
+                {
+                  "key": "q",
+                  "value": ""
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Órdenes",
+      "description": "POST /orders, GET /orders/:id?userid=, POST /orders/:id/cancel — docs/api/orders.md. Escribe: solo con allowWrites = \"true\". Corre en orden: el depósito fondea las compras y la LIMIT de este folder es la que se consulta y se cancela.",
+      "event": [
+        {
+          "listen": "prerequest",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "// Este folder escribe: solo corre si el environment tiene allowWrites = \"true\" (local, staging).",
+              "if (pm.environment.get('allowWrites') !== 'true') {",
+              "  console.log('salteado: allowWrites no es \"true\" en este environment');",
+              "  pm.execution.skipRequest();",
+              "}"
+            ]
+          }
+        },
+        {
+          "listen": "prerequest",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "if (pm.environment.get('allowWrites') === 'true') {",
+              "  const context = JSON.stringify({ baseUrl: pm.environment.get('baseUrl'), userid: pm.environment.get('userid') });",
+              "  if (!pm.collectionVariables.get('runId')) {",
+              "    pm.collectionVariables.set('runId', pm.variables.replaceIn('{{$guid}}'));",
+              "    pm.collectionVariables.set('runContext', context);",
+              "  } else if (pm.collectionVariables.get('runContext') !== context) {",
+              "    console.log('salteado: runId es de otro environment o usuario (' + pm.collectionVariables.get('runContext') + '): volver a ese para reenviar lo pendiente, o vaciar runId para empezar otra intención');",
+              "    pm.execution.skipRequest();",
+              "  }",
+              "}"
+            ]
+          }
+        }
+      ],
+      "item": [
+        {
+          "name": "Depositar pesos (CASH_IN)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const ORDER_FIELDS = ['id', 'userid', 'instrumentid', 'side', 'type', 'size', 'price', 'amount', 'status', 'balance_seq', 'datetime', 'cancel_reason'];",
+                  "pm.test('201 FILLED', () => {",
+                  "  pm.response.to.have.status(201);",
+                  "  const o = pm.response.json();",
+                  "  pm.expect(o).to.have.all.keys(ORDER_FIELDS);",
+                  "  pm.expect(o.status).to.eql('FILLED');",
+                  "  pm.expect(o.userid).to.eql(pm.environment.get('userid'));",
+                  "});",
+                  "pm.test('Location e Idempotent-Replay: false', () => {",
+                  "  const o = pm.response.json();",
+                  "  pm.expect(pm.response.headers.get('Location')).to.eql(`/orders/${o.id}?userid=${o.userid}`);",
+                  "  pm.expect(pm.response.headers.get('Idempotent-Replay')).to.eql('false');",
+                  "});",
+                  "    pm.test('el cash se guarda en centavos', () => {",
+                  "      const o = pm.response.json();",
+                  "      pm.expect([o.size, o.price, o.amount]).to.eql(['10000000', '0.01', '100000.00']);",
+                  "    });",
+                  "    pm.collectionVariables.set('cashInId', pm.response.json().id);",
+                  "  ",
+                  "",
+                  "// Respuesta definitiva (no 5xx): el resultado de la clave cash-in ya se conoce.",
+                  "if (pm.response.code < 500) {",
+                  "  const runId = pm.collectionVariables.get('runId');",
+                  "  let settled = { runId, keys: [] };",
+                  "  try {",
+                  "    const prev = JSON.parse(pm.collectionVariables.get('settled') || 'null');",
+                  "    if (prev && prev.runId === runId && Array.isArray(prev.keys)) settled = prev;",
+                  "  } catch (e) { /* se reemplaza */ }",
+                  "  if (!settled.keys.includes('cash-in')) settled.keys.push('cash-in');",
+                  "  pm.collectionVariables.set('settled', JSON.stringify(settled));",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{runId}}-cash-in"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/orders",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "orders"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"userid\": {{userid}},\n  \"side\": \"CASH_IN\",\n  \"amount\": \"100000.00\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Repetir el depósito → replay",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "    pm.test('201 con la misma orden e Idempotent-Replay: true', () => {",
+                  "      pm.response.to.have.status(201);",
+                  "      pm.expect(pm.response.json().id).to.eql(pm.collectionVariables.get('cashInId'));",
+                  "      pm.expect(pm.response.headers.get('Idempotent-Replay')).to.eql('true');",
+                  "    });",
+                  "  ",
+                  "// Respuesta definitiva (no 5xx): el resultado de la clave cash-in ya se conoce.",
+                  "if (pm.response.code < 500) {",
+                  "  const runId = pm.collectionVariables.get('runId');",
+                  "  let settled = { runId, keys: [] };",
+                  "  try {",
+                  "    const prev = JSON.parse(pm.collectionVariables.get('settled') || 'null');",
+                  "    if (prev && prev.runId === runId && Array.isArray(prev.keys)) settled = prev;",
+                  "  } catch (e) { /* se reemplaza */ }",
+                  "  if (!settled.keys.includes('cash-in')) settled.keys.push('cash-in');",
+                  "  pm.collectionVariables.set('settled', JSON.stringify(settled));",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{runId}}-cash-in"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/orders",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "orders"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"userid\": {{userid}},\n  \"side\": \"CASH_IN\",\n  \"amount\": \"100000.00\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Misma clave con otro body → 422",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('422 IDEMPOTENCY_MISMATCH', () => {",
+                  "  pm.response.to.have.status(422);",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.error).to.eql('IDEMPOTENCY_MISMATCH');",
+                  "  pm.expect(body.message).to.be.a('string');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{runId}}-cash-in"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/orders",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "orders"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"userid\": {{userid}},\n  \"side\": \"CASH_IN\",\n  \"amount\": \"1.00\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Sin Idempotency-Key → 400",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('400 BAD_REQUEST', () => {",
+                  "  pm.response.to.have.status(400);",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.error).to.eql('BAD_REQUEST');",
+                  "  pm.expect(body.message).to.be.a('string');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/orders",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "orders"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"userid\": {{userid}},\n  \"side\": \"CASH_IN\",\n  \"amount\": \"1.00\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Comprar MARKET por cantidad",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const ORDER_FIELDS = ['id', 'userid', 'instrumentid', 'side', 'type', 'size', 'price', 'amount', 'status', 'balance_seq', 'datetime', 'cancel_reason'];",
+                  "pm.test('201 FILLED', () => {",
+                  "  pm.response.to.have.status(201);",
+                  "  const o = pm.response.json();",
+                  "  pm.expect(o).to.have.all.keys(ORDER_FIELDS);",
+                  "  pm.expect(o.status).to.eql('FILLED');",
+                  "  pm.expect(o.userid).to.eql(pm.environment.get('userid'));",
+                  "});",
+                  "pm.test('Location e Idempotent-Replay: false', () => {",
+                  "  const o = pm.response.json();",
+                  "  pm.expect(pm.response.headers.get('Location')).to.eql(`/orders/${o.id}?userid=${o.userid}`);",
+                  "  pm.expect(pm.response.headers.get('Idempotent-Replay')).to.eql('false');",
+                  "});",
+                  "    pm.test('10 acciones al último close', () => {",
+                  "      const o = pm.response.json();",
+                  "      pm.expect(o.size).to.eql('10');",
+                  "      pm.expect(o.instrumentid).to.eql('47');",
+                  "    });",
+                  "  ",
+                  "",
+                  "// Respuesta definitiva (no 5xx): el resultado de la clave buy-size ya se conoce.",
+                  "if (pm.response.code < 500) {",
+                  "  const runId = pm.collectionVariables.get('runId');",
+                  "  let settled = { runId, keys: [] };",
+                  "  try {",
+                  "    const prev = JSON.parse(pm.collectionVariables.get('settled') || 'null');",
+                  "    if (prev && prev.runId === runId && Array.isArray(prev.keys)) settled = prev;",
+                  "  } catch (e) { /* se reemplaza */ }",
+                  "  if (!settled.keys.includes('buy-size')) settled.keys.push('buy-size');",
+                  "  pm.collectionVariables.set('settled', JSON.stringify(settled));",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{runId}}-buy-size"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/orders",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "orders"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"userid\": {{userid}},\n  \"side\": \"BUY\",\n  \"type\": \"MARKET\",\n  \"instrumentid\": 47,\n  \"size\": 10\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Comprar MARKET por monto",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const ORDER_FIELDS = ['id', 'userid', 'instrumentid', 'side', 'type', 'size', 'price', 'amount', 'status', 'balance_seq', 'datetime', 'cancel_reason'];",
+                  "pm.test('201 FILLED', () => {",
+                  "  pm.response.to.have.status(201);",
+                  "  const o = pm.response.json();",
+                  "  pm.expect(o).to.have.all.keys(ORDER_FIELDS);",
+                  "  pm.expect(o.status).to.eql('FILLED');",
+                  "  pm.expect(o.userid).to.eql(pm.environment.get('userid'));",
+                  "});",
+                  "pm.test('Location e Idempotent-Replay: false', () => {",
+                  "  const o = pm.response.json();",
+                  "  pm.expect(pm.response.headers.get('Location')).to.eql(`/orders/${o.id}?userid=${o.userid}`);",
+                  "  pm.expect(pm.response.headers.get('Idempotent-Replay')).to.eql('false');",
+                  "});",
+                  "    pm.test('el máximo entero de acciones que alcanza', () => {",
+                  "      const o = pm.response.json();",
+                  "      const cents = (s) => BigInt(s.replace('.', ''));",
+                  "      pm.expect(cents(o.amount) <= 500000n).to.eql(true);",
+                  "      pm.expect(cents(o.amount) + cents(o.price) > 500000n).to.eql(true);",
+                  "    });",
+                  "  ",
+                  "",
+                  "// Respuesta definitiva (no 5xx): el resultado de la clave buy-amount ya se conoce.",
+                  "if (pm.response.code < 500) {",
+                  "  const runId = pm.collectionVariables.get('runId');",
+                  "  let settled = { runId, keys: [] };",
+                  "  try {",
+                  "    const prev = JSON.parse(pm.collectionVariables.get('settled') || 'null');",
+                  "    if (prev && prev.runId === runId && Array.isArray(prev.keys)) settled = prev;",
+                  "  } catch (e) { /* se reemplaza */ }",
+                  "  if (!settled.keys.includes('buy-amount')) settled.keys.push('buy-amount');",
+                  "  pm.collectionVariables.set('settled', JSON.stringify(settled));",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{runId}}-buy-amount"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/orders",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "orders"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"userid\": {{userid}},\n  \"side\": \"BUY\",\n  \"type\": \"MARKET\",\n  \"instrumentid\": 54,\n  \"amount\": \"5000.00\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Comprar LIMIT (queda NEW)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const ORDER_FIELDS = ['id', 'userid', 'instrumentid', 'side', 'type', 'size', 'price', 'amount', 'status', 'balance_seq', 'datetime', 'cancel_reason'];",
+                  "pm.test('201 NEW', () => {",
+                  "  pm.response.to.have.status(201);",
+                  "  const o = pm.response.json();",
+                  "  pm.expect(o).to.have.all.keys(ORDER_FIELDS);",
+                  "  pm.expect(o.status).to.eql('NEW');",
+                  "  pm.expect(o.userid).to.eql(pm.environment.get('userid'));",
+                  "});",
+                  "pm.test('Location e Idempotent-Replay: false', () => {",
+                  "  const o = pm.response.json();",
+                  "  pm.expect(pm.response.headers.get('Location')).to.eql(`/orders/${o.id}?userid=${o.userid}`);",
+                  "  pm.expect(pm.response.headers.get('Idempotent-Replay')).to.eql('false');",
+                  "});",
+                  "    // La LIMIT queda atada a esta corrida y a este environment (ver limitGuard).",
+                  "    pm.collectionVariables.set('limitOrder', JSON.stringify({",
+                  "      id: pm.response.json().id,",
+                  "      baseUrl: pm.environment.get('baseUrl'),",
+                  "      userid: pm.environment.get('userid'),",
+                  "      runId: pm.collectionVariables.get('runId'),",
+                  "    }));",
+                  "  ",
+                  "",
+                  "// Respuesta definitiva (no 5xx): el resultado de la clave buy-limit ya se conoce.",
+                  "if (pm.response.code < 500) {",
+                  "  const runId = pm.collectionVariables.get('runId');",
+                  "  let settled = { runId, keys: [] };",
+                  "  try {",
+                  "    const prev = JSON.parse(pm.collectionVariables.get('settled') || 'null');",
+                  "    if (prev && prev.runId === runId && Array.isArray(prev.keys)) settled = prev;",
+                  "  } catch (e) { /* se reemplaza */ }",
+                  "  if (!settled.keys.includes('buy-limit')) settled.keys.push('buy-limit');",
+                  "  pm.collectionVariables.set('settled', JSON.stringify(settled));",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{runId}}-buy-limit"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/orders",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "orders"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"userid\": {{userid}},\n  \"side\": \"BUY\",\n  \"type\": \"LIMIT\",\n  \"instrumentid\": 47,\n  \"size\": 5,\n  \"price\": \"900.00\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Consultar la LIMIT",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "let limit = null;",
+                  "try { limit = JSON.parse(pm.collectionVariables.get('limitOrder') || 'null'); } catch (e) { limit = null; }",
+                  "const ours = !!limit && typeof limit.id === 'string' && limit.id !== ''",
+                  "  && limit.baseUrl === pm.environment.get('baseUrl')",
+                  "  && limit.userid === pm.environment.get('userid')",
+                  "  && limit.runId === pm.collectionVariables.get('runId');",
+                  "if (ours) {",
+                  "  pm.variables.set('limitId', limit.id);",
+                  "} else {",
+                  "  console.log('salteado: no hay una LIMIT de esta corrida en este environment');",
+                  "  pm.execution.skipRequest();",
+                  "}"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "    pm.test('200 NEW', () => {",
+                  "      pm.response.to.have.status(200);",
+                  "      const o = pm.response.json();",
+                  "      pm.expect(o.id).to.eql(pm.variables.get('limitId'));",
+                  "      pm.expect(o.status).to.eql('NEW');",
+                  "      pm.expect(o.cancel_reason).to.eql(null);",
+                  "    });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/orders/{{limitId}}?userid={{userid}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "orders",
+                "{{limitId}}"
+              ],
+              "query": [
+                {
+                  "key": "userid",
+                  "value": "{{userid}}"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Consultar la LIMIT como otro usuario → 404",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "let limit = null;",
+                  "try { limit = JSON.parse(pm.collectionVariables.get('limitOrder') || 'null'); } catch (e) { limit = null; }",
+                  "const ours = !!limit && typeof limit.id === 'string' && limit.id !== ''",
+                  "  && limit.baseUrl === pm.environment.get('baseUrl')",
+                  "  && limit.userid === pm.environment.get('userid')",
+                  "  && limit.runId === pm.collectionVariables.get('runId');",
+                  "if (ours) {",
+                  "  pm.variables.set('limitId', limit.id);",
+                  "} else {",
+                  "  console.log('salteado: no hay una LIMIT de esta corrida en este environment');",
+                  "  pm.execution.skipRequest();",
+                  "}"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('404 NOT_FOUND', () => {",
+                  "  pm.response.to.have.status(404);",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.error).to.eql('NOT_FOUND');",
+                  "  pm.expect(body.message).to.be.a('string');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/orders/{{limitId}}?userid=999999",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "orders",
+                "{{limitId}}"
+              ],
+              "query": [
+                {
+                  "key": "userid",
+                  "value": "999999"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Consultar sin userid → 400",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "let limit = null;",
+                  "try { limit = JSON.parse(pm.collectionVariables.get('limitOrder') || 'null'); } catch (e) { limit = null; }",
+                  "const ours = !!limit && typeof limit.id === 'string' && limit.id !== ''",
+                  "  && limit.baseUrl === pm.environment.get('baseUrl')",
+                  "  && limit.userid === pm.environment.get('userid')",
+                  "  && limit.runId === pm.collectionVariables.get('runId');",
+                  "if (ours) {",
+                  "  pm.variables.set('limitId', limit.id);",
+                  "} else {",
+                  "  console.log('salteado: no hay una LIMIT de esta corrida en este environment');",
+                  "  pm.execution.skipRequest();",
+                  "}"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('400 BAD_REQUEST', () => {",
+                  "  pm.response.to.have.status(400);",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.error).to.eql('BAD_REQUEST');",
+                  "  pm.expect(body.message).to.be.a('string');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/orders/{{limitId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "orders",
+                "{{limitId}}"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Cancelar la LIMIT",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "let limit = null;",
+                  "try { limit = JSON.parse(pm.collectionVariables.get('limitOrder') || 'null'); } catch (e) { limit = null; }",
+                  "const ours = !!limit && typeof limit.id === 'string' && limit.id !== ''",
+                  "  && limit.baseUrl === pm.environment.get('baseUrl')",
+                  "  && limit.userid === pm.environment.get('userid')",
+                  "  && limit.runId === pm.collectionVariables.get('runId');",
+                  "if (ours) {",
+                  "  pm.variables.set('limitId', limit.id);",
+                  "} else {",
+                  "  console.log('salteado: no hay una LIMIT de esta corrida en este environment');",
+                  "  pm.execution.skipRequest();",
+                  "}"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "    pm.test('200 CANCELLED por el usuario', () => {",
+                  "      pm.response.to.have.status(200);",
+                  "      const o = pm.response.json();",
+                  "      pm.expect(o.id).to.eql(pm.variables.get('limitId'));",
+                  "      pm.expect(o.status).to.eql('CANCELLED');",
+                  "      pm.expect(o.cancel_reason).to.eql('USER');",
+                  "    });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/orders/{{limitId}}/cancel",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "orders",
+                "{{limitId}}",
+                "cancel"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"userid\": {{userid}}\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Cancelar otra vez → 409",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "let limit = null;",
+                  "try { limit = JSON.parse(pm.collectionVariables.get('limitOrder') || 'null'); } catch (e) { limit = null; }",
+                  "const ours = !!limit && typeof limit.id === 'string' && limit.id !== ''",
+                  "  && limit.baseUrl === pm.environment.get('baseUrl')",
+                  "  && limit.userid === pm.environment.get('userid')",
+                  "  && limit.runId === pm.collectionVariables.get('runId');",
+                  "if (ours) {",
+                  "  pm.variables.set('limitId', limit.id);",
+                  "} else {",
+                  "  console.log('salteado: no hay una LIMIT de esta corrida en este environment');",
+                  "  pm.execution.skipRequest();",
+                  "}"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('409 NOT_CANCELLABLE', () => {",
+                  "  pm.response.to.have.status(409);",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.error).to.eql('NOT_CANCELLABLE');",
+                  "  pm.expect(body.message).to.be.a('string');",
+                  "});",
+                  "",
+                  "    pm.test('con la orden en su estado actual', () => {",
+                  "      pm.expect(pm.response.json().order.status).to.eql('CANCELLED');",
+                  "    });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/orders/{{limitId}}/cancel",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "orders",
+                "{{limitId}}",
+                "cancel"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"userid\": {{userid}}\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Vender MARKET",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const ORDER_FIELDS = ['id', 'userid', 'instrumentid', 'side', 'type', 'size', 'price', 'amount', 'status', 'balance_seq', 'datetime', 'cancel_reason'];",
+                  "pm.test('201 FILLED', () => {",
+                  "  pm.response.to.have.status(201);",
+                  "  const o = pm.response.json();",
+                  "  pm.expect(o).to.have.all.keys(ORDER_FIELDS);",
+                  "  pm.expect(o.status).to.eql('FILLED');",
+                  "  pm.expect(o.userid).to.eql(pm.environment.get('userid'));",
+                  "});",
+                  "pm.test('Location e Idempotent-Replay: false', () => {",
+                  "  const o = pm.response.json();",
+                  "  pm.expect(pm.response.headers.get('Location')).to.eql(`/orders/${o.id}?userid=${o.userid}`);",
+                  "  pm.expect(pm.response.headers.get('Idempotent-Replay')).to.eql('false');",
+                  "});",
+                  "",
+                  "// Respuesta definitiva (no 5xx): el resultado de la clave sell ya se conoce.",
+                  "if (pm.response.code < 500) {",
+                  "  const runId = pm.collectionVariables.get('runId');",
+                  "  let settled = { runId, keys: [] };",
+                  "  try {",
+                  "    const prev = JSON.parse(pm.collectionVariables.get('settled') || 'null');",
+                  "    if (prev && prev.runId === runId && Array.isArray(prev.keys)) settled = prev;",
+                  "  } catch (e) { /* se reemplaza */ }",
+                  "  if (!settled.keys.includes('sell')) settled.keys.push('sell');",
+                  "  pm.collectionVariables.set('settled', JSON.stringify(settled));",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{runId}}-sell"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/orders",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "orders"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"userid\": {{userid}},\n  \"side\": \"SELL\",\n  \"type\": \"MARKET\",\n  \"instrumentid\": 47,\n  \"size\": 3\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Vender más de lo que tiene → REJECTED",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const ORDER_FIELDS = ['id', 'userid', 'instrumentid', 'side', 'type', 'size', 'price', 'amount', 'status', 'balance_seq', 'datetime', 'cancel_reason'];",
+                  "pm.test('201 REJECTED', () => {",
+                  "  pm.response.to.have.status(201);",
+                  "  const o = pm.response.json();",
+                  "  pm.expect(o).to.have.all.keys(ORDER_FIELDS);",
+                  "  pm.expect(o.status).to.eql('REJECTED');",
+                  "  pm.expect(o.userid).to.eql(pm.environment.get('userid'));",
+                  "});",
+                  "pm.test('Location e Idempotent-Replay: false', () => {",
+                  "  const o = pm.response.json();",
+                  "  pm.expect(pm.response.headers.get('Location')).to.eql(`/orders/${o.id}?userid=${o.userid}`);",
+                  "  pm.expect(pm.response.headers.get('Idempotent-Replay')).to.eql('false');",
+                  "});",
+                  "",
+                  "// Respuesta definitiva (no 5xx): el resultado de la clave sell-too-much ya se conoce.",
+                  "if (pm.response.code < 500) {",
+                  "  const runId = pm.collectionVariables.get('runId');",
+                  "  let settled = { runId, keys: [] };",
+                  "  try {",
+                  "    const prev = JSON.parse(pm.collectionVariables.get('settled') || 'null');",
+                  "    if (prev && prev.runId === runId && Array.isArray(prev.keys)) settled = prev;",
+                  "  } catch (e) { /* se reemplaza */ }",
+                  "  if (!settled.keys.includes('sell-too-much')) settled.keys.push('sell-too-much');",
+                  "  pm.collectionVariables.set('settled', JSON.stringify(settled));",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{runId}}-sell-too-much"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/orders",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "orders"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"userid\": {{userid}},\n  \"side\": \"SELL\",\n  \"type\": \"MARKET\",\n  \"instrumentid\": 47,\n  \"size\": 100000\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Retirar pesos (CASH_OUT)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const ORDER_FIELDS = ['id', 'userid', 'instrumentid', 'side', 'type', 'size', 'price', 'amount', 'status', 'balance_seq', 'datetime', 'cancel_reason'];",
+                  "pm.test('201 FILLED', () => {",
+                  "  pm.response.to.have.status(201);",
+                  "  const o = pm.response.json();",
+                  "  pm.expect(o).to.have.all.keys(ORDER_FIELDS);",
+                  "  pm.expect(o.status).to.eql('FILLED');",
+                  "  pm.expect(o.userid).to.eql(pm.environment.get('userid'));",
+                  "});",
+                  "pm.test('Location e Idempotent-Replay: false', () => {",
+                  "  const o = pm.response.json();",
+                  "  pm.expect(pm.response.headers.get('Location')).to.eql(`/orders/${o.id}?userid=${o.userid}`);",
+                  "  pm.expect(pm.response.headers.get('Idempotent-Replay')).to.eql('false');",
+                  "});",
+                  "",
+                  "// Respuesta definitiva (no 5xx): el resultado de la clave cash-out ya se conoce.",
+                  "if (pm.response.code < 500) {",
+                  "  const runId = pm.collectionVariables.get('runId');",
+                  "  let settled = { runId, keys: [] };",
+                  "  try {",
+                  "    const prev = JSON.parse(pm.collectionVariables.get('settled') || 'null');",
+                  "    if (prev && prev.runId === runId && Array.isArray(prev.keys)) settled = prev;",
+                  "  } catch (e) { /* se reemplaza */ }",
+                  "  if (!settled.keys.includes('cash-out')) settled.keys.push('cash-out');",
+                  "  pm.collectionVariables.set('settled', JSON.stringify(settled));",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{runId}}-cash-out"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/orders",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "orders"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"userid\": {{userid}},\n  \"side\": \"CASH_OUT\",\n  \"amount\": \"100.00\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "MARKET con precio → 400",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('400 BAD_REQUEST', () => {",
+                  "  pm.response.to.have.status(400);",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.error).to.eql('BAD_REQUEST');",
+                  "  pm.expect(body.message).to.be.a('string');",
+                  "});",
+                  "",
+                  "// Respuesta definitiva (no 5xx): el resultado de la clave error-price ya se conoce.",
+                  "if (pm.response.code < 500) {",
+                  "  const runId = pm.collectionVariables.get('runId');",
+                  "  let settled = { runId, keys: [] };",
+                  "  try {",
+                  "    const prev = JSON.parse(pm.collectionVariables.get('settled') || 'null');",
+                  "    if (prev && prev.runId === runId && Array.isArray(prev.keys)) settled = prev;",
+                  "  } catch (e) { /* se reemplaza */ }",
+                  "  if (!settled.keys.includes('error-price')) settled.keys.push('error-price');",
+                  "  pm.collectionVariables.set('settled', JSON.stringify(settled));",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{runId}}-error-price"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/orders",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "orders"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"userid\": {{userid}},\n  \"side\": \"BUY\",\n  \"type\": \"MARKET\",\n  \"instrumentid\": 47,\n  \"size\": 1,\n  \"price\": \"10.00\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Monto como número con decimales → 400",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('400 BAD_REQUEST', () => {",
+                  "  pm.response.to.have.status(400);",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.error).to.eql('BAD_REQUEST');",
+                  "  pm.expect(body.message).to.be.a('string');",
+                  "});",
+                  "",
+                  "// Respuesta definitiva (no 5xx): el resultado de la clave error-float ya se conoce.",
+                  "if (pm.response.code < 500) {",
+                  "  const runId = pm.collectionVariables.get('runId');",
+                  "  let settled = { runId, keys: [] };",
+                  "  try {",
+                  "    const prev = JSON.parse(pm.collectionVariables.get('settled') || 'null');",
+                  "    if (prev && prev.runId === runId && Array.isArray(prev.keys)) settled = prev;",
+                  "  } catch (e) { /* se reemplaza */ }",
+                  "  if (!settled.keys.includes('error-float')) settled.keys.push('error-float');",
+                  "  pm.collectionVariables.set('settled', JSON.stringify(settled));",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{runId}}-error-float"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/orders",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "orders"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"userid\": {{userid}},\n  \"side\": \"CASH_IN\",\n  \"amount\": 100.5\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Portfolio después de operar",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "    pm.test('200 con PAMP en las posiciones', () => {",
+                  "      pm.response.to.have.status(200);",
+                  "      const p = pm.response.json();",
+                  "      pm.expect(p.positions.some((x) => x.ticker === 'PAMP')).to.eql(true);",
+                  "      pm.expect(p.cash.reservado).to.be.a('string');",
+                  "    });",
+                  "    // Fin de la corrida: runId se vacía solo si cada escritura con clave tuvo una respuesta",
+                  "    // definitiva en esta corrida. Si alguna quedó sin resultado (5xx, timeout) o no se envió",
+                  "    // (este request suelto), se conserva para reenviarla con la misma clave.",
+                  "    const RUN_KEYS = ['cash-in','buy-size','buy-amount','buy-limit','sell','sell-too-much','cash-out','error-price','error-float'];",
+                  "    const runId = pm.collectionVariables.get('runId');",
+                  "    let done = [];",
+                  "    try {",
+                  "      const settled = JSON.parse(pm.collectionVariables.get('settled') || 'null');",
+                  "      if (settled && settled.runId === runId && Array.isArray(settled.keys)) done = settled.keys;",
+                  "    } catch (e) { done = []; }",
+                  "    const pending = RUN_KEYS.filter((k) => !done.includes(k));",
+                  "    if (pending.length === 0) {",
+                  "      pm.collectionVariables.set('runId', '');",
+                  "      pm.collectionVariables.set('runContext', '');",
+                  "      pm.collectionVariables.set('limitOrder', '');",
+                  "      pm.collectionVariables.set('settled', '');",
+                  "    } else {",
+                  "      console.log('runId se conserva: sin respuesta definitiva para ' + pending.join(', '));",
+                  "    }"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/portfolio/{{userid}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "portfolio",
+                "{{userid}}"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Interno",
+      "description": "/internal/* — docs/api/operacion.md. Escribe: solo con allowWrites = \"true\". Los que llevan el token se saltean si internalToken está vacío.",
+      "event": [
+        {
+          "listen": "prerequest",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "// Este folder escribe: solo corre si el environment tiene allowWrites = \"true\" (local, staging).",
+              "if (pm.environment.get('allowWrites') !== 'true') {",
+              "  console.log('salteado: allowWrites no es \"true\" en este environment');",
+              "  pm.execution.skipRequest();",
+              "}"
+            ]
+          }
+        }
+      ],
+      "item": [
+        {
+          "name": "Ejecutar las LIMIT que cruzan",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "    if (!pm.environment.get('internalToken')) {",
+                  "      console.log('salteado: internalToken vacío en este environment');",
+                  "      pm.execution.skipRequest();",
+                  "    }"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "    pm.test('200 con el resultado de la corrida', () => {",
+                  "      pm.response.to.have.status(200);",
+                  "      pm.expect(pm.response.json()).to.have.all.keys('candidates', 'executed', 'not_crossed', 'cancelled', 'errors', 'skipped_users', 'overflow_users', 'skipped_instruments', 'after_id', 'remaining');",
+                  "    });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Internal-Token",
+                "value": "{{internalToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/internal/execute-limits?max=500&max_ms=10000",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "internal",
+                "execute-limits"
+              ],
+              "query": [
+                {
+                  "key": "max",
+                  "value": "500"
+                },
+                {
+                  "key": "max_ms",
+                  "value": "10000"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Parámetro inválido → 400",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "    if (!pm.environment.get('internalToken')) {",
+                  "      console.log('salteado: internalToken vacío en este environment');",
+                  "      pm.execution.skipRequest();",
+                  "    }"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('400 BAD_REQUEST', () => {",
+                  "  pm.response.to.have.status(400);",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.error).to.eql('BAD_REQUEST');",
+                  "  pm.expect(body.message).to.be.a('string');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Internal-Token",
+                "value": "{{internalToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/internal/execute-limits?max=abc",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "internal",
+                "execute-limits"
+              ],
+              "query": [
+                {
+                  "key": "max",
+                  "value": "abc"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Limpiar claves de idempotencia vencidas",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "    if (!pm.environment.get('internalToken')) {",
+                  "      console.log('salteado: internalToken vacío en este environment');",
+                  "      pm.execution.skipRequest();",
+                  "    }"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "    pm.test('200', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Internal-Token",
+                "value": "{{internalToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/internal/cleanup-idempotency",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "internal",
+                "cleanup-idempotency"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Token inválido → 401",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('401 UNAUTHORIZED', () => {",
+                  "  pm.response.to.have.status(401);",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.error).to.eql('UNAUTHORIZED');",
+                  "  pm.expect(body.message).to.be.a('string');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Internal-Token",
+                "value": "no-es-el-token"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/internal/execute-limits",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "internal",
+                "execute-limits"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Errores generales",
+      "item": [
+        {
+          "name": "Ruta inexistente → 404",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('404 NOT_FOUND', () => {",
+                  "  pm.response.to.have.status(404);",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.error).to.eql('NOT_FOUND');",
+                  "  pm.expect(body.message).to.be.a('string');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/no-existe",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "no-existe"
+              ]
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

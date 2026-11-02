@@ -25,6 +25,7 @@ Nada.
 ### Documentación
 
 - **Los comandos del servidor funcionan en zsh** ([#55](https://github.com/dante0x95/cocos-challenge-a/pull/55)): `docs/api/operacion.md` y el README llaman `LIGHTSAIL_HOST` a la IP del servidor y la escriben `${LIGHTSAIL_HOST}`: en zsh, `HOST` ya existe (el nombre de la Mac), así que si no se definía los comandos apuntaban en silencio a la propia máquina, y `$HOST:c` se comía los dos puntos del `scp`, que copiaba en local. La clave de Lightsail queda como marcador. v0.2.0 queda con su fecha.
+- **Qué pasó con las claves de v0.1.0 al rechazar `amount: 1000.0`, y la regla para la próxima vez** ([#71](https://github.com/dante0x95/cocos-challenge-a/pull/71)): en las 24 h siguientes a v0.2.0, el reintento de una clave de v0.1.0 con un número decimal recibía `400` en vez del replay; mandándolo como string se obtiene el replay ([D-13](docs/decisiones.md#d-13), [D-19](docs/decisiones.md#d-19)). Una validación que rechace algo que la versión anterior aceptaba primero reconoce la clave existente, o rechaza antes recién 24 h + 1 min después ([D-19](docs/decisiones.md#d-19), CONTRIBUTING).
 
 ## v0.2.0 — 2026-10-31
 

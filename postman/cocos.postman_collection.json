@@ -2,25 +2,16 @@
   "info": {
     "_postman_id": "6f1d3a52-49c0-4c6e-9a49-2d6c0c0c0049",
     "name": "Cocos challenge — API",
-    "description": "Los endpoints de la API con verificaciones (docs/api/). Se corre entera con el Collection Runner o con newman, contra uno de los environments de postman/:\n\n- local: docker compose up (http://localhost:3000, token de desarrollo).\n- staging: el token interno va vacío; se completa como valor actual (no se exporta) o el folder Interno se saltea.\n- production: solo lecturas (allowWrites = \"false\"): Órdenes e Interno se saltean.\n\nLas claves de idempotencia llevan runId: un request reenviado (por ejemplo, después de un timeout) usa la misma clave y recupera el resultado. Al final de Órdenes, runId se vacía solo si cada escritura con clave tuvo una respuesta definitiva (no 5xx) en esa corrida, así que la siguiente usa claves nuevas; si alguna quedó sin resultado, se conserva. Para empezar otra intención después de una corrida cortada, vaciar runId.",
+    "description": "Los endpoints de la API con verificaciones (docs/api/). Se corre entera con el Collection Runner o con newman, contra uno de los environments de postman/:\n\n- local: docker compose up (http://localhost:3000, token de desarrollo).\n- staging: el token interno va vacío; se completa como valor actual (no se exporta) o el folder Interno se saltea.\n- production: solo lecturas (allowWrites = \"false\"): Órdenes e Interno se saltean.\n\nLas claves de idempotencia llevan runId, que se crea en el primer request de Órdenes y queda atado al environment y al userid: con otro, Órdenes se saltea mientras runId tenga valor. Un request reenviado (por ejemplo, después de un timeout) usa la misma clave y recupera el resultado. Al final de Órdenes, runId se vacía solo si cada escritura con clave tuvo una respuesta definitiva (no 5xx) en esa corrida, así que la siguiente usa claves nuevas; si alguna quedó sin resultado, se conserva. Para empezar otra intención después de una corrida cortada, vaciar runId.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
-  "event": [
-    {
-      "listen": "prerequest",
-      "script": {
-        "type": "text/javascript",
-        "exec": [
-          "// runId: prefijo de las claves de idempotencia. Se crea si está vacío y no cambia hasta que una",
-          "// corrida completa de Órdenes lo vacía: reenviar un request sin respuesta usa la misma clave.",
-          "if (!pm.collectionVariables.get('runId')) pm.collectionVariables.set('runId', pm.variables.replaceIn('{{$guid}}'));"
-        ]
-      }
-    }
-  ],
   "variable": [
     {
       "key": "runId",
+      "value": ""
+    },
+    {
+      "key": "runContext",
       "value": ""
     },
     {
@@ -400,6 +391,24 @@
               "if (pm.environment.get('allowWrites') !== 'true') {",
               "  console.log('salteado: allowWrites no es \"true\" en este environment');",
               "  pm.execution.skipRequest();",
+              "}"
+            ]
+          }
+        },
+        {
+          "listen": "prerequest",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "if (pm.environment.get('allowWrites') === 'true') {",
+              "  const context = JSON.stringify({ baseUrl: pm.environment.get('baseUrl'), userid: pm.environment.get('userid') });",
+              "  if (!pm.collectionVariables.get('runId')) {",
+              "    pm.collectionVariables.set('runId', pm.variables.replaceIn('{{$guid}}'));",
+              "    pm.collectionVariables.set('runContext', context);",
+              "  } else if (pm.collectionVariables.get('runContext') !== context) {",
+              "    console.log('salteado: runId es de otro environment o usuario (' + pm.collectionVariables.get('runContext') + '): volver a ese para reenviar lo pendiente, o vaciar runId para empezar otra intención');",
+              "    pm.execution.skipRequest();",
+              "  }",
               "}"
             ]
           }
@@ -1537,6 +1546,7 @@
                   "    const pending = RUN_KEYS.filter((k) => !done.includes(k));",
                   "    if (pending.length === 0) {",
                   "      pm.collectionVariables.set('runId', '');",
+                  "      pm.collectionVariables.set('runContext', '');",
                   "      pm.collectionVariables.set('limitOrder', '');",
                   "      pm.collectionVariables.set('settled', '');",
                   "    } else {",

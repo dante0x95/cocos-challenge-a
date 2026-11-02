@@ -1,8 +1,8 @@
 // La colección de Postman versionada (issue #49): válida contra el esquema oficial v2.1, cada
 // request contra {{baseUrl}}, cada endpoint de src/routes cubierto, sin secretos, y sus scripts
 // ejecutados con un `pm` simulado: las escrituras se saltean donde el environment no las permite
-// (producción), un request reenviado conserva su Idempotency-Key y los requests sobre la LIMIT
-// usan solo la que creó la corrida en ese environment.
+// (producción), un request reenviado conserva su Idempotency-Key, la corrida queda atada a su
+// environment y usuario, y los requests sobre la LIMIT usan solo la que creó la corrida en ese environment.
 import { randomUUID } from 'node:crypto';
 import { readFileSync, readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -126,6 +126,8 @@ const byName = (name: string, list = requests) => {
 };
 const idempotencyKey = (r: Located, s: State) =>
   fill(s, r.request.header.find((h) => h.key === 'Idempotency-Key')?.value ?? '');
+/** El runContext con que Órdenes ata runId al environment y al usuario. */
+const contextOf = (s: State) => JSON.stringify({ baseUrl: s.env.baseUrl, userid: s.env.userid });
 /** Corre Órdenes en orden, como el Runner: cada request no salteado recibe una respuesta con `code`. */
 const fullRun = (
   s: State, list = requests, root: Collection = collection, code: (r: Located) => number = () => 201,
@@ -151,6 +153,7 @@ const writeGuardProblems = (r: Located, root: Collection = collection) =>
     else s.env.allowWrites = allowWrites;
     s.collection.set('limitOrder', JSON.stringify({ id: '1', baseUrl: s.env.baseUrl, userid: s.env.userid, runId: 'r' }));
     s.collection.set('runId', 'r');
+    s.collection.set('runContext', contextOf(s));
     return prerequest(r, s, root) === shouldSkip ? [] : [`${r.item.name}: allowWrites=${String(allowWrites)}`];
   });
 
@@ -305,20 +308,91 @@ describe('scripts de la colección', () => {
     expect(idempotencyKey(deposit, s)).toBe(first);
   });
 
-  it('una corrida con un 5xx en el depósito conserva la clave para reenviarlo', () => {
+  // Cada clave de la corrida, desde los headers: un 5xx en cualquiera la deja sin resultado.
+  const KEY_SUFFIXES = [...new Set(requests
+    .map((r) => r.request.header.find((h) => h.key === 'Idempotency-Key')?.value.match(/^\{\{runId\}\}-(.+)$/)?.[1])
+    .filter((k): k is string => k !== undefined))];
+  const withKey = (suffix: string, list = requests) =>
+    list.filter((r) => r.request.header.some((h) => h.key === 'Idempotency-Key' && h.value === `{{runId}}-${suffix}`));
+  /** Una corrida en la que cada request con la clave `suffix` responde 503; después, el reenvío responde 201. */
+  const unknownResult = (suffix: string, list = requests, root: Collection = collection) => {
     const s = newState(environments.local);
+    const sent = withKey(suffix, list);
+    fullRun(s, list, root, (r) => (sent.includes(r) ? 503 : 201));
+    const kept = s.collection.get('runId') !== '';
+    prerequest(sent[0]!, s, root);
+    const key = idempotencyKey(sent[0]!, s);
+    testScript(sent[0]!, s, { id: '15', status: 'NEW' }, 201);
+    testScript(byName('Portfolio después de operar', list), s, { positions: [], cash: {} });
+    return { kept, key, closed: s.collection.get('runId') === '' };
+  };
+
+  it('un 5xx en cualquier escritura con clave conserva runId y la clave; con la respuesta, cierra', () => {
+    expect(KEY_SUFFIXES).toEqual(['cash-in', 'buy-size', 'buy-amount', 'buy-limit', 'sell', 'sell-too-much', 'cash-out', 'error-price', 'error-float']);
+    const problems = KEY_SUFFIXES.flatMap((suffix) => {
+      const { kept, key, closed } = unknownResult(suffix);
+      return [
+        ...(kept ? [] : [`${suffix}: runId vaciado con el resultado sin conocer`]),
+        ...(key.endsWith(`-${suffix}`) && key.length > suffix.length + 30 ? [] : [`${suffix}: clave ${key}`]),
+        ...(closed ? [] : [`${suffix}: no cierra después del 201`]),
+      ];
+    });
+    expect(problems).toEqual([]);
+  });
+
+  it('control: un guard de buy-size que acepta el 5xx vacía runId', () => {
+    const eager = mutated((j) => j.replace(
+      'clave buy-size ya se conoce.","if (pm.response.code < 500) {', 'clave buy-size ya se conoce.","if (true) {'));
+    expect(unknownResult('buy-size', eager.list, eager.copy).kept).toBe(false);
+    expect(unknownResult('cash-in', eager.list, eager.copy).kept).toBe(true);
+  });
+
+  // Un depósito pendiente en local no se cierra con respuestas de staging ni de otro usuario: con
+  // otro baseUrl o userid, Órdenes se saltea mientras runId tenga valor.
+  const pendingDeposit = (list = requests, root: Collection = collection) => {
+    const s = newState(environments.local);
+    const sent = withKey('cash-in', list);
+    fullRun(s, list, root, (r) => (sent.includes(r) ? 503 : 201));
+    prerequest(sent[0]!, s, root);
+    return { s, key: idempotencyKey(sent[0]!, s) };
+  };
+  const OTHER_CONTEXTS: [string, (s: State) => void][] = [
+    ['staging', (s) => { s.env = envObject(environments.staging); }],
+    ['otro userid', (s) => { s.env = { ...envObject(environments.local), userid: '3' }; }],
+  ];
+  const afterOtherContext = (move: (s: State) => void, list = requests, root: Collection = collection) => {
+    const { s, key } = pendingDeposit(list, root);
+    move(s);
+    const ordenes = list.filter((x) => x.parents.some((p) => p.name === 'Órdenes'));
+    const sentThere = ordenes.filter((r) => !prerequest(r, s, root)).map((r) => r.item.name);
+    fullRun(s, list, root);
+    s.env = envObject(environments.local);
+    const deposit = byName('Depositar pesos (CASH_IN)', list);
+    prerequest(deposit, s, root);
+    return { key, sentThere, retry: idempotencyKey(deposit, s), runId: s.collection.get('runId') };
+  };
+
+  it('con otro environment o userid, Órdenes no corre y el depósito pendiente conserva su clave', () => {
+    for (const [, move] of OTHER_CONTEXTS) {
+      const { key, sentThere, retry } = afterOtherContext(move);
+      expect(sentThere).toEqual([]);
+      expect(retry).toBe(key);
+    }
+    // Después de una corrida completa (runId vacío), el otro environment empieza la suya.
+    const s = newState(environments.local);
+    fullRun(s);
+    s.env = envObject(environments.staging);
     const deposit = byName('Depositar pesos (CASH_IN)');
-    // El depósito y su replay (la misma clave) responden 503: el resultado sigue sin conocerse.
-    const replay = byName('Repetir el depósito → replay');
-    fullRun(s, requests, collection, (r) => (r === deposit || r === replay ? 503 : 201));
-    expect(s.collection.get('runId')).not.toBe('');
-    prerequest(deposit, s);
-    const key = idempotencyKey(deposit, s);
-    // El reenvío responde 201: la corrida siguiente ya puede cerrar.
-    testScript(deposit, s, { id: '1' }, 201);
-    expect(idempotencyKey(deposit, s)).toBe(key);
-    testScript(byName('Portfolio después de operar'), s, { positions: [], cash: {} });
-    expect(s.collection.get('runId')).toBe('');
+    expect(prerequest(deposit, s)).toBe(false);
+    expect(s.collection.get('runContext')).toBe(contextOf(s));
+  });
+
+  it('control: sin comparar runContext, staging cierra el depósito pendiente de local', () => {
+    const blind = mutated((j) => j.replace(`pm.collectionVariables.get('runContext') !== context`, 'false'));
+    for (const [name, move] of OTHER_CONTEXTS) {
+      const { key, retry } = afterOtherContext(move, blind.list, blind.copy);
+      expect(retry, name).not.toBe(key);
+    }
   });
 
   it('control: un cierre incondicional borra la clave del depósito sin respuesta', () => {
@@ -362,12 +436,19 @@ describe('scripts de la colección', () => {
     expect(fill(s, byName('Cancelar la LIMIT').request.url.raw)).toBe('http://localhost:3000/orders/15/cancel');
   });
 
+  // Con runContext del environment nuevo, para que decida solo el guard de la LIMIT (el de la
+  // corrida ya saltea Órdenes con otro environment).
+  const moveRunTo = (s: State, env: Record<string, string>) => {
+    s.env = env;
+    s.collection.set('runContext', contextOf(s));
+  };
+
   it('cambiar de environment después de crear la LIMIT no envía su id al otro', () => {
     const s = afterLimit(requests, collection);
-    s.env = envObject(environments.staging);
+    moveRunTo(s, envObject(environments.staging));
     expect(sentWith(requests, collection, s)).toEqual([]);
     // Otro userid en el mismo servidor, tampoco.
-    s.env = { ...envObject(environments.local), userid: '3' };
+    moveRunTo(s, { ...envObject(environments.local), userid: '3' });
     expect(sentWith(requests, collection, s)).toEqual([]);
   });
 
@@ -399,7 +480,7 @@ describe('scripts de la colección', () => {
   it('control: un guard que no mira el environment envía el id a staging', () => {
     const blind = mutated((j) => j.replaceAll(`limit.baseUrl === pm.environment.get('baseUrl')`, 'true'));
     const s = afterLimit(blind.list, blind.copy);
-    s.env = envObject(environments.staging);
+    moveRunTo(s, envObject(environments.staging));
     expect(sentWith(blind.list, blind.copy, s)).toEqual(LIMIT_DEPENDENTS);
   });
 });

@@ -1,0 +1,178 @@
+# El lab del issue #72: Z, A y C sobre los mismos datos, detrás de un solo host (lab/README.md).
+#
+#   /v1/* → api-z (Z, lab/z)          db-z: esquema de database.sql, sin índices
+#   /v2/* → api-a (A, la imagen del entregable tal cual)   db-a
+#   /v3/* → api-c (C: la misma imagen + lab/c/snapshot.sql)  db-c
+#
+# Una base de Postgres por variante. Cada una se carga una vez desde el mismo dataset
+# (LAB_DATA_DIR, lab/data/generate.sh) con lab/load/load.sh; A y C, después del bootstrap de la
+# imagen de A. Las APIs arrancan recién cuando su carga terminó bien (C, con los snapshots
+# calientes). Solo el proxy publica puertos.
+#
+# Memoria, para una instancia de 2 GB con el swap de lab/remote/setup.sh: 3 × 360 MB de Postgres
+# (shared_buffers 128 MB, 20 conexiones), 3 × 160 MB de API (pool de 5) y 64 MB de Caddy, ~1,6 GB.
+name: ${LAB_PROJECT:-cocos-lab}
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: 10m
+    max-file: "3"
+
+x-db: &db
+  image: postgres:18
+  restart: unless-stopped
+  environment:
+    POSTGRES_USER: postgres
+    POSTGRES_PASSWORD: ${LAB_PG_PASSWORD:-lab}
+    POSTGRES_DB: cocos
+  command:
+    - postgres
+    - -c
+    - shared_buffers=128MB
+    - -c
+    - effective_cache_size=256MB
+    - -c
+    - work_mem=8MB
+    - -c
+    - maintenance_work_mem=128MB
+    - -c
+    - max_connections=20
+    - -c
+    - max_wal_size=2GB
+  mem_limit: 360m
+  healthcheck:
+    test: ["CMD-SHELL", "pg_isready -U postgres -d cocos"]
+    interval: 2s
+    retries: 30
+  logging: *logging
+
+x-load: &load
+  image: postgres:18
+  restart: "no"
+  entrypoint: ["bash", "/lab/load/load.sh"]
+  volumes:
+    - ./:/lab:ro
+    - ../db/migrations/000_seed.sql:/db/000_seed.sql:ro
+    - ${LAB_DATA_DIR:-./.data}:/data:ro
+  logging: *logging
+
+x-migrate: &migrate
+  image: ${LAB_A_IMAGE:?falta LAB_A_IMAGE, la imagen de A}
+  pull_policy: never
+  restart: "no"
+  command: ["node", "dist/db/bootstrap.js"]
+  logging: *logging
+
+x-api-a: &api-a
+  image: ${LAB_A_IMAGE:?falta LAB_A_IMAGE, la imagen de A}
+  pull_policy: never
+  restart: unless-stopped
+  mem_limit: 160m
+  healthcheck:
+    test: ["CMD-SHELL", "wget -qO- http://localhost:3000/health >/dev/null || exit 1"]
+    interval: 5s
+    retries: 20
+  logging: *logging
+
+services:
+  db-z: { <<: *db, volumes: ["pg-z:/var/lib/postgresql"] }
+  db-a: { <<: *db, volumes: ["pg-a:/var/lib/postgresql"] }
+  db-c: { <<: *db, volumes: ["pg-c:/var/lib/postgresql"] }
+
+  load-z:
+    <<: *load
+    command: ["z"]
+    environment: { PGHOST: db-z, PGUSER: postgres, PGPASSWORD: "${LAB_PG_PASSWORD:-lab}", PGDATABASE: cocos }
+    depends_on: { db-z: { condition: service_healthy } }
+
+  migrate-a:
+    <<: *migrate
+    environment:
+      DATABASE_ADMIN_URL: postgresql://postgres:${LAB_PG_PASSWORD:-lab}@db-a:5432/cocos
+      API_DB_PASSWORD: ${LAB_API_PASSWORD:-api}
+    depends_on: { db-a: { condition: service_healthy } }
+  load-a:
+    <<: *load
+    command: ["a"]
+    environment: { PGHOST: db-a, PGUSER: postgres, PGPASSWORD: "${LAB_PG_PASSWORD:-lab}", PGDATABASE: cocos }
+    depends_on: { migrate-a: { condition: service_completed_successfully } }
+
+  migrate-c:
+    <<: *migrate
+    environment:
+      DATABASE_ADMIN_URL: postgresql://postgres:${LAB_PG_PASSWORD:-lab}@db-c:5432/cocos
+      API_DB_PASSWORD: ${LAB_API_PASSWORD:-api}
+    depends_on: { db-c: { condition: service_healthy } }
+  load-c:
+    <<: *load
+    command: ["c"]
+    environment: { PGHOST: db-c, PGUSER: postgres, PGPASSWORD: "${LAB_PG_PASSWORD:-lab}", PGDATABASE: cocos }
+    depends_on: { migrate-c: { condition: service_completed_successfully } }
+
+  api-z:
+    build: { context: .., dockerfile: lab/z/Dockerfile }
+    image: cocos-lab-z:local
+    restart: unless-stopped
+    mem_limit: 160m
+    environment:
+      DATABASE_URL: postgresql://postgres:${LAB_PG_PASSWORD:-lab}@db-z:5432/cocos
+      PG_POOL_MAX: 5
+      NODE_OPTIONS: --max-old-space-size=96
+    depends_on: { load-z: { condition: service_completed_successfully } }
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/health >/dev/null || exit 1"]
+      interval: 5s
+      retries: 20
+    logging: *logging
+
+  # A como en el entregable (deploy/lightsail/compose.yml): acepta escrituras y corre sus jobs.
+  # Sin INTERNAL_TOKEN, los endpoints /internal no existen.
+  api-a:
+    <<: *api-a
+    environment:
+      DATABASE_URL: postgresql://api:${LAB_API_PASSWORD:-api}@db-a:5432/cocos
+      PORT: 3000
+      PG_POOL_MAX: 5
+      PG_CONNECT_TIMEOUT_MS: 2000
+      JOBS_ENABLED: "true"
+      NODE_OPTIONS: --max-old-space-size=96
+    depends_on: { load-a: { condition: service_completed_successfully } }
+
+  # C: la misma imagen sobre la base con snapshots. Sin jobs: v3 no acepta escrituras.
+  api-c:
+    <<: *api-a
+    environment:
+      DATABASE_URL: postgresql://api:${LAB_API_PASSWORD:-api}@db-c:5432/cocos
+      PORT: 3000
+      PG_POOL_MAX: 5
+      PG_CONNECT_TIMEOUT_MS: 2000
+      JOBS_ENABLED: "false"
+      NODE_OPTIONS: --max-old-space-size=96
+    depends_on: { load-c: { condition: service_completed_successfully } }
+
+  proxy:
+    image: caddy:2.11.7
+    restart: unless-stopped
+    mem_limit: 64m
+    environment:
+      LAB_SITE: ${LAB_SITE:-:80}
+    ports:
+      - "${LAB_HTTP_PORT:-80}:80"
+      - "${LAB_HTTPS_PORT:-443}:443"
+    volumes:
+      - ./caddy:/etc/caddy:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      api-z: { condition: service_healthy }
+      api-a: { condition: service_healthy }
+      api-c: { condition: service_healthy }
+    logging: *logging
+
+volumes:
+  pg-z:
+  pg-a:
+  pg-c:
+  caddy-data:
+  caddy-config:

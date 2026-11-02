@@ -1,0 +1,33 @@
+# Proxy del lab (issue #72): un host, un prefijo por variante. handle_path quita el prefijo, así
+# /v2/portfolio/1002 llega a la API como /portfolio/1002.
+#
+# LAB_SITE es la dirección del sitio: `:80` (HTTP por la IP, el default) o un nombre como
+# <ip con guiones>.sslip.io, para el que Caddy pide el certificado y sirve HTTPS (puertos 80 y 443).
+#
+# v1 (Z) y v3 (C) son de solo lectura: lo que no es GET ni HEAD responde 403 acá, antes de llegar a
+# la API. v2 es la imagen de A tal cual y acepta lo mismo que el entregable.
+
+{$LAB_SITE::80} {
+	route {
+		@write {
+			not method GET HEAD
+			not path /v2/*
+		}
+		header @write Content-Type application/json
+		respond @write `{"error":"FORBIDDEN","message":"v1 y v3 son de solo lectura"}` 403
+
+		handle_path /v1/* {
+			reverse_proxy api-z:3000
+		}
+		handle_path /v2/* {
+			reverse_proxy api-a:3000
+		}
+		handle_path /v3/* {
+			reverse_proxy api-c:3000
+		}
+		handle {
+			header Content-Type application/json
+			respond `{"v1":"Z: línea base (database.sql, SUM … GROUP BY)","v2":"A: el entregable","v3":"C: snapshot + delta, K = 500","ejemplo":"/v2/portfolio/1002"}` 404
+		}
+	}
+}

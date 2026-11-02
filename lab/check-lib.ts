@@ -195,3 +195,26 @@ export function compareZSearch(label: string, results: unknown, all: Instrument[
   return got === JSON.stringify(want) ? []
     : [`${label}: v1 ${results.length} resultados, su definición da ${want.length}: ${want.slice(0, 5).map((i) => i.ticker).join(', ')}…`];
 }
+
+/**
+ * Las diferencias entre dos JSON: `shape`, las rutas que están en uno solo; `values`, las que están
+ * en los dos con otro valor. v3 es la imagen de otro repo (#72): su forma puede diferir de la de A y
+ * eso se anota; sus números, no.
+ */
+export function jsonDiff(a: unknown, b: unknown, path = ''): { shape: string[]; values: string[] } {
+  const out = { shape: [] as string[], values: [] as string[] };
+  const isObj = (x: unknown): x is Record<string, unknown> => typeof x === 'object' && x !== null;
+  if (isObj(a) && isObj(b) && Array.isArray(a) === Array.isArray(b)) {
+    const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
+    for (const k of keys) {
+      const p = path ? `${path}.${k}` : k;
+      if (!(k in a) || !(k in b)) { out.shape.push(p); continue; }
+      const d = jsonDiff(a[k], b[k], p);
+      out.shape.push(...d.shape);
+      out.values.push(...d.values);
+    }
+  } else if (JSON.stringify(a) !== JSON.stringify(b)) {
+    out.values.push(`${path}: ${JSON.stringify(a)} ≠ ${JSON.stringify(b)}`);
+  }
+  return out;
+}

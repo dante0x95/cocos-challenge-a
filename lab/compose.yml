@@ -1,13 +1,14 @@
 # El lab del issue #72: Z, A y C sobre los mismos datos, detrás de un solo host (lab/README.md).
 #
-#   /v1/* → api-z (Z, lab/z)          db-z: esquema de database.sql, sin índices
-#   /v2/* → api-a (A, la imagen del entregable tal cual)   db-a
-#   /v3/* → api-c (C: la misma imagen + lab/c/snapshot.sql)  db-c
+#   /v1/* → api-z (Z, lab/z, construida acá)                               db-z: database.sql, sin índices
+#   /v2/* → api-a (A: la imagen de producción, por digest, LAB_A_IMAGE)     db-a
+#   /v3/* → api-c (C: la imagen del repo anterior con snapshot + delta, LAB_C_IMAGE)  db-c
 #
 # Una base de Postgres por variante. Cada una se carga una vez desde el mismo dataset
-# (LAB_DATA_DIR, lab/data/generate.sh) con lab/load/load.sh; A y C, después del bootstrap de la
-# imagen de A. Las APIs arrancan recién cuando su carga terminó bien (C, con los snapshots
-# calientes). Solo el proxy publica puertos.
+# (LAB_DATA_DIR, lab/data/generate.sh) con lab/load/load.sh; A y C, después del bootstrap de su
+# imagen. C se calienta después de la carga: su bootstrap otra vez (warm-c), que publica el
+# snapshot de cada usuario con historia. Las APIs arrancan recién cuando su base está lista. Solo
+# el proxy publica puertos.
 #
 # Memoria, para una instancia de 2 GB con el swap de lab/remote/setup.sh: 3 × 360 MB de Postgres
 # (shared_buffers 128 MB, 20 conexiones), 3 × 160 MB de API (pool de 5) y 64 MB de Caddy, ~1,6 GB.
@@ -58,14 +59,12 @@ x-load: &load
   logging: *logging
 
 x-migrate: &migrate
-  image: ${LAB_A_IMAGE:?falta LAB_A_IMAGE, la imagen de A}
   pull_policy: never
   restart: "no"
   command: ["node", "dist/db/bootstrap.js"]
   logging: *logging
 
-x-api-a: &api-a
-  image: ${LAB_A_IMAGE:?falta LAB_A_IMAGE, la imagen de A}
+x-api: &api
   pull_policy: never
   restart: unless-stopped
   mem_limit: 160m
@@ -88,6 +87,7 @@ services:
 
   migrate-a:
     <<: *migrate
+    image: ${LAB_A_IMAGE:?falta LAB_A_IMAGE, la imagen de A}
     environment:
       DATABASE_ADMIN_URL: postgresql://postgres:${LAB_PG_PASSWORD:-lab}@db-a:5432/cocos
       API_DB_PASSWORD: ${LAB_API_PASSWORD:-api}
@@ -98,17 +98,28 @@ services:
     environment: { PGHOST: db-a, PGUSER: postgres, PGPASSWORD: "${LAB_PG_PASSWORD:-lab}", PGDATABASE: cocos }
     depends_on: { migrate-a: { condition: service_completed_successfully } }
 
+  # C: el bootstrap de su imagen sobre la base vacía (sin calentar: no hay datos), la carga y otra
+  # vez el bootstrap, que calienta los snapshots de todos los usuarios con historia.
   migrate-c:
     <<: *migrate
+    image: ${LAB_C_IMAGE:?falta LAB_C_IMAGE, la imagen de C}
     environment:
       DATABASE_ADMIN_URL: postgresql://postgres:${LAB_PG_PASSWORD:-lab}@db-c:5432/cocos
       API_DB_PASSWORD: ${LAB_API_PASSWORD:-api}
+      BOOTSTRAP_WARM: "false"
     depends_on: { db-c: { condition: service_healthy } }
   load-c:
     <<: *load
     command: ["c"]
     environment: { PGHOST: db-c, PGUSER: postgres, PGPASSWORD: "${LAB_PG_PASSWORD:-lab}", PGDATABASE: cocos }
     depends_on: { migrate-c: { condition: service_completed_successfully } }
+  warm-c:
+    <<: *migrate
+    image: ${LAB_C_IMAGE:?falta LAB_C_IMAGE, la imagen de C}
+    environment:
+      DATABASE_ADMIN_URL: postgresql://postgres:${LAB_PG_PASSWORD:-lab}@db-c:5432/cocos
+      API_DB_PASSWORD: ${LAB_API_PASSWORD:-api}
+    depends_on: { load-c: { condition: service_completed_successfully } }
 
   api-z:
     build: { context: .., dockerfile: lab/z/Dockerfile }
@@ -129,7 +140,8 @@ services:
   # A con la configuración del entregable (deploy/lightsail/compose.yml), sin INTERNAL_TOKEN: los
   # endpoints /internal no existen. Las escrituras no llegan: el proxy les responde 403.
   api-a:
-    <<: *api-a
+    <<: *api
+    image: ${LAB_A_IMAGE:?falta LAB_A_IMAGE, la imagen de A}
     environment:
       DATABASE_URL: postgresql://api:${LAB_API_PASSWORD:-api}@db-a:5432/cocos
       PORT: 3000
@@ -139,9 +151,10 @@ services:
       NODE_OPTIONS: --max-old-space-size=96
     depends_on: { load-a: { condition: service_completed_successfully } }
 
-  # C: la misma imagen sobre la base con snapshots. Sin jobs: nada escribe órdenes en v3.
+  # C con la configuración de A. Sin jobs: nada escribe órdenes en v3.
   api-c:
-    <<: *api-a
+    <<: *api
+    image: ${LAB_C_IMAGE:?falta LAB_C_IMAGE, la imagen de C}
     environment:
       DATABASE_URL: postgresql://api:${LAB_API_PASSWORD:-api}@db-c:5432/cocos
       PORT: 3000
@@ -149,7 +162,7 @@ services:
       PG_CONNECT_TIMEOUT_MS: 2000
       JOBS_ENABLED: "false"
       NODE_OPTIONS: --max-old-space-size=96
-    depends_on: { load-c: { condition: service_completed_successfully } }
+    depends_on: { warm-c: { condition: service_completed_successfully } }
 
   proxy:
     image: caddy:2.11.7

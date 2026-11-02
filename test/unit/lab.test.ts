@@ -10,9 +10,11 @@
 //     venta y recompra a distinto precio: v2 contra el oráculo, v1 contra v2 y contra su propia
 //     definición de costo, y cada respuesta cronometrada. Con controles que la rompen.
 // La prueba de punta a punta del lab (las tres variantes con los mismos números) es lab/e2e.sh: con
-// Docker y el generador del benchmark, a mano. C contra Postgres real: test/db/lab-c.
+// Docker y el generador del benchmark, a mano. Z contra Postgres real: test/db/lab-z.
+//   - lab/remote/pull.sh baja la imagen de A como el deploy del entregable: el token por stdin, con
+//     un DOCKER_CONFIG temporal que no queda en el servidor, y solo por digest.
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
@@ -203,5 +205,46 @@ describe('lo que exige lab/check.ts (lab/check-lib.ts)', () => {
     expect(compareTimed('x', [{ status: 200, text: '{}' }, { status: 503, text: '{}' }])).not.toEqual([]);
     expect(compareTimed('x', [{ status: 200, text: '{}' }, { status: 200, text: '{"otro":1}' }])).not.toEqual([]);
     expect(compareTimed('x', [{ status: 500, text: '{}' }, { status: 500, text: '{}' }])).not.toEqual([]);
+  });
+});
+
+describe('lab/remote/pull.sh (la imagen de A en la instancia)', () => {
+  const REF = `ghcr.io/dante0x95/cocos-challenge-a@sha256:${'a'.repeat(64)}`;
+  function pull(ref: string): { status: number | null; stderr: string; calls: string[]; configs: string[] } {
+    const dir = mkdtempSync(join(tmpdir(), 'lab-pull-'));
+    dirs.push(dir);
+    const bin = join(dir, 'bin');
+    mkdirSync(bin);
+    // docker simulado: anota sus argumentos, el DOCKER_CONFIG y lo que recibe por stdin; login
+    // escribe un config.json en ese directorio, como el real.
+    writeFileSync(join(bin, 'docker'), `#!/bin/sh
+printf '%s|%s|%s\\n' "$*" "$DOCKER_CONFIG" "$( [ "$1" = login ] && cat )" >> "${dir}/calls.log"
+[ "$1" = login ] && echo '{"auths":{}}' > "$DOCKER_CONFIG/config.json"
+exit 0
+`);
+    chmodSync(join(bin, 'docker'), 0o755);
+    writeFileSync(join(dir, 'calls.log'), '');
+    const r = spawnSync('bash', [resolve(ROOT, 'lab/remote/pull.sh'), ref, 'dante0x95'], {
+      input: 'token-de-prueba', env: { PATH: `${bin}:/usr/bin:/bin` }, encoding: 'utf8',
+    });
+    const calls = readFileSync(join(dir, 'calls.log'), 'utf8').split('\n').filter(Boolean);
+    return { status: r.status, stderr: r.stderr, calls, configs: calls.map((c) => c.split('|')[1]) };
+  }
+
+  it('login con el token por stdin y un DOCKER_CONFIG temporal, pull por digest, y el directorio se borra', () => {
+    const r = pull(REF);
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.calls.map((c) => c.split('|')[0])).toEqual(['login ghcr.io -u dante0x95 --password-stdin', `pull -q ${REF}`]);
+    expect(r.calls[0].split('|')[2]).toBe('token-de-prueba');
+    expect(r.configs[0]).not.toBe('');
+    expect(r.configs[1]).toBe(r.configs[0]);
+    expect(existsSync(r.configs[0])).toBe(false);
+  });
+
+  it('una imagen por etiqueta, sin digest, se rechaza sin llamar a docker', () => {
+    const r = pull('ghcr.io/dante0x95/cocos-challenge-a:v0.2.0');
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toMatch(/por digest/);
+    expect(r.calls).toEqual([]);
   });
 });

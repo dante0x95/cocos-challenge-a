@@ -15,12 +15,12 @@ Nada de esto toca el entregable: el servidor de staging y producción, su imagen
 | Prefijo | Variante | Qué es |
 |---|---|---|
 | `/v1` | **Z**, la línea base | [`lab/z/server.ts`](z/server.ts): el esquema de `database.sql` tal cual (solo claves primarias y foráneas) y `SUM … GROUP BY` sobre `orders` en cada request, más una consulta de la última cotización por posición. Es la de `src/naive/` del benchmark, con los mismos endpoints de lectura que A (`/portfolio/:userid`, `/orders/:id?userid=`, `/instruments?q=`), el mismo JSON y los mismos `400`. |
-| `/v2` | **A**, el entregable | La imagen del release (`ghcr.io/dante0x95/cocos-challenge-a:v0.2.0`) tal cual, con su bootstrap y la configuración del entregable. |
-| `/v3` | **C**, snapshot + delta | La misma imagen de A sobre una base con [`lab/c/snapshot.sql`](c/snapshot.sql): una caché del balance por usuario, publicada con el fold completo de A (`app.c_state_full`); la lectura parte del snapshot y aplica las órdenes ejecutadas después (`app.c_state`). Se republica cuando el delta llega a `K = 500`. Los snapshots se calientan después de la carga, antes de atender. |
+| `/v2` | **A**, el entregable | La imagen que atienden staging y producción, por digest: la de v0.2.0, `ghcr.io/dante0x95/cocos-challenge-a@sha256:fcde20e4…aab86f`. Tal cual, con su bootstrap y la configuración del entregable. |
+| `/v3` | **C**, snapshot + delta | La imagen del repo anterior (`dante0x95/cocos-challenge`, commit `e54cdcc`, el último que corrió en Fly), que ya implementa la caché: una tabla de snapshot por usuario, la lectura parte del snapshot y aplica las órdenes ejecutadas después, y se republica cada `K = 500`. Tal cual, sin arreglarle nada: una imagen con migrate y API. Su bootstrap calienta los snapshots; corre otra vez después de la carga, antes de atender. |
 
 El lab es de solo lectura: el proxy responde `403` a todo lo que no es `GET` o `HEAD`, en los tres prefijos (crear y cancelar órdenes, `/internal`), antes de llegar a una API. Las tres bases quedan con el mismo dataset para siempre, y la imagen de A no se toca.
 
-**Qué coincide** ([decisión en #72](https://github.com/dante0x95/cocos-challenge-a/issues/72#issuecomment-6571338025)). Para cualquier usuario, `/v2` y `/v3` responden el mismo JSON, y los dos coinciden con el oráculo de los tests (`test/oracle/fold.ts`). `/v1` coincide con ellos en cash, cantidades, reservas, precio, valor y valor total, pero no en `costo_total`, `costo_unitario`, `resultado` ni `rendimiento_pct` cuando hubo ventas: Z calcula el costo como el promedio de todas las compras (Σ importes de compra / Σ acciones compradas × cantidad), que es el error que el fold de A corrige ([D-09](../docs/decisiones.md#d-09)). Tampoco podría hacer otra cosa: `database.sql` no guarda el orden de ejecución (`balance_seq`, [D-18](../docs/decisiones.md#d-18)), y el 12 % de las órdenes ejecutadas del dataset son LIMIT ejecutadas días después de crearse. Es la vara, no una alternativa.
+**Qué coincide** ([decisión en #72](https://github.com/dante0x95/cocos-challenge-a/issues/72#issuecomment-6571338025)). Para cualquier usuario, `/v2` y `/v3` coinciden con el oráculo de los tests (`test/oracle/fold.ts`) y tienen los mismos números (hoy, el mismo JSON: C es el antecesor de A). Donde C responde distinto que A por ser otro repo se anota, sin adaptarlo: un carácter de control en `/instruments` le da `500` (A lo arregló después, D-30). `/v1` coincide con ellos en cash, cantidades, reservas, precio, valor y valor total, pero no en `costo_total`, `costo_unitario`, `resultado` ni `rendimiento_pct` cuando hubo ventas: Z calcula el costo como el promedio de todas las compras (Σ importes de compra / Σ acciones compradas × cantidad), que es el error que el fold de A corrige ([D-09](../docs/decisiones.md#d-09)). Tampoco podría hacer otra cosa: `database.sql` no guarda el orden de ejecución (`balance_seq`, [D-18](../docs/decisiones.md#d-18)), y el 12 % de las órdenes ejecutadas del dataset son LIMIT ejecutadas días después de crearse. Es la vara, no una alternativa.
 
 **Z calcula exacto.** El Z del benchmark usaba `Number`; el del lab suma en `numeric` de Postgres, divide con cociente y resto enteros y devuelve strings exactos, como A ([D-13](../docs/decisiones.md#d-13)), así que sus importes se comparan exactos y la única diferencia con A es la de método. La lentitud no cambia: viene del esquema sin índices. Z redondea los empates hacia afuera (A, half-even): `retorno_diario_pct`, el único campo redondeado que se compara con A, daría distinto solo en un empate exacto, y en los usuarios que compara `check.ts` no hay ninguno.
 
@@ -28,7 +28,7 @@ El lab es de solo lectura: el proxy responde `403` a todo lo que no es `GET` o `
 
 El generador del benchmark, con seed fija: el mismo resultado en cada corrida y en cada máquina ([`lab/data/generate.sh`](data/generate.sh)). 5.000 usuarios con las cohortes del benchmark (80 % alrededor de 50 órdenes ejecutadas, 15 % alrededor de 500, 4 % alrededor de 2.000, 1 % alrededor de 5.000) y 3 ballenas, las más cerca de 150.000 de las 10 que crea el generador: **1002** (161.882), **1003** (128.671) y **1005** (169.693). 1.000 instrumentos con 5 años de cotizaciones diarias. En total, 1.967.228 órdenes (1.794.778 ejecutadas) por base, más los datos de ejemplo de `database.sql`.
 
-Las tres bases se cargan desde los mismos archivos ([`lab/load/load.sh`](load/load.sh)): `manifest.json` lleva el sha256 de cada uno, y cada base guarda el del dataset que cargó (`public.lab_dataset`). Una base ya cargada no se vuelve a cargar, y una con otro dataset no arranca: se borra con `LAB_RESET=1`. En A y C, `app.verify_ledger()` tiene que dar vacío para los usuarios del dataset; en C, después de calentar, snapshot + delta tiene que dar lo mismo que el fold completo para todos los usuarios.
+Las tres bases se cargan desde los mismos archivos ([`lab/load/load.sh`](load/load.sh)): `manifest.json` lleva el sha256 de cada uno, y cada base guarda el del dataset que cargó (`public.lab_dataset`). Una base ya cargada no se vuelve a cargar, y una con otro dataset no arranca: se borra con `LAB_RESET=1`. En A y C, `app.verify_ledger()` tiene que dar vacío para los usuarios del dataset. C se calienta después: su bootstrap otra vez (`warm-c`) publica el snapshot de los 5.004 usuarios con historia (unos 20 s).
 
 Mientras el generador no esté en este repo (#70), se usa el del benchmark: `LAB_GENERATOR` es la ruta a su `bench/gen/generate.ts`.
 
@@ -38,21 +38,21 @@ Todo entra en una instancia de 2 GB ([`lab/compose.yml`](compose.yml)): tres Pos
 
 ## Probarlo en local
 
-Con Docker, sin la instancia ([`lab/e2e.sh`](e2e.sh)): construye la imagen de A con el Dockerfile del tag `v0.2.0` (la de GHCR es privada), genera el dataset si falta, levanta todo en el proyecto `cocos-lab-e2e` (puerto 8072), corre [`lab/check.ts`](check.ts) y lo baja con sus volúmenes. Tarda unos 6 minutos; `KEEP=1` lo deja levantado.
+Con Docker, sin la instancia ([`lab/e2e.sh`](e2e.sh)): usa la imagen de A que se le pase en `LAB_A_IMAGE` o, si no, la construye con el Dockerfile del tag `v0.2.0` (la de GHCR es privada); usa `cocos-lab-c:e54cdcc` o la construye desde `LAB_C_REPO`; genera el dataset si falta, levanta todo en el proyecto `cocos-lab-e2e` (puerto 8072), corre [`lab/check.ts`](check.ts) y lo baja con sus volúmenes. Tarda unos 6 minutos; `KEEP=1` lo deja levantado.
 
 ```bash
-LAB_GENERATOR=~/Documents/cocos/bench/gen/generate.ts lab/e2e.sh
+LAB_GENERATOR=~/Documents/cocos/bench/gen/generate.ts LAB_C_REPO=~/Documents/cocos-challenge lab/e2e.sh
 ```
 
-`check.ts` pide a las tres variantes el portfolio de las 3 ballenas y de 3 usuarios de cada cohorte, seis veces cada uno, y falla si algo de lo de arriba no coincide o si alguna de las seis no responde `200` con el mismo cuerpo que la primera. También: un usuario inexistente da `404` y un id inválido `400` en las tres; `GET /orders/:id` coincide; `/instruments` responde igual en `/v2` y `/v3`, y `/v1` encuentra exactamente lo que da su definición (q como texto en ticker o nombre, sin acentos ni trigramas, que son de A; `%` y `_` también como texto), calculado desde los instrumentos de `database.sql` y del dataset; las entradas inválidas (`q` vacía o de más de 50, un carácter de control, `limit` fuera de rango) dan `400` en las tres; y crear, cancelar, `/internal` y `PUT`/`PATCH`/`DELETE` dan `403` en las tres sin cambiar el portfolio. Después, `e2e.sh` vuelve a levantar el lab sin borrar las bases, como un redeploy: ninguna se recarga, C vuelve a tener su `c_state` sobre el que reinstaló el bootstrap, y `check.ts` vuelve a pasar. Lo que midió en una Mac con Apple Silicon (milisegundos, la mediana de 5 requests seguidas):
+`check.ts` pide a las tres variantes el portfolio de las 3 ballenas y de 3 usuarios de cada cohorte, seis veces cada uno, y falla si algo de lo de arriba no coincide o si alguna de las seis no responde `200` con el mismo cuerpo que la primera. También: un usuario inexistente da `404` y un id inválido `400` en las tres; `GET /orders/:id` coincide; `/instruments` de `/v3` se compara con `/v2` y lo distinto se anota, y `/v1` encuentra exactamente lo que da su definición (q como texto en ticker o nombre, sin acentos ni trigramas, que son de A; `%` y `_` también como texto), calculado desde los instrumentos de `database.sql` y del dataset; las entradas inválidas (`q` vacía o de más de 50, un carácter de control, `limit` fuera de rango) dan `400` en `/v1` y `/v2` (en `/v3`, lo distinto se anota); y crear, cancelar, `/internal` y `PUT`/`PATCH`/`DELETE` dan `403` en las tres sin cambiar el portfolio. Después, `e2e.sh` vuelve a levantar el lab sin borrar las bases, como un redeploy: ninguna se recarga, C sigue con un snapshot por usuario con historia, y `check.ts` vuelve a pasar. Lo que midió en una Mac con Apple Silicon (milisegundos, la mediana de 5 requests seguidas):
 
 | `GET /portfolio/<id>` | Z (`/v1`) | A (`/v2`) | C (`/v3`) |
 |---|---|---|---|
-| ballena 1002 (161.882 ejecutadas) | 4.120 | 686 | 16 |
-| ballena 1003 (128.671) | 4.192 | 530 | 11 |
-| ballena 1005 (169.693) | 4.074 | 701 | 10 |
-| usuario típico (1010, cohorte de 50) | 578 | 4,9 | 4,5 |
-| cohorte de 5.000 (1538) | 554 | 15 | 5,5 |
+| ballena 1002 (161.882 ejecutadas) | 4.120 | 672 | 14 |
+| ballena 1003 (128.671) | 4.083 | 539 | 11 |
+| ballena 1005 (169.693) | 4.015 | 704 | 10 |
+| usuario típico (1010, cohorte de 50) | 578 | 5,3 | 4,5 |
+| cohorte de 5.000 (1538) | 556 | 14 | 4,2 |
 
 Los de la instancia se anotan junto a la tabla del benchmark después del primer deploy.
 
@@ -75,14 +75,14 @@ Desde la raíz del repo, en la Mac, con `pnpm install` hecho. Los bloques no lle
 LIGHTSAIL_LAB_HOST=203.0.113.10
 LIGHTSAIL_LAB_KEY=~/.ssh/cocos-lab.pem
 LAB_GENERATOR=~/Documents/cocos/bench/gen/generate.ts
-export LIGHTSAIL_LAB_HOST LIGHTSAIL_LAB_KEY LAB_GENERATOR
+LAB_C_REPO=~/Documents/cocos-challenge
+export LIGHTSAIL_LAB_HOST LIGHTSAIL_LAB_KEY LAB_GENERATOR LAB_C_REPO
 ```
 
-La imagen de A se baja en la Mac y se copia a la instancia, así la instancia no necesita credenciales de GHCR. Para bajarla, `docker login` con un token que pueda leer paquetes (una vez):
+La imagen de A la baja la instancia de GHCR, que es privado, con el token de `gh` de la Mac: `deploy.sh` lo pasa por stdin a [`lab/remote/pull.sh`](remote/pull.sh), que hace `docker login` con un `DOCKER_CONFIG` temporal y lo borra al terminar, como el deploy del entregable; el token no queda en la instancia. Ese token necesita leer paquetes (una vez):
 
 ```bash
 gh auth refresh -s read:packages
-gh auth token | docker login ghcr.io -u dante0x95 --password-stdin
 ```
 
 Preparar la instancia (una vez; es idempotente): Docker y compose de los paquetes de Ubuntu, 2 GB de swap y `/opt/cocos-lab` con las contraseñas de las bases, generadas ahí y nunca impresas ([`lab/remote/setup.sh`](remote/setup.sh)).
@@ -91,17 +91,17 @@ Preparar la instancia (una vez; es idempotente): Docker y compose de los paquete
 lab/deploy.sh setup
 ```
 
-Desplegar el commit actual ([`lab/deploy.sh`](deploy.sh)): copia el código (solo lo versionado en `HEAD`, con `git archive`), el dataset si la instancia tiene otro y la imagen de A si no la tiene; levanta `lab/compose.yml` como el proyecto `cocos-lab`, espera a que las tres bases estén cargadas y C caliente, y corre `lab/check.ts` contra la URL pública. La primera vez tarda unos minutos: copia unos 120 MB de datos y la imagen, construye la de Z y carga las tres bases.
+Desplegar el commit actual ([`lab/deploy.sh`](deploy.sh)): copia el código (solo lo versionado en `HEAD`, con `git archive`) y el dataset si la instancia tiene otro; si la instancia no las tiene, baja la imagen de A y construye la de C ahí mismo, desde `git archive` del commit de `LAB_C_REPO` (la de Z la construye compose); levanta `lab/compose.yml` como el proyecto `cocos-lab`, espera a que las tres bases estén cargadas y C caliente, y corre `lab/check.ts` contra la URL pública. La primera vez tarda unos minutos: copia unos 120 MB de datos, construye las imágenes de C y Z y carga las tres bases.
 
 ```bash
 lab/deploy.sh
 ```
 
-Otras variables: `LAB_A_VERSION` elige el release de A (por defecto `v0.2.0`), `LAB_SITE=:80` sirve HTTP solo por la IP en vez de HTTPS por sslip.io, y `LAB_RESET=1` borra las tres bases antes de levantar (hace falta si cambió el dataset).
+Otras variables: `LAB_A_IMAGE` cambia la imagen de A (por digest), `LAB_C_COMMIT` el commit de C (por defecto `e54cdcc`; `71fd44e`, su `main`, si ese diera problemas), `LAB_SITE=:80` sirve HTTP solo por la IP en vez de HTTPS por sslip.io, y `LAB_RESET=1` borra las tres bases antes de levantar (hace falta si cambió el dataset).
 
 ## Operación
 
 - **Verificar lo que atiende**, sin desplegar: `lab/deploy.sh check`.
-- **Logs y estado**, en la instancia: `ssh -i "$LIGHTSAIL_LAB_KEY" "ubuntu@${LIGHTSAIL_LAB_HOST}"` y, en `/opt/cocos-lab`, `docker compose -p cocos-lab --project-directory src/lab -f src/lab/compose.yml --env-file secrets.env --env-file deploy.env ps` (o `logs load-c`, `logs api-z`). `deploy.env` dice qué commit, qué imagen de A y qué sitio atiende.
+- **Logs y estado**, en la instancia: `ssh -i "$LIGHTSAIL_LAB_KEY" "ubuntu@${LIGHTSAIL_LAB_HOST}"` y, en `/opt/cocos-lab`, `docker compose -p cocos-lab --project-directory src/lab -f src/lab/compose.yml --env-file secrets.env --env-file deploy.env ps` (o `logs load-c`, `logs api-z`). `deploy.env` dice qué commit, qué imágenes de A y C y qué sitio atiende.
 - **Si no levanta**, `deploy.sh` muestra el estado y los logs de la carga. La carga de cada base es una transacción (con la verificación y la marca del dataset adentro): si se corta o falla no queda nada, y el deploy siguiente la vuelve a intentar.
 - **Apagarlo**: desde la consola, parando la instancia (la IP estática se conserva), o borrándola junto con la IP estática si ya no se usa.

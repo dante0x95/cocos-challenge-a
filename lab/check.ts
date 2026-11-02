@@ -5,7 +5,8 @@
 // Para las 3 ballenas y la muestra de usuarios de manifest.json (lab/check-lib.ts):
 //   - v2 coincide con el oráculo de los tests (test/oracle/fold.ts), plegado acá desde orders.csv
 //     del dataset: cash, reservas, cantidades y costo de cada posición.
-//   - v3 responde exactamente el mismo JSON que v2.
+//   - v3 (la imagen del repo anterior, #72) coincide con el oráculo y con los números de v2. Si su
+//     JSON tiene otra forma (campos de más o de menos), se anota y no falla.
 //   - v1 coincide con v2 en todo lo que no depende del método de costo (cash, cantidades, reservas,
 //     precio, valor y valor total), y su costo, resultado y rendimiento, exactamente, con el
 //     promedio de todas las compras, la definición de Z (lab/z/server.ts; decisión en #72).
@@ -19,7 +20,7 @@ import { createReadStream, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import {
-  ORDERS_HEADER, compareA, compareTimed, compareZ, compareZSearch, expectedA, expectedZ, expectedZSearch, parseInstruments, parseRow, seedInstruments,
+  ORDERS_HEADER, compareA, compareTimed, compareZ, compareZSearch, expectedA, jsonDiff, expectedZ, expectedZSearch, parseInstruments, parseRow, seedInstruments,
   zCostDiffers, type Row,
 } from './check-lib.js';
 
@@ -37,6 +38,14 @@ const VARIANTS = ['v1', 'v2', 'v3'] as const;
 type Variant = (typeof VARIANTS)[number];
 const failures: string[] = [];
 const fail = (...msgs: string[]) => { for (const m of msgs) { failures.push(m); console.log(`  FALLA ${m}`); } };
+const notes = new Set<string>();
+const note = (...msgs: string[]) => { for (const m of msgs) notes.add(m); };
+/** v3 contra v2: los valores tienen que coincidir; la forma, se anota. */
+const sameAsA = (label: string, c: unknown, a: unknown, valuesFail = true) => {
+  const d = jsonDiff(c, a);
+  if (d.shape.length) note(`${label}: v3 tiene otra forma que v2 (${d.shape.slice(0, 5).join(', ')})`);
+  if (d.values.length) (valuesFail ? fail : note)(`${label}: v3 ≠ v2 en ${d.values.slice(0, 3).join('; ')}`);
+};
 
 async function request(path: string, init?: RequestInit): Promise<{ status: number; text: string; body: any; ms: number }> {
   const t0 = performance.now();
@@ -87,7 +96,8 @@ for (const u of users) {
   if (!ok) continue;
   const rows = rowsOf.get(u.id) ?? [];
   fail(...compareA(u.id, bodies.v2, expectedA(rows)));
-  if (JSON.stringify(bodies.v3) !== JSON.stringify(bodies.v2)) fail(`${u.id}: v3 no responde lo mismo que v2`);
+  fail(...compareA(u.id, bodies.v3, expectedA(rows)).map((m) => `v3 ${m}`));
+  sameAsA(`portfolio ${u.id}`, bodies.v3, bodies.v2);
   fail(...compareZ(u.id, bodies.v1, bodies.v2, expectedZ(rows)));
   portfolios.set(u.id, bodies);
   const filled = manifest.whales.find((w) => w.id === u.id)?.filled;
@@ -95,17 +105,18 @@ for (const u of users) {
 }
 
 console.log('\nportfolio, órdenes y búsqueda');
-const missing = await all('/portfolio/999999');
-if (missing.some((r) => r.status !== 404)) fail(`usuario inexistente: ${missing.map((r) => r.status).join(', ')} (se espera 404 en las tres)`);
-const badId = await all('/portfolio/abc');
-if (badId.some((r) => r.status !== 400)) fail(`userid inválido: ${badId.map((r) => r.status).join(', ')} (se espera 400 en las tres)`);
+for (const [path, want] of [['/portfolio/999999', 404], ['/portfolio/abc', 400]] as const) {
+  const rs = await all(path);
+  if (rs.some((r) => r.status !== want)) fail(`GET ${path}: ${rs.map((r) => r.status).join(' / ')} (se espera ${want} en las tres)`);
+}
 
 const whale = manifest.whales[0].id;
 const sold = rowsOf.get(whale)!.find((r) => r.side === 'SELL' && r.status === 'FILLED')!;
 for (const path of [`/orders/${sold.id}?userid=${whale}`, `/orders/${sold.id}?userid=${whale + 1}`, `/orders/abc?userid=${whale}`, `/orders/${sold.id}`]) {
   const [z, a, c] = await all(path);
-  if (z.status !== a.status || c.status !== a.status) fail(`GET ${path}: ${z.status} / ${a.status} / ${c.status}`);
-  if (c.text !== a.text) fail(`GET ${path}: v3 no responde lo mismo que v2`);
+  if (z.status !== a.status) fail(`GET ${path}: v1 ${z.status}, v2 ${a.status}`);
+  if (c.status !== a.status) note(`GET ${path}: v3 responde ${c.status}, v2 ${a.status}`);
+  else if (a.status === 200) sameAsA(`GET ${path}`, c.body, a.body);
   if (a.status === 200) {
     for (const k of ['id', 'userid', 'instrumentid', 'side', 'type', 'size', 'price', 'amount', 'status', 'datetime']) {
       if (z.body?.[k] !== a.body?.[k]) fail(`GET ${path}: v1 ${k} ${z.body?.[k]}, v2 ${a.body?.[k]}`);
@@ -132,8 +143,10 @@ const searches: { q: string; limit: number; cash?: boolean; first?: string }[] =
 for (const s of searches) {
   const path = `/instruments?q=${encodeURIComponent(s.q)}&limit=${s.limit}${s.cash ? '&include_cash=true' : ''}`;
   const [z, a, c] = await all(path);
-  if (z.status !== 200 || a.status !== 200 || c.status !== 200) { fail(`GET ${path}: ${z.status} / ${a.status} / ${c.status}`); continue; }
-  if (c.text !== a.text) fail(`GET ${path}: v3 no responde lo mismo que v2`);
+  if (z.status !== 200 || a.status !== 200) { fail(`GET ${path}: ${z.status} / ${a.status}`); continue; }
+  // La búsqueda de C es la del repo anterior (sin la migración de trigramas de A): se anota.
+  if (c.status !== 200) note(`GET ${path}: v3 responde ${c.status}`);
+  else sameAsA(`GET ${path}`, c.body, a.body, false);
   fail(...compareZSearch(`GET /v1${path}`, z.body?.results, instruments, s.q, !!s.cash, s.limit));
   // A encuentra todo lo que contiene q (y además, por trigramas, lo parecido), salvo que corte en el límite.
   const ga = idsOf(a);
@@ -143,8 +156,9 @@ for (const s of searches) {
   if (s.first && a.body.results[0]?.ticker !== s.first) fail(`GET ${path}: el primero de v2 no es ${s.first}`);
 }
 for (const path of ['/instruments?q=', '/instruments', `/instruments?q=${'x'.repeat(51)}`, '/instruments?q=ab%00c', `/instruments?q=${ticker}&limit=0`, `/instruments?q=${ticker}&limit=51`]) {
-  const rs = await all(path);
-  if (rs.some((r) => r.status !== 400)) fail(`GET ${path}: ${rs.map((r) => r.status).join(' / ')} (se espera 400 en las tres)`);
+  const [z, a, c] = await all(path);
+  if (z.status !== 400 || a.status !== 400) fail(`GET ${path}: ${z.status} / ${a.status} (se espera 400 en v1 y v2)`);
+  if (c.status !== 400) note(`GET ${path}: v3 responde ${c.status}`);
 }
 
 console.log('\nescrituras');
@@ -173,5 +187,6 @@ const after = await all(`/portfolio/${sample}`);
 after.forEach((r, i) => { if (r.text !== before[i].text) fail(`${VARIANTS[i]}: el portfolio de ${sample} cambió después de las escrituras`); });
 console.log(`  ${writes.length} escrituras × 3 variantes`);
 
-console.log(failures.length ? `\n${failures.length} diferencia(s)` : '\nOK: v2 = oráculo, v3 = v2, v1 = v2 salvo el costo, que es el de su definición; escrituras 403 en las tres');
+if (notes.size) console.log(`\nnotas (no fallan):\n${[...notes].map((n) => `  ${n}`).join('\n')}`);
+console.log(failures.length ? `\n${failures.length} diferencia(s)` : '\nOK: v2 y v3 = oráculo, v3 con los números de v2, v1 = v2 salvo el costo, que es el de su definición; escrituras 403 en las tres');
 process.exit(failures.length ? 1 : 0);

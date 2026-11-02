@@ -19,10 +19,8 @@
 #      app.verify_ledger() no puede informar nada de los usuarios del dataset (ids desde 1000; los
 #      de database.sql tienen su corto heredado, D-01): el fold de A coincide con la suma directa
 #      de importes para cada uno.
-#   c  lo mismo que a y además, en cada arranque, lab/c/snapshot.sql (el bootstrap acaba de
-#      reinstalar las funciones de A), el calentamiento de todos los snapshots (C no atiende frío:
-#      docs/decision-snapshot.md) y una reconciliación: snapshot + delta = fold completo para
-#      todos los usuarios.
+#   c  lo mismo que a, sobre la base que dejó el bootstrap de la imagen de C (migrate-c). Los
+#      snapshots los calienta después el bootstrap de C otra vez (warm-c, lab/compose.yml).
 set -euo pipefail
 
 VARIANT="${1:?uso: load.sh z|a|c}"
@@ -102,26 +100,4 @@ if [ -z "$loaded" ]; then
   log "dataset $SHA cargado en $(( $(date +%s) - T0 )) s"
 else
   log "dataset $SHA ya cargado"
-fi
-
-if [ "$VARIANT" = c ]; then
-  log "funciones de C y calentamiento"
-  psql -f /lab/c/snapshot.sql
-  T0=$(date +%s)
-  psql -At <<'SQL'
-SELECT count(*) FILTER (WHERE app.c_publish(u.userid, true)) AS publicados
-  FROM (SELECT DISTINCT o.userid FROM app.orders o WHERE o.status = 'FILLED' ORDER BY 1) u;
-SQL
-  psql -c "ANALYZE app.balance_snapshots" -c "ANALYZE app.snapshot_positions"
-  log "calentamiento en $(( $(date +%s) - T0 )) s"
-  diff="$(psql -At <<'SQL'
-SELECT count(*) FROM app.users u
- WHERE EXISTS (SELECT kind, instrumentid, qty, cost_total, inconsistent, cash_cents, last_seq, filled_count FROM app.c_state(u.id)
-               EXCEPT SELECT kind, instrumentid, qty, cost_total, inconsistent, cash_cents, last_seq, filled_count FROM app.c_state_full(u.id))
-    OR EXISTS (SELECT kind, instrumentid, qty, cost_total, inconsistent, cash_cents, last_seq, filled_count FROM app.c_state_full(u.id)
-               EXCEPT SELECT kind, instrumentid, qty, cost_total, inconsistent, cash_cents, last_seq, filled_count FROM app.c_state(u.id));
-SQL
-)"
-  [ "$diff" = 0 ] || { echo "reconciliación: $diff usuario(s) con snapshot + delta distinto del fold completo" >&2; exit 1; }
-  log "reconciliación: snapshot + delta = fold completo para todos los usuarios"
 fi

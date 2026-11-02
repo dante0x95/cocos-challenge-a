@@ -52,9 +52,11 @@ Una celda es un escenario a una tasa sobre una variante. Para cada una, `run.sh`
 
 1. **Restaura** la base de la variante en un contenedor nuevo (`bench/reset.sh`: `bench.dump` para A y C, `base.dump` para Z) y reaplica las funciones de A o de C con `K = 500`. Tiempo → `-restore.txt`.
 2. **Calienta C** si la variante es `C-caliente` (`bench/warm.sh`, se agrega a `-restore.txt`).
-3. Levanta la API con el modo y el rol de la variante y espera `/health`.
+3. Levanta la API con el modo y el rol de la variante y espera `/health`; si no responde en 60 s, corta.
 4. **Precalienta** `WARMUP` (2 min) con el mismo escenario y tasa, sin medir → `-warmup.json`.
 5. Pone en cero `pg_stat_statements` y **mide** `DURATION` (5 min) → `.json` (el resumen de k6, la fuente de los números) y `-k6.txt` (la salida de k6). Mientras tanto, `docker stats` cada 10 s → `-stats.csv`.
+
+   En los pasos 4 y 5, k6 puede salir con 99: la corrida no cumplió los umbrales, que es el resultado de una celda que colapsa, y la matriz sigue. Cualquier otro código (Docker, el script, el JSON que no se pudo escribir) es un fallo técnico y `run.sh` corta con error. El JSON se borra antes de correr k6 y se exige después, con iteraciones: una celda nunca termina "completa" con el JSON de una corrida anterior.
 6. Guarda las 5 sentencias con más tiempo total → `-pgss.txt`.
 7. Guarda el `EXPLAIN (ANALYZE, BUFFERS)` de la lectura de un usuario mediano (36000) y de una ballena (1004) → `-explain.txt`. En Z, una consulta de posiciones como la de su API, solo para el mediano.
 8. En C, cuántos snapshots hay, cuándo se publicó el último, cuánto ocupan y las filas muertas de `snapshot_positions` → `-snapshots.txt`.
@@ -67,7 +69,7 @@ Los archivos se llaman `<perfil>-<escenario>-<rps>-<variante>.*`, por ejemplo `m
 pnpm exec tsx bench/summarize.ts --compare A,Z,C-frio,C-caliente
 ```
 
-[`bench/check-results.ts`](../../bench/check-results.ts) comprueba que las tablas de [resultados](resultados.md) y de `decision-snapshot.md` coinciden con esos `.json`. No corre en el CI: se corre después de tocar esos docs o `bench/results`.
+[`bench/check-results.ts`](../../bench/check-results.ts) comprueba que las tablas de [resultados](resultados.md) y de `decision-snapshot.md` coinciden con esos `.json` y que no falta ninguna corrida. No corre en el CI: se corre después de tocar esos docs o `bench/results`.
 
 ```bash
 pnpm exec tsx bench/check-results.ts
@@ -75,7 +77,7 @@ pnpm exec tsx bench/check-results.ts
 
 ## Correr una celda de punta a punta
 
-Por ejemplo `whale 2` en A, desde un clon limpio. Necesita Docker, `psql` y `pg_dump` 18 en el host, y `pnpm install`.
+Por ejemplo `whale 2` en A, desde un clon limpio. Necesita Docker, `psql` y `pg_dump` 18 y `jq` en el host, y `pnpm install`.
 
 **1. Los datos** (una vez; [datos](datos.md#regenerar-todo)):
 
@@ -101,9 +103,21 @@ VARIANT=A SCENARIOS=whale RPS_WHALE=2 RESULTS=bench/results-local bench/run.sh
 pnpm exec tsx bench/summarize.ts --dir bench/results-local --variant A
 ```
 
+Si `run.sh` termina sin error, en `bench/results-local` está `medium-whale-2-A.json`, de esta corrida y con iteraciones (paso 5); si no hay ninguna corrida de esa variante en el directorio, `summarize.ts` también sale con error.
+
 Otras celdas cambian `VARIANT` (`Z`, `A`, `C-frio`, `C-caliente`; Z necesita además `bench/gen/load-z.sh medium`), `SCENARIOS` y `RPS_<ESCENARIO>` (`RPS_READ_HEAVY`, `RPS_WHALE`). `DURATION` y `WARMUP` acortan la corrida; `SKIP_DONE=1` saltea las celdas que ya tienen su `.json`.
 
 - **Puertos ocupados**: `BENCH_PG_PORT` y `BENCH_APP_PORT` cambian los del host (5434 y 3000 en `medium`). Los demás se hablan por la red del compose.
 - **`reset.sh` borra el proyecto `cocos-bench`** (`down -v`) antes de cada celda: no correr dos benchmarks a la vez en la misma máquina.
+
+**Controles del harness**, que no corren en el CI:
+
+- [`bench/test/run-guard.sh`](../../bench/test/run-guard.sh) corre `run.sh` de verdad con `docker`, `psql` y `curl` simulados (no necesita Docker) y un k6 simulado que termina bien, con 99, con un error o sin escribir el JSON: los dos primeros tienen que dar una celda completa con el JSON nuevo, y los dos últimos, un error de `run.sh` sin "corrida completa" y sin el JSON viejo que había en el directorio.
+- [`bench/check-results.ts`](../../bench/check-results.ts) se controla a sí mismo con mutaciones de las tablas (ver [resultados](resultados.md)).
+- [`bench/test/verify-negative.sh`](../../bench/test/verify-negative.sh) es el control de `verify.ts` ([datos](datos.md#la-verificación-contra-el-oráculo)).
+
+```bash
+bench/test/run-guard.sh
+```
 
 **Lo que se comprobó en este repo.** Desde un clon limpio, con el dataset chico (`--users 200`, que conserva las 10 ballenas) y una corrida corta (`DURATION=1m WARMUP=30s`, `BENCH_PG_PORT=55434 BENCH_APP_PORT=53000`), los pasos de arriba dieron para `whale 2` en A un p99 de 1.046 ms en `GET` y 75 ms en `POST`, sin fallos ni descartadas, y `read_portfolio` con 662 ms de media en `pg_stat_statements` (el benchmark: 795 / 91 ms y 544 ms). Con el dataset completo, una celda de A tarda unos 9 minutos.

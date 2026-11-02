@@ -38,6 +38,8 @@ function load(): Row[] {
 
 const ms = (v: any, k: string) => (v && v[k] != null ? Math.round(v[k]).toString() : '-');
 const rows = load();
+// Cero corridas es un error, no un resumen vacío: la variante o el --dir no son los que se creía.
+if (rows.length === 0) { console.error(`ninguna corrida de ${variants.join(', ')} en ${DIR}`); process.exit(1); }
 const lines: string[] = [];
 lines.push(`# Resumen del benchmark — ${variants.join(' vs ')}`, '');
 lines.push(`Generado ${new Date().toISOString().slice(0, 16)} desde ${rows.length} corrida(s) en \`${DIR}\`. Latencias en ms. SLA de referencia: p99 < 500 ms, fallos < 0,1 %, 0 descartadas.`, '');

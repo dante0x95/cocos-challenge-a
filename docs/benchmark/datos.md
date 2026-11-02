@@ -83,11 +83,17 @@ Con el dataset completo, `bench.dump` pesa 402 MB y la base restaurada ocupa 4.3
 
 ## La verificación contra el oráculo
 
-[`bench/gen/verify.ts`](../../bench/gen/verify.ts) toma una muestra (las 10 ballenas y hasta 20 usuarios de cada cohorte, `--sample 100`), vuelve a simular su historia desde la base con el oráculo (las `FILLED` en orden de `balance_seq`, después las `NEW`) y compara el resultado con `app.read_portfolio`: cash, reservado, cantidad, costo y marca de cada posición, y acciones reservadas. Sale con 1 si algún usuario difiere. Prueba dos cosas a la vez: que la historia cargada es válida y que el fold de A coincide con el oráculo.
+[`bench/gen/verify.ts`](../../bench/gen/verify.ts) toma una muestra (las 10 ballenas y hasta 20 usuarios de cada cohorte, `--sample 100`), vuelve a simular su historia desde la base con el oráculo (las `FILLED` en orden de `balance_seq`, después las `NEW`) y compara el resultado con `app.read_portfolio` en los dos sentidos: cash y reservado; cantidad, costo, marca y acciones reservadas de cada posición que devuelve la base, y que cada posición del oráculo esté en la base. Sale con 1 si algún usuario difiere o si la muestra está vacía. Prueba dos cosas a la vez: que la historia cargada es válida y que el fold de A coincide con el oráculo.
 
 ```bash
 DUMP=bench.dump bench/reset.sh medium
 DATABASE_ADMIN_URL=postgresql://postgres:postgres@localhost:5434/trading pnpm exec tsx bench/gen/verify.ts --sample 100
+```
+
+[`bench/test/verify-negative.sh`](../../bench/test/verify-negative.sh) es su control negativo contra un Postgres real (fuera del CI): arma la base del challenge con las funciones de A, le da una historia al usuario 2 por `app.place_order`, comprueba que `verify.ts` da 0 diferencias y después sabotea `read_portfolio` para que pierda las posiciones y deje el cash: `verify.ts` tiene que salir con 1 y nombrar las que faltan. Con la versión anterior de `verify.ts`, que solo miraba las posiciones devueltas, ese sabotaje pasaba.
+
+```bash
+bench/test/verify-negative.sh
 ```
 
 La salida de esta verificación sobre el dataset completo no quedó guardada en `bench/results`. Sobre el dataset de 200 usuarios (las 10 ballenas incluidas), en este repo, verificó 74 usuarios (la muestra sin repetidos) con 0 diferencias.

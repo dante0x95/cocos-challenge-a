@@ -47,6 +47,12 @@ async function check(userid: number): Promise<string[]> {
     }
     if (BigInt(x.reserved) !== O.reservedShares(s, x.instrumentid!)) errs.push(`reservadas ${x.instrumentid}`);
   }
+  // Y al revés: cada posición del oráculo (qty <> 0 o con historia en corto, lo que emite fold_user)
+  // tiene su fila. Sin esto, un read_portfolio que perdiera posiciones pasaría con el cash correcto.
+  const returned = new Set(p.rows.filter((x) => x.kind === 1).map((x) => x.instrumentid));
+  for (const [instrumentid, op] of s.positions) {
+    if ((op.qty !== 0n || op.short) && !returned.has(instrumentid)) errs.push(`pos ${instrumentid}: falta en la DB, oráculo ${op.qty}/${op.cost}/${op.short}`);
+  }
   return errs;
 }
 
@@ -56,6 +62,7 @@ for (const k of ['median', 'p90', 'p99', 'p999', 'withNew']) {
   const xs: number[] = cohorts[k];
   for (let i = 0; i < Math.min(xs.length, Math.ceil(SAMPLE / 5)); i++) sample.push(xs[Math.floor((i * 7919) % xs.length)]);
 }
+if (sample.length === 0) { console.error(`${OUT}/cohorts.json no tiene usuarios para verificar`); process.exit(1); }
 let bad = 0;
 console.time('verify');
 for (const u of new Set(sample)) {

@@ -46,6 +46,18 @@ rps_for() {  # escalera por escenario, con defaults distintos por variante
 }
 port_for() { case "$1" in small) echo 5433;; medium) echo 5434;; large) echo 5435;; neon) echo 5436;; esac; }
 
+# k6 sale con 99 cuando la corrida no cumple los umbrales (las celdas que colapsan): eso es un
+# resultado. Cualquier otro código es un fallo técnico (Docker, el script, el JSON que no se pudo
+# escribir) y corta la matriz. El JSON se borra antes de correr y se exige después, con iteraciones:
+# nunca queda uno de una corrida anterior.
+#   k6_ok <código de salida> <json> <qué corrida>
+k6_ok() {
+  if [ "$1" != 0 ] && [ "$1" != 99 ]; then echo "ERROR: k6 ($3) salió con $1" >&2; return 1; fi
+  if ! jq -e '(.metrics.iterations.values.count // 0) > 0' "$2" >/dev/null 2>&1; then
+    echo "ERROR: k6 ($3) no dejó $2 con iteraciones" >&2; return 1
+  fi
+}
+
 for PROFILE in $PROFILES; do
   PORT=${BENCH_PG_PORT:-$(port_for "$PROFILE")}; PG="postgresql://postgres:postgres@localhost:$PORT/trading"
   export PROFILE
@@ -63,10 +75,14 @@ for PROFILE in $PROFILES; do
 
       ( cd bench/docker && docker compose --profile bench up -d --build app )
       for _ in $(seq 1 60); do curl -sf "localhost:${BENCH_APP_PORT:-3000}/health" >/dev/null && break; sleep 1; done
+      curl -sf "localhost:${BENCH_APP_PORT:-3000}/health" >/dev/null || { echo "ERROR: la API no respondió /health" >&2; exit 1; }
 
       echo "-- calentamiento $WARMUP"
-      ( cd bench/docker && docker compose --profile bench run --rm k6 run -e RPS="$RPS" -e DURATION="$WARMUP" \
-          -e PROFILE="$PROFILE" -e VARIANT="$VARIANT-warmup" "/k6/$SCENARIO.js" ) > /dev/null 2>&1 || true
+      rm -f "$RESULTS/$NAME-warmup.json"
+      ( cd bench/docker; s=0; docker compose --profile bench run --rm k6 run -e RPS="$RPS" -e DURATION="$WARMUP" \
+          -e PROFILE="$PROFILE" -e VARIANT="$VARIANT-warmup" "/k6/$SCENARIO.js" > /dev/null 2>&1 || s=$?
+        echo "$s" > "$BENCH_RESULTS/.k6-status" )
+      k6_ok "$(cat "$BENCH_RESULTS/.k6-status")" "$RESULTS/$NAME-warmup.json" "calentamiento de $NAME"
       psql "$PG" -q -c "SELECT pg_stat_statements_reset()" >/dev/null
 
       echo "-- medida $DURATION"
@@ -76,9 +92,13 @@ for PROFILE in $PROFILES; do
             | sed "s/^/$(date +%s),/" >> "$RESULTS/$NAME-stats.csv"
           sleep "$STATS_EVERY"
         done ) & STATS_PID=$!
-      ( cd bench/docker && docker compose --profile bench run --rm k6 run -e RPS="$RPS" -e DURATION="$DURATION" \
-          -e PROFILE="$PROFILE" -e VARIANT="$VARIANT" "/k6/$SCENARIO.js" ) 2>&1 | tee "$RESULTS/$NAME-k6.txt" | grep -E "^(==|http_|dropped|iterations)" || true
+      rm -f "$RESULTS/$NAME.json" "$BENCH_RESULTS/.k6-status"
+      ( cd bench/docker; s=0; docker compose --profile bench run --rm k6 run -e RPS="$RPS" -e DURATION="$DURATION" \
+          -e PROFILE="$PROFILE" -e VARIANT="$VARIANT" "/k6/$SCENARIO.js" || s=$?
+        echo "$s" > "$BENCH_RESULTS/.k6-status" ) 2>&1 | tee "$RESULTS/$NAME-k6.txt" | grep -E "^(==|http_|dropped|iterations)" || true
       kill "$STATS_PID" 2>/dev/null || true; wait "$STATS_PID" 2>/dev/null || true
+      k6_ok "$(cat "$BENCH_RESULTS/.k6-status" 2>/dev/null || echo 'sin código')" "$RESULTS/$NAME.json" "medida de $NAME"
+      rm -f "$BENCH_RESULTS/.k6-status"
 
       psql "$PG" -At -c "SELECT round(total_exec_time::numeric)::text || ' ms total | ' || calls || ' calls | ' || round(mean_exec_time::numeric, 2)::text || ' ms mean | ' || left(regexp_replace(query, '\s+', ' ', 'g'), 110)
                           FROM pg_stat_statements WHERE query NOT ILIKE '%pg_stat_statements%' ORDER BY total_exec_time DESC LIMIT 5" > "$RESULTS/$NAME-pgss.txt" 2>&1 || true

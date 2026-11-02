@@ -50,7 +50,7 @@ La tabla de [§4](../decision-snapshot.md#4-resultados) muestra, por celda, el p
 - **"read-heavy 1–5"** de Z son las tres corridas a 1, 2 y 5 RPS, las tres colapsadas.
 - **"—"**: no hay corrida.
 
-`bench/check-results.ts` aplica estas mismas reglas: una celda que no coincide con su JSON, una "—" con corrida o una corrida que falta en la tabla de arriba lo hacen fallar.
+`bench/check-results.ts` aplica estas mismas reglas. Lo hacen fallar una celda que no coincide con su JSON, una "—" con corrida, una fila sin sus cuatro variantes, una corrida que no aparece en ninguna celda (salvo el humo de A a 50 RPS, que no está en la matriz) o que falta en la tabla de arriba, y una corrida de C caliente sin su fila de calentamiento. Antes de dar el resultado, aplica en memoria mutaciones de las tablas (un número cambiado, una fila, una celda o una tabla borrada) y falla si alguna no la detecta.
 
 ## Por qué A colapsa en `whale`
 

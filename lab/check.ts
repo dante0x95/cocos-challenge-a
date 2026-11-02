@@ -2,21 +2,23 @@
 //
 //   tsx lab/check.ts <url base> [dir del dataset]        (dir: lab/.data)
 //
-// Para las 3 ballenas y la muestra de usuarios de manifest.json:
+// Para las 3 ballenas y la muestra de usuarios de manifest.json (lab/check-lib.ts):
 //   - v2 coincide con el oráculo de los tests (test/oracle/fold.ts), plegado acá desde orders.csv
 //     del dataset: cash, reservas, cantidades y costo de cada posición.
 //   - v3 responde exactamente el mismo JSON que v2.
-//   - v1 coincide con v2 en todo lo que no depende del método de costo: cash, cantidades,
-//     reservas, precio, valor y valor total. Costo, resultado y rendimiento de Z son el promedio
-//     de todas las compras (lab/z/server.ts): se informan cuántas posiciones difieren, no fallan.
-// Además: un usuario inexistente da 404 en las tres, GET /orders/:id y /instruments coinciden, y un
-// POST responde 403 en v1 y v3 y llega a la API en v2 (sin Idempotency-Key: 400, no crea nada).
-// Tiempos: la primera request (fría) y la mediana de 5 más, por variante. Sale con 1 si algo no
-// coincide.
+//   - v1 coincide con v2 en todo lo que no depende del método de costo (cash, cantidades, reservas,
+//     precio, valor y valor total), y su costo, resultado y rendimiento con el promedio de todas las
+//     compras, la definición de Z (lab/z/server.ts), calculado acá con enteros.
+//   - Tiempos: la primera request (fría) y la mediana de 5 más, por variante. Cada una tiene que
+//     responder 200 y el mismo cuerpo que la primera: un tiempo de una respuesta fallida no cuenta.
+// Además, en las tres: un usuario inexistente da 404; GET /orders/:id coincide; GET /instruments
+// coincide entre v2 y v3 y v1 responde lo mismo que su definición (substring sin acentos ni
+// trigramas, los comodines como texto); las entradas inválidas dan 400; y toda escritura (crear y
+// cancelar órdenes, /internal, otros métodos) da 403 sin cambiar nada. Sale con 1 si algo no coincide.
 import { createReadStream, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
-import * as O from '../test/oracle/fold.js';
+import { ORDERS_HEADER, compareA, compareTimed, compareZ, expectedA, expectedZ, parseRow, zCostDiffers, type Row } from './check-lib.js';
 
 const [base, dir = 'lab/.data'] = process.argv.slice(2);
 if (!base) throw new Error('uso: check.ts <url base> [dir del dataset]');
@@ -31,160 +33,139 @@ const users = [
 const VARIANTS = ['v1', 'v2', 'v3'] as const;
 type Variant = (typeof VARIANTS)[number];
 const failures: string[] = [];
-const fail = (msg: string) => { failures.push(msg); console.log(`  FALLA ${msg}`); };
+const fail = (...msgs: string[]) => { for (const m of msgs) { failures.push(m); console.log(`  FALLA ${m}`); } };
 
-async function get(path: string): Promise<{ status: number; body: any; ms: number }> {
+async function request(path: string, init?: RequestInit): Promise<{ status: number; text: string; body: any; ms: number }> {
   const t0 = performance.now();
-  const r = await fetch(`${base}${path}`);
+  const r = await fetch(`${base}${path}`, init);
   const text = await r.text();
-  return { status: r.status, body: text ? JSON.parse(text) : null, ms: performance.now() - t0 };
+  let body: any = null;
+  try { body = text ? JSON.parse(text) : null; } catch { body = text; }
+  return { status: r.status, text, body, ms: performance.now() - t0 };
 }
+const all = (path: string) => Promise.all(VARIANTS.map((v) => request(`/${v}${path}`)));
 
-// ---------- oráculo, desde orders.csv ----------
-const cents = (price: string) => {
-  const [i, f = ''] = price.split('.');
-  return BigInt(i + f.padEnd(2, '0'));
-};
-const fmt = (v: bigint, scale: number) => {
-  const neg = v < 0n;
-  const s = (neg ? -v : v).toString().padStart(scale + 1, '0');
-  return `${neg ? '-' : ''}${s.slice(0, s.length - scale)}.${s.slice(s.length - scale)}`;
-};
-interface Expected { cash: string; reserved: string; positions: Map<number, { qty: string; cost: string; reserved: string }> }
-
-async function oracle(ids: Set<number>): Promise<Map<number, Expected>> {
-  // orders.csv: id,instrumentid,userid,size,price,type,side,status,datetime,balance_seq
-  const filled = new Map<number, { seq: bigint; side: string; instrumentid: number; size: bigint; price: bigint }[]>();
-  const reservedCash = new Map<number, bigint>();
-  const reservedShares = new Map<string, bigint>();
+// ---------- las órdenes de los usuarios a comparar, desde orders.csv ----------
+const ids = new Set(users.map((u) => u.id));
+const rowsOf = new Map<number, Row[]>();
+{
   let header = true;
   for await (const l of createInterface({ input: createReadStream(join(dir, 'orders.csv')), crlfDelay: Infinity })) {
-    if (header) { header = false; continue; }
-    const f = l.split(',');
-    const userid = Number(f[2]);
-    if (!ids.has(userid)) continue;
-    const [instrumentid, size, price, side, status] = [Number(f[1]), BigInt(f[3]), cents(f[4]), f[6], f[7]];
-    if (status === 'FILLED') {
-      if (!filled.has(userid)) filled.set(userid, []);
-      filled.get(userid)!.push({ seq: BigInt(f[9]), side, instrumentid, size, price });
-    } else if (status === 'NEW' && side === 'BUY') {
-      reservedCash.set(userid, (reservedCash.get(userid) ?? 0n) + size * price);
-    } else if (status === 'NEW' && side === 'SELL') {
-      const k = `${userid}:${instrumentid}`;
-      reservedShares.set(k, (reservedShares.get(k) ?? 0n) + size);
+    if (header) {
+      if (l !== ORDERS_HEADER) throw new Error(`orders.csv con otra cabecera: ${l}`);
+      header = false;
+      continue;
     }
+    const r = parseRow(l);
+    if (!ids.has(r.userid)) continue;
+    if (!rowsOf.has(r.userid)) rowsOf.set(r.userid, []);
+    rowsOf.get(r.userid)!.push(r);
   }
-  const out = new Map<number, Expected>();
-  for (const userid of ids) {
-    const s = O.newState();
-    for (const o of (filled.get(userid) ?? []).sort((a, b) => (a.seq < b.seq ? -1 : 1))) {
-      if (o.side === 'CASH_IN') s.cashCents += o.size * o.price;
-      else if (o.side === 'CASH_OUT') s.cashCents -= o.size * o.price;
-      else O.fill(s, o.side as 'BUY' | 'SELL', o.instrumentid, o.size, o.price);
-    }
-    const positions = new Map<number, { qty: string; cost: string; reserved: string }>();
-    for (const [i, p] of s.positions) {
-      if (p.qty !== 0n) positions.set(i, { qty: p.qty.toString(), cost: fmt(p.cost, 6), reserved: (reservedShares.get(`${userid}:${i}`) ?? 0n).toString() });
-    }
-    out.set(userid, { cash: fmt(s.cashCents, 2), reserved: fmt(reservedCash.get(userid) ?? 0n, 2), positions });
-  }
-  return out;
-}
-
-// ---------- comparaciones ----------
-const SAME_IN_Z = ['qty', 'acciones_reservadas', 'acciones_disponibles', 'price', 'price_date', 'valor', 'retorno_diario_pct'] as const;
-const COST_FIELDS = ['costo_total', 'costo_unitario', 'resultado', 'rendimiento_pct'] as const;
-
-function compareOracle(id: number, p: any, e: Expected) {
-  if (p.cash.neto !== e.cash) fail(`${id}: v2 cash.neto ${p.cash.neto}, oráculo ${e.cash}`);
-  if (p.cash.reservado !== e.reserved) fail(`${id}: v2 cash.reservado ${p.cash.reservado}, oráculo ${e.reserved}`);
-  if (p.positions.length !== e.positions.size) fail(`${id}: v2 tiene ${p.positions.length} posiciones, el oráculo ${e.positions.size}`);
-  for (const pos of p.positions) {
-    const x = e.positions.get(pos.instrumentid);
-    if (!x) { fail(`${id}: v2 tiene el instrumento ${pos.instrumentid}, el oráculo no`); continue; }
-    if (pos.qty !== x.qty || pos.costo_total !== x.cost || pos.acciones_reservadas !== x.reserved) {
-      fail(`${id}/${pos.instrumentid}: v2 qty ${pos.qty} costo ${pos.costo_total} reservadas ${pos.acciones_reservadas}, oráculo ${x.qty} ${x.cost} ${x.reserved}`);
-    }
-  }
-}
-
-/** Posiciones de Z con costo distinto del de A (informativo). */
-function compareZ(id: number, z: any, a: any): number {
-  for (const k of ['valor_total', 'valuation_complete', 'has_inconsistent_history'] as const) {
-    if (z[k] !== a[k]) fail(`${id}: v1 ${k} ${z[k]}, v2 ${a[k]}`);
-  }
-  for (const k of ['neto', 'reservado', 'disponible'] as const) {
-    if (z.cash[k] !== a.cash[k]) fail(`${id}: v1 cash.${k} ${z.cash[k]}, v2 ${a.cash[k]}`);
-  }
-  if (z.positions.length !== a.positions.length) { fail(`${id}: v1 tiene ${z.positions.length} posiciones, v2 ${a.positions.length}`); return 0; }
-  let costDiff = 0;
-  z.positions.forEach((zp: any, i: number) => {
-    const ap = a.positions[i];
-    if (zp.instrumentid !== ap.instrumentid) { fail(`${id}: posición ${i}: v1 instrumento ${zp.instrumentid}, v2 ${ap.instrumentid}`); return; }
-    for (const k of SAME_IN_Z) if (zp[k] !== ap[k]) fail(`${id}/${zp.instrumentid}: v1 ${k} ${zp[k]}, v2 ${ap[k]}`);
-    if (COST_FIELDS.some((k) => zp[k] !== ap[k])) costDiff++;
-  });
-  return costDiff;
 }
 
 const median = (xs: number[]) => [...xs].sort((a, b) => a - b)[Math.floor(xs.length / 2)];
 const ms = (x: number) => (x < 10 ? x.toFixed(1) : Math.round(x).toString()).padStart(6);
 
-console.log(`oráculo: plegando ${users.length} usuarios desde ${join(dir, 'orders.csv')}`);
-const expected = await oracle(new Set(users.map((u) => u.id)));
-
-console.log('\nGET /vN/portfolio/<id>: primera request y mediana de 5 (ms)');
-console.log(`${'usuario'.padEnd(8)} ${'cohorte'.padEnd(8)} ${'ejec.'.padStart(7)} ${VARIANTS.map((v) => `${v} 1ª`.padStart(7) + `${v} med`.padStart(8)).join(' ')}  costo Z distinto`);
+console.log(`GET /vN/portfolio/<id>: primera request y mediana de 5 más (ms); ${users.length} usuarios`);
+console.log(`${'usuario'.padEnd(8)} ${'cohorte'.padEnd(8)} ${'ejec.'.padStart(7)} ${VARIANTS.map((v) => `${v} 1ª`.padStart(7) + `${v} med`.padStart(8)).join(' ')}  costo de Z ≠ A`);
+const portfolios = new Map<number, Record<Variant, any>>();
 for (const u of users) {
   const bodies = {} as Record<Variant, any>;
   const times = {} as Record<Variant, { first: number; median: number }>;
+  let ok = true;
   for (const v of VARIANTS) {
-    const first = await get(`/${v}/portfolio/${u.id}`);
-    if (first.status !== 200) { fail(`${u.id}: ${v} respondió ${first.status}`); continue; }
-    const rest: number[] = [];
-    for (let i = 0; i < 5; i++) rest.push((await get(`/${v}/portfolio/${u.id}`)).ms);
-    bodies[v] = first.body;
-    times[v] = { first: first.ms, median: median(rest) };
+    const runs = [];
+    for (let i = 0; i < 6; i++) runs.push(await request(`/${v}/portfolio/${u.id}`));
+    const bad = compareTimed(`${u.id} ${v}`, runs);
+    if (bad.length) { fail(...bad); ok = false; continue; }
+    bodies[v] = runs[0].body;
+    times[v] = { first: runs[0].ms, median: median(runs.slice(1).map((r) => r.ms)) };
   }
-  if (!bodies.v1 || !bodies.v2 || !bodies.v3) continue;
-  compareOracle(u.id, bodies.v2, expected.get(u.id)!);
+  if (!ok) continue;
+  const rows = rowsOf.get(u.id) ?? [];
+  fail(...compareA(u.id, bodies.v2, expectedA(rows)));
   if (JSON.stringify(bodies.v3) !== JSON.stringify(bodies.v2)) fail(`${u.id}: v3 no responde lo mismo que v2`);
-  const costDiff = compareZ(u.id, bodies.v1, bodies.v2);
+  fail(...compareZ(u.id, bodies.v1, bodies.v2, expectedZ(rows)));
+  portfolios.set(u.id, bodies);
   const filled = manifest.whales.find((w) => w.id === u.id)?.filled;
-  console.log(`${String(u.id).padEnd(8)} ${u.cohort.padEnd(8)} ${(filled ? String(filled) : '').padStart(7)} ${VARIANTS.map((v) => `${ms(times[v].first)} ${ms(times[v].median)}  `).join(' ')}  ${costDiff}/${bodies.v2.positions.length}`);
+  console.log(`${String(u.id).padEnd(8)} ${u.cohort.padEnd(8)} ${(filled ? String(filled) : '').padStart(7)} ${VARIANTS.map((v) => `${ms(times[v].first)} ${ms(times[v].median)}  `).join(' ')}  ${zCostDiffers(bodies.v1, bodies.v2)}/${bodies.v2.positions.length}`);
 }
 
-console.log('\notros endpoints');
-const missing = await Promise.all(VARIANTS.map((v) => get(`/${v}/portfolio/999999`)));
+console.log('\nportfolio, órdenes y búsqueda');
+const missing = await all('/portfolio/999999');
 if (missing.some((r) => r.status !== 404)) fail(`usuario inexistente: ${missing.map((r) => r.status).join(', ')} (se espera 404 en las tres)`);
+const badId = await all('/portfolio/abc');
+if (badId.some((r) => r.status !== 400)) fail(`userid inválido: ${badId.map((r) => r.status).join(', ')} (se espera 400 en las tres)`);
 
 const whale = manifest.whales[0].id;
-const anOrder = await firstOrderOf(whale);
-async function firstOrderOf(userid: number): Promise<string | null> {
-  let header = true;
-  for await (const l of createInterface({ input: createReadStream(join(dir, 'orders.csv')), crlfDelay: Infinity })) {
-    if (header) { header = false; continue; }
-    const f = l.split(',');
-    if (Number(f[2]) === userid && f[6] === 'SELL' && f[7] === 'FILLED') return f[0];
-  }
-  return null;
-}
-if (anOrder) {
-  const [z, a, c] = await Promise.all(VARIANTS.map((v) => get(`/${v}/orders/${anOrder}?userid=${whale}`)));
-  if (JSON.stringify(c.body) !== JSON.stringify(a.body)) fail(`GET /orders/${anOrder}: v3 no responde lo mismo que v2`);
-  for (const k of ['id', 'userid', 'instrumentid', 'side', 'type', 'size', 'price', 'amount', 'status', 'datetime']) {
-    if (z.body?.[k] !== a.body?.[k]) fail(`GET /orders/${anOrder}: v1 ${k} ${z.body?.[k]}, v2 ${a.body?.[k]}`);
+const sold = rowsOf.get(whale)!.find((r) => r.side === 'SELL' && r.status === 'FILLED')!;
+for (const path of [`/orders/${sold.id}?userid=${whale}`, `/orders/${sold.id}?userid=${whale + 1}`, `/orders/abc?userid=${whale}`, `/orders/${sold.id}`]) {
+  const [z, a, c] = await all(path);
+  if (z.status !== a.status || c.status !== a.status) fail(`GET ${path}: ${z.status} / ${a.status} / ${c.status}`);
+  if (c.text !== a.text) fail(`GET ${path}: v3 no responde lo mismo que v2`);
+  if (a.status === 200) {
+    for (const k of ['id', 'userid', 'instrumentid', 'side', 'type', 'size', 'price', 'amount', 'status', 'datetime']) {
+      if (z.body?.[k] !== a.body?.[k]) fail(`GET ${path}: v1 ${k} ${z.body?.[k]}, v2 ${a.body?.[k]}`);
+    }
   }
 }
-const ticker = (await get(`/v2/portfolio/${whale}`)).body.positions[0].ticker as string;
-const search = await Promise.all(VARIANTS.map((v) => get(`/${v}/instruments?q=${ticker}`)));
-if (search.some((r) => r.body?.results?.[0]?.ticker !== ticker)) fail(`GET /instruments?q=${ticker}: el primero no es ${ticker} en alguna variante`);
 
-const posts = await Promise.all(VARIANTS.map((v) => fetch(`${base}/${v}/orders`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })));
-const codes = posts.map((r) => r.status);
-if (codes[0] !== 403 || codes[2] !== 403) fail(`POST /orders: v1 ${codes[0]}, v3 ${codes[2]} (se espera 403)`);
-if (codes[1] !== 400) fail(`POST /v2/orders sin Idempotency-Key: ${codes[1]} (se espera el 400 de A)`);
-console.log(`  404 del usuario inexistente, GET /orders/${anOrder}, GET /instruments?q=${ticker}; POST /orders: ${codes.join(' / ')}`);
+const ticker = portfolios.get(whale)?.v2.positions[0].ticker as string;
+const tickers = (r: { body: any }) => (r.body?.results ?? []).map((x: any) => x.ticker as string);
+const searches: { q: string; params?: string; z: 'equal' | 'subset' | 'first' | 'contains-ars' }[] = [
+  { q: ticker, z: 'first' },                                  // ticker exacto: primero en las tres
+  { q: ticker.slice(0, 3), params: '&limit=50', z: 'subset' }, // parcial: lo de Z también lo encuentra A
+  { q: ticker.slice(1).toLowerCase(), params: '&limit=50', z: 'subset' },
+  { q: '%', z: 'equal' },                                     // comodines como texto: nada los contiene
+  { q: '_', z: 'equal' },
+  { q: 'ARS', params: '&include_cash=true&limit=50', z: 'contains-ars' },
+];
+for (const s of searches) {
+  const path = `/instruments?q=${encodeURIComponent(s.q)}${s.params ?? ''}`;
+  const [z, a, c] = await all(path);
+  if (z.status !== 200 || a.status !== 200 || c.status !== 200) { fail(`GET ${path}: ${z.status} / ${a.status} / ${c.status}`); continue; }
+  if (c.text !== a.text) fail(`GET ${path}: v3 no responde lo mismo que v2`);
+  const [tz, ta] = [tickers(z), tickers(a)];
+  const needle = s.q.toLowerCase();
+  if (tz.some((t: string) => !t.toLowerCase().includes(needle) && !(z.body.results.find((x: any) => x.ticker === t).name as string).toLowerCase().includes(needle))) {
+    fail(`GET ${path}: v1 devuelve algo que no contiene "${s.q}": ${tz.join(', ')}`);
+  }
+  const ok = s.z === 'equal' ? z.text === a.text
+    : s.z === 'first' ? tz[0] === s.q && ta[0] === s.q
+    : s.z === 'subset' ? tz.length > 0 && tz.every((t: string) => ta.includes(t))
+    : tz.includes('ARS') && ta[0] === 'ARS';
+  if (!ok) fail(`GET ${path}: v1 ${tz.join(', ') || '—'} / v2 ${ta.join(', ') || '—'} (${s.z})`);
+}
+for (const path of ['/instruments?q=', '/instruments', `/instruments?q=${'x'.repeat(51)}`, '/instruments?q=ab%00c', `/instruments?q=${ticker}&limit=0`, `/instruments?q=${ticker}&limit=51`]) {
+  const rs = await all(path);
+  if (rs.some((r) => r.status !== 400)) fail(`GET ${path}: ${rs.map((r) => r.status).join(' / ')} (se espera 400 en las tres)`);
+}
 
-console.log(failures.length ? `\n${failures.length} diferencia(s)` : '\nOK: v2 = oráculo, v3 = v2, v1 = v2 salvo el costo; POST 403 en v1 y v3');
+console.log('\nescrituras');
+const sample = users[users.length - 1].id;
+const before = await all(`/portfolio/${sample}`);
+const order = JSON.stringify({ userid: sample, side: 'CASH_IN', type: 'MARKET', amount: '100.00' });
+const writes: { method: string; path: string; body?: string }[] = [
+  { method: 'POST', path: '/orders', body: order },
+  { method: 'POST', path: `/orders/${sold.id}/cancel`, body: JSON.stringify({ userid: whale }) },
+  { method: 'POST', path: '/internal/execute-limits' },
+  { method: 'POST', path: '/internal/cleanup-idempotency' },
+  { method: 'PUT', path: '/orders', body: order },
+  { method: 'PATCH', path: `/orders/${sold.id}`, body: order },
+  { method: 'DELETE', path: `/orders/${sold.id}` },
+];
+for (const w of writes) {
+  for (const v of VARIANTS) {
+    const r = await request(`/${v}${w.path}`, {
+      method: w.method, body: w.body,
+      headers: { 'Content-Type': 'application/json', 'Idempotency-Key': `lab-check-${Date.now()}`, 'X-Internal-Token': 'x' },
+    });
+    if (r.status !== 403) fail(`${w.method} /${v}${w.path}: ${r.status} (se espera 403)`);
+  }
+}
+const after = await all(`/portfolio/${sample}`);
+after.forEach((r, i) => { if (r.text !== before[i].text) fail(`${VARIANTS[i]}: el portfolio de ${sample} cambió después de las escrituras`); });
+console.log(`  ${writes.length} escrituras × 3 variantes`);
+
+console.log(failures.length ? `\n${failures.length} diferencia(s)` : '\nOK: v2 = oráculo, v3 = v2, v1 = v2 salvo el costo, que es el de su definición; escrituras 403 en las tres');
 process.exit(failures.length ? 1 : 0);

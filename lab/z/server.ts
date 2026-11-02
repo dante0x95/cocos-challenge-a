@@ -121,17 +121,22 @@ export function createZApp() {
     });
   }));
 
-  // GET /instruments?q= — ILIKE sobre ticker y nombre: sin acentos ni trigramas (v2 los tiene, D-25).
+  // GET /instruments?q= — ILIKE sobre ticker y nombre, sin acentos ni trigramas (v2 los tiene, D-25).
+  // Las mismas entradas inválidas que v2 dan 400 (también un carácter de control, que Postgres no
+  // acepta en text: D-30), y q se busca como texto: %, _ y \ no son comodines.
   app.get('/instruments', route(async (req, res) => {
     const q = typeof req.query.q === 'string' ? req.query.q.trim() : '';
-    const limit = Number(req.query.limit ?? 20);
-    if (!q || q.length > 50 || !Number.isInteger(limit) || limit < 1 || limit > 50) {
-      res.status(400).json({ error: 'BAD_REQUEST', message: 'q (1 a 50 caracteres) y limit (1 a 50)' }); return;
+    const limit = req.query.limit === undefined ? 20 : Number(req.query.limit);
+    const cash = req.query.include_cash ?? 'false';
+    if (!q || q.length > 50 || /\p{Cc}/u.test(q) || !Number.isInteger(limit) || limit < 1 || limit > 50 || (cash !== 'true' && cash !== 'false')) {
+      res.status(400).json({ error: 'BAD_REQUEST', message: 'q (1 a 50 caracteres, sin caracteres de control), limit (1 a 50) e include_cash (true o false)' });
+      return;
     }
+    const pattern = `%${q.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
     const r = await pool.query(
       `SELECT id, ticker, name, type FROM instruments
-        WHERE (ticker ILIKE '%' || $1 || '%' OR name ILIKE '%' || $1 || '%') AND ($2 OR type <> 'MONEDA')
-        ORDER BY ticker LIMIT $3`, [q, req.query.include_cash === 'true', limit]);
+        WHERE (ticker ILIKE $1 OR name ILIKE $1) AND ($2 OR type <> 'MONEDA')
+        ORDER BY ticker LIMIT $3`, [pattern, cash === 'true', limit]);
     res.json({ query: q, results: r.rows });
   }));
 

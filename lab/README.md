@@ -15,12 +15,14 @@ Nada de esto toca el entregable: el servidor de staging y producción, su imagen
 | Prefijo | Variante | Qué es |
 |---|---|---|
 | `/v1` | **Z**, la línea base | [`lab/z/server.ts`](z/server.ts): el esquema de `database.sql` tal cual (solo claves primarias y foráneas) y `SUM … GROUP BY` sobre `orders` en cada request, con el dinero en `Number`. Es la de `src/naive/` del benchmark, con los mismos endpoints de lectura que A (`/portfolio/:userid`, `/orders/:id?userid=`, `/instruments?q=`) y el mismo JSON. |
-| `/v2` | **A**, el entregable | La imagen del release (`ghcr.io/dante0x95/cocos-challenge-a:v0.2.0`) tal cual, con su bootstrap. Acepta lo mismo que en producción, escrituras incluidas, y corre sus jobs. |
+| `/v2` | **A**, el entregable | La imagen del release (`ghcr.io/dante0x95/cocos-challenge-a:v0.2.0`) tal cual, con su bootstrap y la configuración del entregable. |
 | `/v3` | **C**, snapshot + delta | La misma imagen de A sobre una base con [`lab/c/snapshot.sql`](c/snapshot.sql): una caché del balance por usuario, publicada con el fold completo de A (`app.c_state_full`); la lectura parte del snapshot y aplica las órdenes ejecutadas después (`app.c_state`). Se republica cuando el delta llega a `K = 500`. Los snapshots se calientan después de la carga, antes de atender. |
 
-`/v1` y `/v3` son de solo lectura: el proxy responde `403` a todo lo que no es `GET` o `HEAD`. `/v2` deja pasar todo a A, como el entregable: una orden que entre por ahí cambia la base de A, no las otras dos, y desde ese momento ese usuario ya no da lo mismo en las tres (se vuelve a igualar con `LAB_RESET=1`, abajo).
+El lab es de solo lectura: el proxy responde `403` a todo lo que no es `GET` o `HEAD`, en los tres prefijos (crear y cancelar órdenes, `/internal`), antes de llegar a una API. Las tres bases quedan con el mismo dataset para siempre, y la imagen de A no se toca.
 
 **Qué coincide.** Para cualquier usuario, `/v2` y `/v3` responden el mismo JSON, y los dos coinciden con el oráculo de los tests (`test/oracle/fold.ts`). `/v1` coincide en cash, cantidades, reservas, precio, valor y valor total, pero no en `costo_total`, `costo_unitario`, `resultado` ni `rendimiento_pct` cuando hubo ventas: Z calcula el costo como el promedio de todas las compras, que es el error que el fold de A corrige ([D-09](../docs/decisiones.md#d-09)). Z tampoco tiene `balance_seq`, así que no podría reproducir el orden de ejecución de una LIMIT ejecutada días después de crearse. Es la vara, no una alternativa.
+
+**Z usa `Number` para el dinero, a propósito.** Es la excepción a la regla de enteros de [D-13](../docs/decisiones.md#d-13), acotada a `lab/z/`: la línea base del benchmark se definió así ("con el dinero en `number`", [`docs/decision-snapshot.md`](../docs/decision-snapshot.md)) y el lab la muestra tal cual. Con los importes de este dataset (cash de hasta ~10¹⁰ pesos con centavos), un `double` los representa sin error, y `check.ts` lo verifica: el cash, el valor y el total de Z son exactamente los de A, y su costo coincide con el promedio de compras calculado con enteros, con un margen de dos unidades en la última cifra. Por encima de 2⁵³ centavos (~9·10¹³ pesos), Z empezaría a redondear.
 
 ## Datos
 
@@ -36,13 +38,13 @@ Todo entra en una instancia de 2 GB ([`lab/compose.yml`](compose.yml)): tres Pos
 
 ## Probarlo en local
 
-Con Docker, sin la instancia ([`lab/e2e.sh`](e2e.sh)): construye la imagen de A con el Dockerfile del tag `v0.2.0` (la de GHCR es privada), genera el dataset si falta, levanta todo en el proyecto `cocos-lab-e2e` (puerto 8072), corre [`lab/check.ts`](check.ts) y lo baja con sus volúmenes. Tarda unos 4 minutos; `KEEP=1` lo deja levantado.
+Con Docker, sin la instancia ([`lab/e2e.sh`](e2e.sh)): construye la imagen de A con el Dockerfile del tag `v0.2.0` (la de GHCR es privada), genera el dataset si falta, levanta todo en el proyecto `cocos-lab-e2e` (puerto 8072), corre [`lab/check.ts`](check.ts) y lo baja con sus volúmenes. Tarda unos 6 minutos; `KEEP=1` lo deja levantado.
 
 ```bash
 LAB_GENERATOR=~/Documents/cocos/bench/gen/generate.ts lab/e2e.sh
 ```
 
-`check.ts` pide a las tres variantes el portfolio de las 3 ballenas y de 3 usuarios de cada cohorte, y falla si algo de lo de arriba no coincide. También: un usuario inexistente da `404` en las tres, `GET /orders/:id` y `/instruments` coinciden, y un `POST` da `403` en `/v1` y `/v3` y llega a A en `/v2`. Lo que midió en una Mac con Apple Silicon (milisegundos, la mediana de 5 requests seguidas):
+`check.ts` pide a las tres variantes el portfolio de las 3 ballenas y de 3 usuarios de cada cohorte, seis veces cada uno, y falla si algo de lo de arriba no coincide o si alguna de las seis no responde `200` con el mismo cuerpo que la primera. También: un usuario inexistente da `404` y un id inválido `400` en las tres; `GET /orders/:id` coincide; `/instruments` responde igual en `/v2` y `/v3`, y en `/v1` encuentra lo mismo por substring (sin acentos ni trigramas, que son de A), con `%` y `_` como texto; las entradas inválidas (`q` vacía o de más de 50, un carácter de control, `limit` fuera de rango) dan `400` en las tres; y crear, cancelar, `/internal` y `PUT`/`PATCH`/`DELETE` dan `403` en las tres sin cambiar el portfolio. Después, `e2e.sh` vuelve a levantar el lab sin borrar las bases, como un redeploy: ninguna se recarga, C vuelve a tener su `c_state` sobre el que reinstaló el bootstrap, y `check.ts` vuelve a pasar. Lo que midió en una Mac con Apple Silicon (milisegundos, la mediana de 5 requests seguidas):
 
 | `GET /portfolio/<id>` | Z (`/v1`) | A (`/v2`) | C (`/v3`) |
 |---|---|---|---|
@@ -95,7 +97,7 @@ Desplegar el commit actual ([`lab/deploy.sh`](deploy.sh)): copia el código (sol
 lab/deploy.sh
 ```
 
-Otras variables: `LAB_A_VERSION` elige el release de A (por defecto `v0.2.0`), `LAB_SITE=:80` sirve HTTP solo por la IP en vez de HTTPS por sslip.io, y `LAB_RESET=1` borra las tres bases antes de levantar (hace falta si cambió el dataset, o para descartar lo que se escribió por `/v2`).
+Otras variables: `LAB_A_VERSION` elige el release de A (por defecto `v0.2.0`), `LAB_SITE=:80` sirve HTTP solo por la IP en vez de HTTPS por sslip.io, y `LAB_RESET=1` borra las tres bases antes de levantar (hace falta si cambió el dataset).
 
 ## Operación
 

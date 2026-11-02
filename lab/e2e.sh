@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Prueba local del lab de punta a punta (issue #72), con Docker, sin la instancia: levanta
 # lab/compose.yml en un proyecto propio (cocos-lab-e2e, puertos 8072 y 8473), corre lab/check.ts
-# contra http://localhost:8072 y lo baja con sus volúmenes. Desde la raíz del repo:
+# contra http://localhost:8072, lo vuelve a levantar sin borrar las bases (como un redeploy: nada se
+# recarga y C sigue siendo C) y corre check.ts otra vez, y lo baja con sus volúmenes. Desde la raíz
+# del repo:
 #
 #   LAB_GENERATOR=<ruta a bench/gen/generate.ts> lab/e2e.sh
 #
@@ -37,4 +39,17 @@ compose up -d --build --remove-orphans || { compose logs --tail 40 load-z load-a
 echo "arriba en $(( $(date +%s) - T0 )) s"
 compose logs load-z load-a load-c | grep '\[load-'
 
+node_modules/.bin/tsx lab/check.ts "http://localhost:${LAB_HTTP_PORT}" "$LAB_DATA_DIR"
+
+# Un segundo arranque sin borrar las bases, como un redeploy: ninguna se recarga, el bootstrap
+# reinstala las funciones de A y la carga de C vuelve a poner las suyas, y todo sigue igual.
+echo "== segundo arranque, con las bases"
+compose up -d --remove-orphans || { compose logs --tail 40 load-z load-a load-c migrate-a migrate-c; exit 1; }
+for v in z a c; do
+  [ "$(compose logs "load-$v" | grep -c 'ya cargado')" = 1 ] || { echo "load-$v: el segundo arranque no encontró el dataset cargado" >&2; exit 1; }
+done
+[ "$(compose exec -T db-c psql -U postgres -d cocos -Atc "SELECT position('balance_snapshots' IN prosrc) > 0 FROM pg_proc WHERE oid = 'app.c_state(int)'::regprocedure")" = t ] \
+  || { echo "db-c: app.c_state no es el de C después del segundo arranque" >&2; exit 1; }
+compose exec -T db-a psql -U postgres -d cocos -Atc "SELECT count(*) FROM app.orders WHERE userid >= 1000" | grep -qx "$(sed -n 's/.*"orders": *\([0-9][0-9]*\).*/\1/p' "$LAB_DATA_DIR/manifest.json")" \
+  || { echo "db-a: la cantidad de órdenes del dataset cambió en el segundo arranque" >&2; exit 1; }
 node_modules/.bin/tsx lab/check.ts "http://localhost:${LAB_HTTP_PORT}" "$LAB_DATA_DIR"

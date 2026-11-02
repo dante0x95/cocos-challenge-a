@@ -126,8 +126,8 @@ services:
       retries: 20
     logging: *logging
 
-  # A como en el entregable (deploy/lightsail/compose.yml): acepta escrituras y corre sus jobs.
-  # Sin INTERNAL_TOKEN, los endpoints /internal no existen.
+  # A con la configuración del entregable (deploy/lightsail/compose.yml), sin INTERNAL_TOKEN: los
+  # endpoints /internal no existen. Las escrituras no llegan: el proxy les responde 403.
   api-a:
     <<: *api-a
     environment:
@@ -139,7 +139,7 @@ services:
       NODE_OPTIONS: --max-old-space-size=96
     depends_on: { load-a: { condition: service_completed_successfully } }
 
-  # C: la misma imagen sobre la base con snapshots. Sin jobs: v3 no acepta escrituras.
+  # C: la misma imagen sobre la base con snapshots. Sin jobs: nada escribe órdenes en v3.
   api-c:
     <<: *api-a
     environment:

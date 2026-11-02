@@ -6,13 +6,17 @@
 //     los de docs/api/operacion.md (test/unit/ops-commands, #55). Se corren los que preparan la
 //     instancia en `zsh -f -i` y en bash, con ssh y scp simulados (anotan sus argumentos, no
 //     conectan), y lab/deploy.sh setup tiene que llamarlos con la clave y el destino documentados.
+//   - Lo que lab/check.ts exige de cada variante (lab/check-lib.ts), con una historia chica de compra,
+//     venta y recompra a distinto precio: v2 contra el oráculo, v1 contra v2 y contra su propia
+//     definición de costo, y cada respuesta cronometrada. Con controles que la rompen.
 // La prueba de punta a punta del lab (las tres variantes con los mismos números) es lab/e2e.sh: con
-// Docker y el generador del benchmark, a mano.
+// Docker y el generador del benchmark, a mano. C contra Postgres real: test/db/lab-c.
 import { spawnSync } from 'node:child_process';
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
+import { compareA, compareTimed, compareZ, expectedA, expectedZ, parseRow } from '../../lab/check-lib.js';
 
 const ROOT = resolve(import.meta.dirname, '../..');
 const read = (p: string) => readFileSync(resolve(ROOT, p), 'utf8');
@@ -121,5 +125,54 @@ describe('comandos de lab/README.md', () => {
     const mutated = LAB_README.replace(/^export LIGHTSAIL_LAB_HOST /m, 'export ');
     expect(mutated).not.toBe(LAB_README);
     expect(problems(run('zsh', mutated)).join('\n')).toMatch(/falta LIGHTSAIL_LAB_HOST/);
+  });
+});
+
+describe('lo que exige lab/check.ts (lab/check-lib.ts)', () => {
+  // CASH_IN 100.000; BUY 10 @ 100; SELL 4 @ 120; BUY 5 @ 90; pendientes: SELL 2 @ 150 y BUY 1 @ 50.
+  // A (D-09): costo 1.000 → 600 al vender 4 de 10 → 1.050 al recomprar; cash 99.030.
+  // Z: promedio de todas las compras, 1.450 / 15 = 96,6667 por acción → 1.063,333333.
+  const rows = [
+    '1,66,1,10000000,0.01,MARKET,CASH_IN,FILLED,2026-10-01 10:00:00,1',
+    '2,7,1,10,100.00,MARKET,BUY,FILLED,2026-10-01 10:01:00,2',
+    '3,7,1,4,120.00,MARKET,SELL,FILLED,2026-10-02 10:00:00,3',
+    '4,7,1,5,90.00,MARKET,BUY,FILLED,2026-10-03 10:00:00,4',
+    '5,7,1,2,150.00,LIMIT,SELL,NEW,2026-10-04 10:00:00,',
+    '6,7,1,1,50.00,LIMIT,BUY,NEW,2026-10-04 10:01:00,',
+    '7,7,1,3,80.00,LIMIT,BUY,CANCELLED,2026-10-04 10:02:00,',
+  ].map(parseRow);
+  const position = {
+    instrumentid: 7, ticker: 'ABC', name: 'ABC S.A.', qty: '11', acciones_reservadas: '2', acciones_disponibles: '9',
+    price: '110.00', price_date: '2026-10-23', valor: '1210.00', retorno_diario_pct: '1.00', inconsistent: false,
+  };
+  const head = { userid: 1, valor_total: '100240.00', cash: { neto: '99030.00', reservado: '50.00', disponible: '98980.00' }, valuation_complete: true, has_inconsistent_history: false };
+  const a = { ...head, positions: [{ ...position, costo_total: '1050.000000', costo_unitario: '95.4545', resultado: '160.00', rendimiento_pct: '15.24' }] };
+  const z = { ...head, positions: [{ ...position, costo_total: '1063.333333', costo_unitario: '96.6667', resultado: '146.67', rendimiento_pct: '13.79' }] };
+  const withPosition = (p: any, change: Record<string, unknown>) => ({ ...p, positions: [{ ...p.positions[0], ...change }] });
+
+  it('v2 que coincide con el oráculo pasa; con un centavo de costo, una reserva o el cash de otra forma, falla', () => {
+    expect(compareA(1, a, expectedA(rows))).toEqual([]);
+    expect(compareA(1, withPosition(a, { costo_total: '1050.000001' }), expectedA(rows))).not.toEqual([]);
+    expect(compareA(1, withPosition(a, { acciones_reservadas: '0' }), expectedA(rows))).not.toEqual([]);
+    expect(compareA(1, { ...a, cash: { ...a.cash, neto: '99030.01' } }, expectedA(rows))).not.toEqual([]);
+    expect(compareA(1, { ...a, positions: [] }, expectedA(rows))).not.toEqual([]);
+  });
+
+  it('v1 con el costo del promedio de compras pasa; con el costo en cero, con el de A o con otro valor, falla', () => {
+    expect(compareZ(1, z, a, expectedZ(rows))).toEqual([]);
+    expect(compareZ(1, withPosition(z, { costo_total: '0.000000' }), a, expectedZ(rows))).not.toEqual([]);
+    expect(compareZ(1, withPosition(z, { costo_total: '1050.000000' }), a, expectedZ(rows))).not.toEqual([]);
+    expect(compareZ(1, withPosition(z, { costo_unitario: '95.4545' }), a, expectedZ(rows))).not.toEqual([]);
+    expect(compareZ(1, withPosition(z, { resultado: '160.00' }), a, expectedZ(rows))).not.toEqual([]);
+    expect(compareZ(1, withPosition(z, { rendimiento_pct: '15.24' }), a, expectedZ(rows))).not.toEqual([]);
+    expect(compareZ(1, withPosition(z, { valor: '1210.01' }), a, expectedZ(rows))).not.toEqual([]);
+    expect(compareZ(1, { ...z, valor_total: '100240.01' }, a, expectedZ(rows))).not.toEqual([]);
+  });
+
+  it('cada respuesta cronometrada tiene que ser 200 con el mismo cuerpo que la primera', () => {
+    expect(compareTimed('x', [{ status: 200, text: '{}' }, { status: 200, text: '{}' }])).toEqual([]);
+    expect(compareTimed('x', [{ status: 200, text: '{}' }, { status: 503, text: '{}' }])).not.toEqual([]);
+    expect(compareTimed('x', [{ status: 200, text: '{}' }, { status: 200, text: '{"otro":1}' }])).not.toEqual([]);
+    expect(compareTimed('x', [{ status: 500, text: '{}' }, { status: 500, text: '{}' }])).not.toEqual([]);
   });
 });

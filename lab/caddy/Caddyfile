@@ -4,17 +4,15 @@
 # LAB_SITE es la dirección del sitio: `:80` (HTTP por la IP, el default) o un nombre como
 # <ip con guiones>.sslip.io, para el que Caddy pide el certificado y sirve HTTPS (puertos 80 y 443).
 #
-# v1 (Z) y v3 (C) son de solo lectura: lo que no es GET ni HEAD responde 403 acá, antes de llegar a
-# la API. v2 es la imagen de A tal cual y acepta lo mismo que el entregable.
+# El lab es de solo lectura (issue #72): lo que no es GET ni HEAD responde 403 acá, en los tres
+# prefijos, antes de llegar a una API. Así las tres bases siguen con el mismo dataset, y la imagen
+# de A (v2) atiende tal cual, sin cambios.
 
 {$LAB_SITE::80} {
 	route {
-		@write {
-			not method GET HEAD
-			not path /v2/*
-		}
+		@write not method GET HEAD
 		header @write Content-Type application/json
-		respond @write `{"error":"FORBIDDEN","message":"v1 y v3 son de solo lectura"}` 403
+		respond @write `{"error":"FORBIDDEN","message":"el lab es de solo lectura"}` 403
 
 		handle_path /v1/* {
 			reverse_proxy api-z:3000

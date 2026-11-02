@@ -52,7 +52,7 @@ pnpm install
 pnpm test
 ```
 
-Basta con la base (`db`). Las pruebas se conectan a `localhost:5432` como `postgres`; si la base quedó en otro puerto (`DB_PORT`), se lo indica `TEST_PG_URL`, por ejemplo `TEST_PG_URL=postgresql://postgres:postgres@localhost:55432/postgres pnpm test`.
+Basta con la base (`db`). Si antes se levantó todo con `docker compose up`, apagar la API (`docker compose stop api`): una prueba cuenta las conexiones del rol `api` y contaría también las de ese contenedor. Las pruebas se conectan a `localhost:5432` como `postgres`; si la base quedó en otro puerto (`DB_PORT`), se lo indica `TEST_PG_URL`, por ejemplo `TEST_PG_URL=postgresql://postgres:postgres@localhost:55432/postgres pnpm test`.
 
 Crean su propia base `cocos_test` con el mismo bootstrap que producción. Las suites: unitarias, el test funcional de órdenes por HTTP, invariantes de la base, concurrencia con dos conexiones reales, propiedad contra un oráculo independiente y bootstrap. Qué demuestra cada una: [`docs/testing.md`](docs/testing.md).
 

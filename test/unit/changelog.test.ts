@@ -77,7 +77,9 @@ function problems(text: string, tags: string[], prsSinceLastTag: number[]): stri
   const v030 = all.find((s) => s.version === 'v0.3.0');
   if (v030) {
     const before = subsection(v030.body, 'Antes de publicar');
-    if (!before || !/\.env\b/.test(before) || !before.includes('(docs/api/operacion.md#secretos-como-archivos)')) {
+    // La instrucción, no solo la mención: "Borrar los `.env` de cada entorno si ningún `compose*.yml` usa `env_file`".
+    const cleanup = /Borrar los `\.env` de cada entorno si ningún `compose\*\.yml` usa `env_file`/;
+    if (!before || !cleanup.test(before) || !before.includes('(docs/api/operacion.md#secretos-como-archivos), paso 4')) {
       out.push('v0.3.0: "Antes de publicar" no pide borrar los .env según "Secretos como archivos"');
     }
   }
@@ -116,7 +118,7 @@ describe('CHANGELOG.md', () => {
     expect(problems(withoutSetup, ['v0.1.0'], [])).toContain('v0.2.0: "Antes de publicar" no pide volver a correr setup.sh según "Secretos como archivos"');
   });
 
-  it('control: la próxima versión después de v0.2.0 como v0.2.1, o v0.3.0 sin el borrado de los .env, falla', () => {
+  it('control: la próxima versión después de v0.2.0 como v0.2.1, o v0.3.0 sin el borrado de los .env o pidiendo conservarlos, falla', () => {
     const v021 = '## v0.2.1 — sin publicar\n\n### Antes de publicar\n\nNada.\n';
     expect(problems(v021, ['v0.2.0'], [])).toEqual(expect.arrayContaining([
       'v0.2.1 no existe: después de v0.2.0 sigue v0.3.0',
@@ -125,6 +127,10 @@ describe('CHANGELOG.md', () => {
     const withoutCleanup = CHANGELOG.split('\n').filter((l) => !l.startsWith('Después de publicar: v0.3.0')).join('\n');
     expect(withoutCleanup).not.toBe(CHANGELOG);
     expect(problems(withoutCleanup, tags, [])).toContain('v0.3.0: "Antes de publicar" no pide borrar los .env según "Secretos como archivos"');
+    // Con la mención y el link, pero la instrucción al revés.
+    const keep = CHANGELOG.replace('Borrar los `.env` de cada entorno si ningún', 'Conservar los `.env` de cada entorno aunque ningún');
+    expect(keep).not.toBe(CHANGELOG);
+    expect(problems(keep, tags, [])).toContain('v0.3.0: "Antes de publicar" no pide borrar los .env según "Secretos como archivos"');
   });
 
   it('control: un PR nuevo sin nombrar, o una versión publicada sin fecha, falla', () => {

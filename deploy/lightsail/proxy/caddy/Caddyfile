@@ -4,8 +4,25 @@
 #
 # lb_try_duration: mientras el deploy recrea el contenedor de la API (unos segundos), la
 # conexión falla; Caddy reintenta hasta 30 s en vez de responder 502 y la request espera.
+#
+# access_log: una línea JSON por request (IP del cliente, método, URI, status, duración y
+# headers) en el log del contenedor, que rota en 3 × 10 MB (proxy/compose.yml). El log de la API
+# no tiene la IP: este es el que dice quién llama (#85). Caddy redacta Authorization y Cookie;
+# X-Internal-Token, el secreto de /internal, se borra acá.
+
+(access_log) {
+	log {
+		format filter {
+			wrap json
+			fields {
+				request>headers>X-Internal-Token delete
+			}
+		}
+	}
+}
 
 18-227-203-30.sslip.io {
+	import access_log
 	reverse_proxy api-production:3000 {
 		lb_try_duration 30s
 		lb_try_interval 250ms
@@ -13,6 +30,7 @@
 }
 
 staging.18-227-203-30.sslip.io {
+	import access_log
 	reverse_proxy api-staging:3000 {
 		lb_try_duration 30s
 		lb_try_interval 250ms

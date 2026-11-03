@@ -6,7 +6,11 @@ Una sección por versión publicada (un GitHub Release `vX.Y.Z`, que despliega e
 
 ### Antes de publicar
 
-Nada.
+- El log de accesos del proxy ([#86](https://github.com/dante0x95/cocos-challenge-a/pull/86)) no lo aplica el release: se aplica con `setup.sh` ([La primera vez](docs/api/operacion.md#la-primera-vez), paso 2). Si ya se corrió después del merge, no hace falta nada más.
+
+### Operación y deploy
+
+- **El log del proxy dice quién llama a la API** ([#86](https://github.com/dante0x95/cocos-challenge-a/pull/86)): Caddy escribe una línea por request de producción y de staging con la IP del cliente, la URI, el status y el navegador. El log de la API no tenía la IP. `X-Internal-Token` no se escribe, y el log rota en 3 × 10 MB ([operación](docs/api/operacion.md#operación)).
 
 ### Documentación
 

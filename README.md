@@ -10,6 +10,8 @@ API en Node.js + Express + PostgreSQL que resuelve el [challenge de backend](htt
 | `GET /orders/:id?userid=` · `POST /orders/:id/cancel` | Consulta de una orden propia y cancelación de una orden `NEW` — [contrato](docs/api/orders.md) |
 | `GET /health` · `/internal/*` | Salud y operación (executor de LIMIT, limpieza de idempotencia) — [contrato](docs/api/operacion.md) |
 
+Cada requisito del enunciado, con dónde se cumple (contrato, decisión, código y prueba): [`docs/enunciado.md`](docs/enunciado.md).
+
 ## Correr
 
 Hace falta Docker con Compose v2. Para correr la API sin Docker o las pruebas, también Node.js 22 o más nuevo y pnpm 10 (`corepack enable` instala la versión que fija `package.json`).
@@ -134,7 +136,7 @@ src/
   http/           errores (SQLSTATE → HTTP) y log por request
   jobs/           limpieza periódica de claves de idempotencia
 test/             unit · db · concurrency · property · bootstrap · oracle (fold independiente)
-docs/             decisiones · benchmark del balance y su resumen (comparaciones) · pruebas · contratos de la API
+docs/             enunciado punto por punto · decisiones · benchmark del balance y su resumen (comparaciones) · pruebas · contratos de la API
 rest-client/      colección de requests (REST Client de VS Code)
 postman/          colección de Postman y sus environments: local · staging · production
 deploy/           gate del workflow, verificaciones y ensayos · lightsail/: el servidor (compose, Caddy, setup y deploy)

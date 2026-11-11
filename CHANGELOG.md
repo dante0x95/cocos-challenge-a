@@ -11,6 +11,7 @@ Nada.
 ### Documentación
 
 - **El README alcanza para correr el proyecto en local** ([#84](https://github.com/dante0x95/cocos-challenge-a/pull/84)): qué hay que instalar, el clon, qué tiene que devolver `GET /portfolio/1`, qué hacer si los puertos 3000 o 5432 están ocupados (`API_PORT`, `DB_PORT` y `TEST_PG_URL`) y la estructura al día (migraciones `010` y `011`, `docs/comparaciones.md`). v0.3.0 queda con su fecha.
+- **El enunciado, punto por punto** ([#88](https://github.com/dante0x95/cocos-challenge-a/pull/88)): `docs/enunciado.md` recorre cada requisito del challenge y enlaza dónde se cumple (contrato, decisión, código y prueba). El README lo enlaza.
 
 ## v0.3.0 — 2026-11-02
 
